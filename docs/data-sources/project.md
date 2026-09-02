@@ -45,3 +45,22 @@ output "app_project_id" {
 - `github_repo_full_name` (String) GitHub repository the project maps to, as `owner/repo`, if any.
 - `lock_version` (Number) Optimistic-locking version the API bumps on every change.
 - `name` (String) Display name.
+- `self_healing` (Attributes) Resolved self-healing control-loop configuration (armed flag and thresholds). Reported only when the token's user is a workspace admin; null otherwise. (see [below for nested schema](#nestedatt--self_healing))
+
+<a id="nestedatt--self_healing"></a>
+### Nested Schema for `self_healing`
+
+Read-Only:
+
+- `absolute_floor` (Number) Required errors per minute floor.
+- `armed` (Boolean) Whether live rollback is armed.
+- `bake_minutes` (Number) Eligibility window after a deploy, in minutes.
+- `baseline_multiplier` (Number) Required multiple of the baseline error rate.
+- `burn_rate` (Number) Burn rate that counts as severe.
+- `consecutive_error_limit` (Number) Metrics-query failures tolerated before inconclusive.
+- `cooldown_minutes` (Number) Cooldown between actions, in minutes.
+- `long_window_minutes` (Number) Long burn-rate window in minutes.
+- `max_rollbacks_per_hour` (Number) Per-app blast-radius cap.
+- `recovery_window_minutes` (Number) Post-rollback grace period, in minutes.
+- `short_window_minutes` (Number) Short burn-rate window in minutes.
+- `sustain_count` (Number) Consecutive trips required before acting.

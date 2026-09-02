@@ -110,18 +110,20 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				MarkdownDescription: "Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates.",
 				Computed:            true,
 			},
+			"self_healing": selfHealingSchema(),
 		},
 	}
 }
 
 func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	var plan projectModel
+	var plan, config projectModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	fields := projectFields(ctx, &plan, &resp.Diagnostics)
+	fields := projectFields(ctx, &plan, config.SelfHealing, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -161,14 +163,15 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 }
 
 func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan, state projectModel
+	var plan, state, config projectModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	fields := projectFields(ctx, &plan, &resp.Diagnostics)
+	fields := projectFields(ctx, &plan, config.SelfHealing, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}

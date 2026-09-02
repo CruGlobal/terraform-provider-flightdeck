@@ -170,3 +170,21 @@ func asInt64(v any) (int64, bool) {
 	}
 	return 0, false
 }
+
+func asFloat64(v any) (float64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return t, true
+	case int64:
+		return float64(t), true
+	case int:
+		return float64(t), true
+	case json.Number:
+		f, err := t.Float64()
+		return f, err == nil
+	case string:
+		f, err := strconv.ParseFloat(t, 64)
+		return f, err == nil
+	}
+	return 0, false
+}

@@ -40,8 +40,10 @@ type Project struct {
 	GithubRepoFullName *string
 	LockVersion        int64
 	LeadID             int64
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	// SelfHealing holds the stored jsonb overrides; reads resolve defaults.
+	SelfHealing map[string]any
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 	// Deleting mirrors projects.deleting_at: the row still exists but every
 	// /api/v1 lookup goes through .not_deleting and 404s.
 	Deleting bool
@@ -160,7 +162,85 @@ func (s *Server) serializeProject(p *Project, detail bool) map[string]any {
 	if detail {
 		out["urls"] = []any{}
 	}
+	// FD-789: the resolved self-healing config is a workspace-admin read.
+	if s.workspaceAdmin {
+		out["self_healing"] = resolveSelfHealing(p.SelfHealing)
+	}
 	return out
+}
+
+// SelfHealingDefaults mirrors SelfHealing::Config::DEFAULTS.
+var SelfHealingDefaults = map[string]any{
+	"armed": false, "bake_minutes": int64(20), "baseline_multiplier": 5.0, "absolute_floor": 5.0,
+	"long_window_minutes": int64(60), "short_window_minutes": int64(5), "burn_rate": 14.4,
+	"sustain_count": int64(3), "consecutive_error_limit": int64(3), "cooldown_minutes": int64(30),
+	"max_rollbacks_per_hour": int64(1), "recovery_window_minutes": int64(15),
+}
+
+var selfHealingDecimalKeys = []string{"baseline_multiplier", "absolute_floor", "burn_rate"}
+
+func resolveSelfHealing(overrides map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range SelfHealingDefaults {
+		out[k] = v
+	}
+	for k, v := range overrides {
+		out[k] = v
+	}
+	return out
+}
+
+// ArmSelfHealing flips the console-only armed flag directly (no HTTP).
+func (s *Server) ArmSelfHealing(projectID int64, armed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.projects().byID[projectID]; p != nil {
+		if p.SelfHealing == nil {
+			p.SelfHealing = map[string]any{}
+		}
+		p.SelfHealing["armed"] = armed
+	}
+}
+
+// applySelfHealing mirrors the FD-789 write rules: workspace-admin only,
+// thresholds writable, `armed` refused, unknown keys refused, values coerced
+// like SelfHealing::Config (integer/decimal per key).
+func (s *Server) applySelfHealing(p *Project, raw any) (int, string, string) {
+	if !s.workspaceAdmin {
+		return http.StatusForbidden, "forbidden", "Workspace admin role required to change self-healing configuration."
+	}
+	submitted, isMap := raw.(map[string]any)
+	if !isMap {
+		return http.StatusUnprocessableEntity, "invalid_attribute", "self_healing must be an object of threshold => number"
+	}
+	if _, has := submitted["armed"]; has {
+		return http.StatusUnprocessableEntity, "invalid_attribute",
+			"self_healing.armed cannot be set through the API; arming is console-only"
+	}
+	next := map[string]any{}
+	for k, v := range p.SelfHealing {
+		next[k] = v
+	}
+	for k, v := range submitted {
+		if _, known := SelfHealingDefaults[k]; !known {
+			return http.StatusUnprocessableEntity, "invalid_attribute", "unknown self_healing key: " + k
+		}
+		if contains(selfHealingDecimalKeys, k) {
+			f, ok := asFloat64(v)
+			if !ok {
+				return http.StatusUnprocessableEntity, "invalid_attribute", "self_healing." + k + " must be a number"
+			}
+			next[k] = f
+		} else {
+			i, ok := asInt64(v)
+			if !ok {
+				return http.StatusUnprocessableEntity, "invalid_attribute", "self_healing." + k + " must be an integer"
+			}
+			next[k] = i
+		}
+	}
+	p.SelfHealing = next
+	return 0, "", ""
 }
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
@@ -243,6 +323,11 @@ func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, strin
 		}
 		for k, val := range submitted {
 			p.Features[k] = truthy(val)
+		}
+	}
+	if v, ok := attrs["self_healing"]; ok {
+		if status, code, msg := s.applySelfHealing(p, v); status != 0 {
+			return status, code, msg
 		}
 	}
 	if v, ok := attrs["github_repo_full_name"]; ok {

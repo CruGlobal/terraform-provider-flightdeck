@@ -26,6 +26,36 @@ type Project struct {
 	LockVersion        int64           `json:"lock_version"`
 	CreatedAt          string          `json:"created_at"`
 	UpdatedAt          string          `json:"updated_at"`
+	// SelfHealing is the resolved self-healing control-loop config (armed +
+	// every threshold with defaults applied). The API reports it only to
+	// workspace admins, so it is nil for other tokens.
+	SelfHealing *SelfHealingConfig `json:"self_healing,omitempty"`
+}
+
+// SelfHealingConfig mirrors SelfHealing::Config#to_h. Armed is read-only over
+// the API (arming stays console-only); the thresholds are writable by
+// workspace admins through the project's `self_healing` key.
+type SelfHealingConfig struct {
+	Armed                 bool    `json:"armed"`
+	BakeMinutes           int64   `json:"bake_minutes"`
+	BaselineMultiplier    float64 `json:"baseline_multiplier"`
+	AbsoluteFloor         float64 `json:"absolute_floor"`
+	LongWindowMinutes     int64   `json:"long_window_minutes"`
+	ShortWindowMinutes    int64   `json:"short_window_minutes"`
+	BurnRate              float64 `json:"burn_rate"`
+	SustainCount          int64   `json:"sustain_count"`
+	ConsecutiveErrorLimit int64   `json:"consecutive_error_limit"`
+	CooldownMinutes       int64   `json:"cooldown_minutes"`
+	MaxRollbacksPerHour   int64   `json:"max_rollbacks_per_hour"`
+	RecoveryWindowMinutes int64   `json:"recovery_window_minutes"`
+}
+
+// SelfHealingThresholdKeys are the writable self_healing keys, in the order
+// SelfHealing::Config::DEFAULTS declares them. "armed" is deliberately absent.
+var SelfHealingThresholdKeys = []string{
+	"bake_minutes", "baseline_multiplier", "absolute_floor", "long_window_minutes",
+	"short_window_minutes", "burn_rate", "sustain_count", "consecutive_error_limit",
+	"cooldown_minutes", "max_rollbacks_per_hour", "recovery_window_minutes",
 }
 
 // ResourceID implements Identified.

@@ -138,12 +138,15 @@ func (p *flightdeckProvider) Configure(ctx context.Context, req provider.Configu
 func (p *flightdeckProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewProjectResource,
+		NewStateResource,
+		NewLabelResource,
 	}
 }
 
 func (p *flightdeckProvider) DataSources(_ context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
 		NewProjectDataSource,
+		NewStatesDataSource,
 	}
 }
 

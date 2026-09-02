@@ -152,3 +152,21 @@ func asString(v any) string {
 }
 
 func iso(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+
+func asInt64(v any) (int64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return int64(t), true
+	case int64:
+		return t, true
+	case int:
+		return int64(t), true
+	case json.Number:
+		i, err := t.Int64()
+		return i, err == nil
+	case string:
+		i, err := strconv.ParseInt(t, 10, 64)
+		return i, err == nil
+	}
+	return 0, false
+}

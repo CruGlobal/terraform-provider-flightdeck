@@ -49,8 +49,6 @@ type Project struct {
 
 type projectStore struct {
 	byID map[int64]*Project
-	// onCreate hooks let the state/label files seed a new project's defaults.
-	onCreate []func(s *Server, p *Project)
 }
 
 func init() {
@@ -108,14 +106,6 @@ func (s *Server) DeleteProjectOutOfBand(id int64) {
 	if p := s.projects().byID[id]; p != nil {
 		p.Deleting = true
 	}
-}
-
-// OnProjectCreated registers a hook run for every project created through the
-// API or AddProject (used by the states/labels fakes to seed defaults).
-func (s *Server) OnProjectCreated(fn func(s *Server, p *Project)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.projects().onCreate = append(s.projects().onCreate, fn)
 }
 
 // liveProject resolves a project the way the API does: .not_deleting.find.
@@ -263,7 +253,7 @@ func (s *Server) addProjectLocked(attrs map[string]any) *Project {
 		return nil
 	}
 	s.projects().byID[p.ID] = p
-	for _, hook := range s.projects().onCreate {
+	for _, hook := range s.projectHooks {
 		hook(s, p)
 	}
 	return p
@@ -283,7 +273,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			return status, map[string]any{"error": msg, "code": code}
 		}
 		s.projects().byID[p.ID] = p
-		for _, hook := range s.projects().onCreate {
+		for _, hook := range s.projectHooks {
 			hook(s, p)
 		}
 		return http.StatusCreated, s.serializeProject(p, true)

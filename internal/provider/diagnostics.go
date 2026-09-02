@@ -33,12 +33,18 @@ func addAPIError(diags *diag.Diagnostics, summary string, err error) {
 }
 
 // addStaleError reports a lost optimistic-locking race. The provider never
-// retries over the other writer's change; the user re-plans to see it.
-func addStaleError(diags *diag.Diagnostics, what string, stateVersion int64, current *int64) {
+// retries over the other writer's change; the user re-plans to see it. The
+// server's own message is quoted verbatim so a 409 that turns out to be
+// something else (a uniqueness conflict on a deployment without error codes)
+// is still readable.
+func addStaleError(diags *diag.Diagnostics, what string, stateVersion int64, current *int64, err error) {
 	detail := fmt.Sprintf("%s was changed outside of Terraform since the last refresh (state has lock_version %d", what, stateVersion)
 	if current != nil {
 		detail += fmt.Sprintf(", the server now has %d", *current)
 	}
 	detail += "). Nothing was overwritten. Run `terraform plan` again to pick up the current values, then re-apply."
+	if apiErr, ok := client.AsError(err); ok && apiErr.Message != "" {
+		detail += "\n\nThe API said: " + apiErr.Message
+	}
 	diags.AddError(what+" modified outside of Terraform", detail)
 }

@@ -398,3 +398,90 @@ func mustInt(s string) int64 {
 	v, _ := strconv.ParseInt(s, 10, 64)
 	return v
 }
+
+func TestProject_archivedSurvivesImportWithoutADefault(t *testing.T) {
+	env := newTestEnv(t, "project")
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `
+  name     = "Archived"
+  archived = true`),
+				Check: resource.TestCheckResourceAttr(projectRes, "archived", "true"),
+			},
+			{
+				ResourceName:            projectRes,
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"features"},
+			},
+			{
+				// An imported (or existing) archived project whose configuration
+				// says nothing about `archived` must not be unarchived by a plan.
+				Config: projectConfig(env, identifier, `  name = "Archived"`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+				Check: resource.TestCheckResourceAttr(projectRes, "archived", "true"),
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name     = "Archived"
+  archived = false`),
+				Check: resource.TestCheckResourceAttr(projectRes, "archived", "false"),
+			},
+		},
+	})
+}
+
+func TestProject_featureOverrideIsADiffNotAnError(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	// The server keeps `incidents` off for every project (a plan-gated toggle).
+	env.fake.ForceFeature("incidents", false)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `
+  name = "Gated"
+  features = {
+    intake    = true
+    incidents = true
+  }`),
+				// The apply succeeds (state records the request) with a warning,
+				// and the next plan shows the server's override as a diff.
+				ExpectNonEmptyPlan: true,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "features.intake", "true"),
+					resource.TestCheckResourceAttr(projectRes, "features.incidents", "true"),
+				),
+			},
+		},
+	})
+}
+
+func TestProject_staleDiagnosticQuotesTheServer(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	var id string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `  name = "Quoted"`),
+				Check:  captureAttr(projectRes, "id", &id),
+			},
+			{
+				PreConfig: func() {
+					env.fake.OnNextRequest("PATCH", "/api/v1/projects/"+id, func() {
+						env.fake.TouchProject(mustInt(id), "Won by partner")
+					})
+				},
+				Config:      projectConfig(env, identifier, `  name = "Quoted v2"`),
+				ExpectError: regexMust(`(?s)The API said:.*modified by someone else`),
+			},
+		},
+	})
+}

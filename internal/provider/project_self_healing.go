@@ -129,9 +129,9 @@ func selfHealingToObject(cfg *client.SelfHealingConfig, diags *diag.Diagnostics)
 	return obj
 }
 
-// selfHealingFields returns the thresholds to send, or nil when the block is
-// not configured (null/unknown). Only known, non-null thresholds are sent;
-// `armed` never is.
+// selfHealingFields returns the thresholds to send from the CONFIGURED block,
+// or nil when the configuration has no block (null/unknown). Only known,
+// non-null thresholds are sent; `armed` never is.
 func selfHealingFields(ctx context.Context, block types.Object, diags *diag.Diagnostics) map[string]any {
 	if block.IsNull() || block.IsUnknown() {
 		return nil

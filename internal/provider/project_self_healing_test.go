@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -178,4 +179,47 @@ data "flightdeck_project" "x" {
 			},
 		},
 	})
+}
+
+func TestProjectSelfHealing_unrelatedUpdateDoesNotRewriteThresholds(t *testing.T) {
+	env := newTestEnv(t, "self_healing")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// Admin token: thresholds land in state.
+				Config: projectConfig(env, identifier, `
+  name = "Thresholds"
+  self_healing = {
+    bake_minutes = 30
+  }`),
+				Check: resource.TestCheckResourceAttr(projectRes, "self_healing.bake_minutes", "30"),
+			},
+			{
+				// Block removed from configuration and the project renamed: the
+				// PATCH must carry the rename only.
+				Config: projectConfig(env, identifier, `  name = "Thresholds renamed"`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "name", "Thresholds renamed"),
+					// State still knows the thresholds (read back, not rewritten).
+					resource.TestCheckResourceAttr(projectRes, "self_healing.bake_minutes", "30"),
+				),
+			},
+		},
+	})
+	patches := env.fake.RequestsMatching("PATCH", "/api/v1/projects/")
+	if len(patches) != 1 {
+		t.Fatalf("expected exactly one PATCH (the rename), got %d", len(patches))
+	}
+	var body map[string]map[string]any
+	if err := json.Unmarshal(patches[0].Body, &body); err != nil {
+		t.Fatalf("PATCH body: %v", err)
+	}
+	if _, has := body["project"]["self_healing"]; has {
+		t.Fatalf("rename PATCH rewrote self_healing: %s", patches[0].Body)
+	}
+	if body["project"]["name"] != "Thresholds renamed" {
+		t.Fatalf("PATCH body = %s", patches[0].Body)
+	}
 }

@@ -119,7 +119,13 @@ func stringPointerValue(s *string) types.String {
 // sent; description and github_repo_full_name are sent as null when unset so
 // removing them from configuration clears them server-side. features is sent
 // only when configured: an absent block means "not managed here".
-func projectFields(ctx context.Context, plan *projectModel, diags *diag.Diagnostics) client.Fields {
+//
+// configSelfHealing is the self_healing block as written in CONFIGURATION,
+// not the plan: once an admin token has read the block, the plan carries the
+// prior state's thresholds (UseStateForUnknown) even when the configuration
+// says nothing about them, and sending those back would turn every unrelated
+// project change into a self-healing write.
+func projectFields(ctx context.Context, plan *projectModel, configSelfHealing types.Object, diags *diag.Diagnostics) client.Fields {
 	fields := client.Fields{
 		"name":       plan.Name.ValueString(),
 		"identifier": plan.Identifier.ValueString(),
@@ -141,10 +147,10 @@ func projectFields(ctx context.Context, plan *projectModel, diags *diag.Diagnost
 		diags.Append(plan.Features.ElementsAs(ctx, &features, false)...)
 		fields["features"] = features
 	}
-	// Only sent when the block is configured with at least one known
-	// threshold, so a token without workspace-admin rights that leaves the
-	// block alone never trips the admin gate.
-	if thresholds := selfHealingFields(ctx, plan.SelfHealing, diags); len(thresholds) > 0 {
+	// Only sent when the block is configured with at least one threshold, so a
+	// token without workspace-admin rights that leaves the block alone never
+	// trips the admin gate, and a rename never rewrites thresholds.
+	if thresholds := selfHealingFields(ctx, configSelfHealing, diags); len(thresholds) > 0 {
 		fields["self_healing"] = thresholds
 	}
 	return fields

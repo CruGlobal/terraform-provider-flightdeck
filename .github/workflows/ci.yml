@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, whatever its base: resources land as stacked PRs
+  # (each based on the previous one) so a base-branch filter would leave all
+  # but the first unchecked until they are retargeted.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read

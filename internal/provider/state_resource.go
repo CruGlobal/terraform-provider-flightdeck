@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -11,16 +10,13 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
-
-// hexColorPattern mirrors State::HEX_COLOR / Label::HEX_COLOR.
-var hexColorPattern = regexp.MustCompile(`^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
 
 var (
 	_ resource.Resource                = &stateResource{}
@@ -36,14 +32,14 @@ type stateResource struct {
 }
 
 type stateModel struct {
-	ID          types.Int64  `tfsdk:"id"`
-	ProjectID   types.Int64  `tfsdk:"project_id"`
-	Name        types.String `tfsdk:"name"`
-	Group       types.String `tfsdk:"group"`
-	Color       types.String `tfsdk:"color"`
-	Default     types.Bool   `tfsdk:"default"`
-	Position    types.Int64  `tfsdk:"position"`
-	LockVersion types.Int64  `tfsdk:"lock_version"`
+	ID          types.Int64   `tfsdk:"id"`
+	ProjectID   types.Int64   `tfsdk:"project_id"`
+	Name        types.String  `tfsdk:"name"`
+	Group       types.String  `tfsdk:"group"`
+	Color       hexColorValue `tfsdk:"color"`
+	Default     types.Bool    `tfsdk:"default"`
+	Position    types.Int64   `tfsdk:"position"`
+	LockVersion types.Int64   `tfsdk:"lock_version"`
 }
 
 func stateToModel(s *client.State) stateModel {
@@ -52,7 +48,7 @@ func stateToModel(s *client.State) stateModel {
 		ProjectID:   types.Int64Value(s.ProjectID),
 		Name:        types.StringValue(s.Name),
 		Group:       types.StringValue(s.Group),
-		Color:       types.StringValue(s.Color),
+		Color:       hexColorValue{StringValue: types.StringValue(s.Color)},
 		Default:     types.BoolValue(s.Default),
 		Position:    types.Int64Value(s.Position),
 		LockVersion: types.Int64Value(s.LockVersion),
@@ -91,8 +87,13 @@ func (r *stateResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"`flightdeck_states` data source to see them, or import one to manage it. New states are appended to the " +
 			"end of their group unless `position` is set. Exactly one state per project is the default: setting " +
 			"`default = true` here clears it on whichever state had it.\n\n" +
-			"A state that still has work items, or that is the project default, cannot be deleted; the API rejects " +
-			"the delete and the error is reported.\n\n" +
+			"A state that still has work items cannot be deleted; the API rejects the delete and the error is " +
+			"reported. A project always has a default state, so the API also refuses to delete the current default: " +
+			"destroying a `flightdeck_state` that is the default leaves it in place on the server and removes it from " +
+			"Terraform state with a warning. Make another state the default first if it should really go.\n\n" +
+			"Making a state the default bumps the previous default's `lock_version` on the server. If one apply both " +
+			"moves the default to a state and edits the state that had it, the edit can fail as a stale write; change " +
+			"the default in one apply and edit the old default in the next, or add `depends_on` so the edit follows.\n\n" +
 			"Import by numeric id: `terraform import flightdeck_state.done 17`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
@@ -116,7 +117,8 @@ func (r *stateResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Validators:          []validator.String{stringvalidator.OneOf(client.StateGroups...)},
 			},
 			"color": schema.StringAttribute{
-				MarkdownDescription: "Hex color (`#rgb` or `#rrggbb`). Defaults to the server's default.",
+				MarkdownDescription: "Hex color (`#rgb` or `#rrggbb`, compared case-insensitively). Defaults to the server's default.",
+				CustomType:          hexColorType{},
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
@@ -125,11 +127,12 @@ func (r *stateResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				},
 			},
 			"default": schema.BoolAttribute{
-				MarkdownDescription: "Whether new work items land in this state. Defaults to `false`. Only one state per " +
-					"project can be the default, so declare it on exactly one.",
-				Optional: true,
-				Computed: true,
-				Default:  booldefault.StaticBool(false),
+				MarkdownDescription: "Whether new work items land in this state. A new state is not the default unless " +
+					"set; when unset, the state's current value is kept (so importing the project's default state does " +
+					"not plan to unset it). Only one state per project can be the default, so declare it on exactly one.",
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"position": schema.Int64Attribute{
 				MarkdownDescription: "Sort position within the group. Assigned by the server (end of the group) when unset.",
@@ -196,7 +199,7 @@ func (r *stateResource) Update(ctx context.Context, req resource.UpdateRequest, 
 			if fresh, rerr := r.client.GetState(ctx, id); rerr == nil {
 				current = &fresh.LockVersion
 			}
-			addStaleError(&resp.Diagnostics, fmt.Sprintf("State %q", state.Name.ValueString()), state.LockVersion.ValueInt64(), current)
+			addStaleError(&resp.Diagnostics, fmt.Sprintf("State %q", state.Name.ValueString()), state.LockVersion.ValueInt64(), current, err)
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error updating Flightdeck state", err)
@@ -213,6 +216,17 @@ func (r *stateResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 		return
 	}
 	if err := r.client.DeleteState(ctx, state.ID.ValueInt64()); err != nil {
+		if state.Default.ValueBool() && client.IsValidation(err) {
+			// The project must keep a default state, so this delete can never
+			// succeed while the state holds that role. Leave it on the server
+			// and stop managing it rather than wedge every destroy.
+			resp.Diagnostics.AddWarning(
+				fmt.Sprintf("State %q left in place", state.Name.ValueString()),
+				"It is the project's default state, which the API refuses to delete. It has been removed from "+
+					"Terraform state but still exists on the server; make another state the default first if it "+
+					"should be deleted. The API said: "+apiMessage(err))
+			return
+		}
 		addAPIError(&resp.Diagnostics, "Error deleting Flightdeck state", err)
 	}
 }

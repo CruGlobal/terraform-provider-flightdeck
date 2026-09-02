@@ -30,11 +30,11 @@ type labelResource struct {
 }
 
 type labelModel struct {
-	ID          types.Int64  `tfsdk:"id"`
-	ProjectID   types.Int64  `tfsdk:"project_id"`
-	Name        types.String `tfsdk:"name"`
-	Color       types.String `tfsdk:"color"`
-	LockVersion types.Int64  `tfsdk:"lock_version"`
+	ID          types.Int64   `tfsdk:"id"`
+	ProjectID   types.Int64   `tfsdk:"project_id"`
+	Name        types.String  `tfsdk:"name"`
+	Color       hexColorValue `tfsdk:"color"`
+	LockVersion types.Int64   `tfsdk:"lock_version"`
 }
 
 func labelToModel(l *client.Label) labelModel {
@@ -42,7 +42,7 @@ func labelToModel(l *client.Label) labelModel {
 		ID:          types.Int64Value(l.ID),
 		ProjectID:   types.Int64Value(l.ProjectID),
 		Name:        types.StringValue(l.Name),
-		Color:       types.StringValue(l.Color),
+		Color:       hexColorValue{StringValue: types.StringValue(l.Color)},
 		LockVersion: types.Int64Value(l.LockVersion),
 	}
 }
@@ -86,7 +86,8 @@ func (r *labelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"color": schema.StringAttribute{
-				MarkdownDescription: "Hex color (`#rgb` or `#rrggbb`). Defaults to the server's default.",
+				MarkdownDescription: "Hex color (`#rgb` or `#rrggbb`, compared case-insensitively). Defaults to the server's default.",
+				CustomType:          hexColorType{},
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
@@ -153,7 +154,7 @@ func (r *labelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 			if fresh, rerr := r.client.GetLabel(ctx, id); rerr == nil {
 				current = &fresh.LockVersion
 			}
-			addStaleError(&resp.Diagnostics, fmt.Sprintf("Label %q", state.Name.ValueString()), state.LockVersion.ValueInt64(), current)
+			addStaleError(&resp.Diagnostics, fmt.Sprintf("Label %q", state.Name.ValueString()), state.LockVersion.ValueInt64(), current, err)
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error updating Flightdeck label", err)

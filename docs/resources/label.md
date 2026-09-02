@@ -41,7 +41,7 @@ resource "flightdeck_label" "security" {
 
 ### Optional
 
-- `color` (String) Hex color (`#rgb` or `#rrggbb`). Defaults to the server's default.
+- `color` (String) Hex color (`#rgb` or `#rrggbb`, compared case-insensitively). Defaults to the server's default.
 
 ### Read-Only
 

@@ -125,7 +125,7 @@ func (s *Server) applyLabelAttrs(l *Label, attrs map[string]any) (int, string, s
 		l.Name = asString(v)
 	}
 	if v, ok := attrs["color"]; ok && v != nil {
-		l.Color = asString(v)
+		l.Color = canonicalColor(asString(v))
 	}
 	if strings.TrimSpace(l.Name) == "" {
 		return http.StatusUnprocessableEntity, "validation_failed", "Name can't be blank"

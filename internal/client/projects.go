@@ -8,6 +8,9 @@ import (
 	"strings"
 )
 
+// projectRoot is the request/response root key for projects.
+const projectRoot = "project"
+
 // Project is the API's project shape (the flat `project` serializer; the
 // single-project `project_detail` shape adds `urls`, which the provider does
 // not manage and ignores).
@@ -25,25 +28,20 @@ type Project struct {
 	UpdatedAt          string          `json:"updated_at"`
 }
 
-// Fields is a partial write body: only the keys present are sent, so an
-// omitted key leaves the server-side attribute untouched (the API is
-// PATCH-style on both create and update). A key set to nil sends JSON null,
-// which the API treats as "clear".
-type Fields map[string]any
+// ResourceID implements Identified.
+func (p *Project) ResourceID() int64 { return p.ID }
+
+func projectPath(id int64) string { return "/projects/" + strconv.FormatInt(id, 10) }
 
 // ListProjects returns every project the token may read.
 func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
-	return List[Project](ctx, c, "/projects")
+	return ListResources[Project](ctx, c, "/projects", projectRoot)
 }
 
 // GetProject fetches one project. A 404 covers unknown ids, ids in another
 // workspace, and projects mid-teardown.
 func (c *Client) GetProject(ctx context.Context, id int64) (*Project, error) {
-	var p Project
-	if err := c.Get(ctx, "/projects/"+strconv.FormatInt(id, 10), &p); err != nil {
-		return nil, err
-	}
-	return &p, nil
+	return GetResource[*Project](ctx, c, projectPath(id), projectRoot)
 }
 
 // FindProjectByIdentifier lists projects and returns the one with the given
@@ -65,40 +63,23 @@ func (c *Client) FindProjectByIdentifier(ctx context.Context, identifier string)
 	}
 }
 
-// CreateProject creates a project. The idempotency key must be stable for the
-// declared resource (see IdempotencyKey); the create is guarded against a
-// stale replay by re-reading the returned id.
+// CreateProject creates a project under the stable idempotency key (see
+// PayloadKey) and verifies it by reading the returned id back.
 func (c *Client) CreateProject(ctx context.Context, fields Fields, idempotencyKey string) (*Project, error) {
-	return CreateWithReplayGuard(ctx, idempotencyKey,
-		func(ctx context.Context, key string) (*Project, error) {
-			var p Project
-			if err := c.Post(ctx, "/projects", map[string]any{"project": fields}, &p, WithIdempotencyKey(key)); err != nil {
-				return nil, err
-			}
-			return &p, nil
-		},
-		func(ctx context.Context, created *Project) error {
-			_, err := c.GetProject(ctx, created.ID)
-			return err
-		})
+	return CreateResource(ctx, c, "/projects", projectRoot, fields, idempotencyKey, VerifyByGet(c.GetProject))
 }
 
 // UpdateProject PATCHes the given fields with an If-Match precondition on
 // lockVersion. A lost race is a *Error for which IsStale is true.
 func (c *Client) UpdateProject(ctx context.Context, id int64, fields Fields, lockVersion int64) (*Project, error) {
-	var p Project
-	err := c.Patch(ctx, "/projects/"+strconv.FormatInt(id, 10), map[string]any{"project": fields}, &p, WithIfMatch(lockVersion))
-	if err != nil {
-		return nil, err
-	}
-	return &p, nil
+	return PatchResource[*Project](ctx, c, projectPath(id), projectRoot, fields, &lockVersion)
 }
 
 // DeleteProject asks the API to delete a project. The API soft-marks the
 // project and tears it down asynchronously (202 Accepted); from that moment
 // it is unreachable, so an already-gone 404 is also success.
 func (c *Client) DeleteProject(ctx context.Context, id int64) error {
-	err := c.Delete(ctx, "/projects/"+strconv.FormatInt(id, 10), nil)
+	err := c.Delete(ctx, projectPath(id), nil)
 	if err != nil && !IsNotFound(err) {
 		return err
 	}

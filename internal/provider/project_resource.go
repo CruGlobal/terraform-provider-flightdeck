@@ -11,7 +11,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -80,10 +80,11 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"archived": schema.BoolAttribute{
-				MarkdownDescription: "Whether the project is archived. Defaults to `false`.",
-				Optional:            true,
-				Computed:            true,
-				Default:             booldefault.StaticBool(false),
+				MarkdownDescription: "Whether the project is archived. New projects are not archived. When unset, the " +
+					"project's current value is kept (so importing an archived project does not unarchive it).",
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"features": schema.MapAttribute{
 				MarkdownDescription: "Feature toggles to manage, as a map of feature key to boolean. Only the keys listed here " +
@@ -132,6 +133,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	state := projectToModel(ctx, created, &plan, featuresFromPrior, &resp.Diagnostics)
+	reconcileFeatures(ctx, &state, &plan, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -179,7 +181,7 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 			if fresh, rerr := r.client.GetProject(ctx, id); rerr == nil {
 				current = &fresh.LockVersion
 			}
-			addStaleError(&resp.Diagnostics, fmt.Sprintf("Project %s", state.Identifier.ValueString()), state.LockVersion.ValueInt64(), current)
+			addStaleError(&resp.Diagnostics, fmt.Sprintf("Project %s", state.Identifier.ValueString()), state.LockVersion.ValueInt64(), current, err)
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error updating Flightdeck project", err)
@@ -187,6 +189,7 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 
 	newState := projectToModel(ctx, updated, &plan, featuresFromPrior, &resp.Diagnostics)
+	reconcileFeatures(ctx, &newState, &plan, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
 }
 

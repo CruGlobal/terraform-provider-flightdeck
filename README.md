@@ -7,9 +7,11 @@
 > a best-effort basis. **Pull requests and issues are welcome** — they
 > may take time to be reviewed.
 
-`terraform-provider-flightdeck` manages a
-[Flightdeck](https://github.com/CruGlobal/flightdeck) workspace's
-**project configuration** through its REST API, so the settings that
+`terraform-provider-flightdeck` manages a Flightdeck workspace's
+**project configuration** through its REST API. Flightdeck is a
+project-management application (workspaces, projects, work items) with
+built-in error tracking and incident management; this provider covers
+the settings that
 define how an application's project is set up — the project itself, its
 workflow states and labels, who has access, error-ingestion tokens,
 alert rules and outbound webhooks — can live in Terraform next to the

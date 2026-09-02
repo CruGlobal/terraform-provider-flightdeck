@@ -59,6 +59,9 @@ type Server struct {
 	// register themselves through registerResource.
 	stores     map[string]any
 	idempotent map[string]idempotentResponse
+	// projectHooks run after every project create so the nested-resource
+	// fakes can seed a project's defaults (states, labels).
+	projectHooks []func(s *Server, p *Project)
 
 	// Fault injection.
 	throttleNext   int

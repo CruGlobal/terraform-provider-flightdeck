@@ -49,8 +49,6 @@ type Project struct {
 
 type projectStore struct {
 	byID map[int64]*Project
-	// onCreate hooks let the state/label files seed a new project's defaults.
-	onCreate []func(s *Server, p *Project)
 	// forcedFeatures are toggles the server reports at a fixed value
 	// whatever a client writes, like a plan-gated feature.
 	forcedFeatures map[string]bool
@@ -87,6 +85,17 @@ func (s *Server) ForceFeature(key string, value bool) {
 	s.projects().forcedFeatures[key] = value
 }
 
+// AllProjectIDs returns every stored project id, deleting ones included.
+func (s *Server) AllProjectIDs() []int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ids []int64
+	for id := range s.projects().byID {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // Project returns a stored project by id (nil if absent), including ones
 // marked for deletion.
 func (s *Server) Project(id int64) *Project {
@@ -119,14 +128,6 @@ func (s *Server) DeleteProjectOutOfBand(id int64) {
 	if p := s.projects().byID[id]; p != nil {
 		p.Deleting = true
 	}
-}
-
-// OnProjectCreated registers a hook run for every project created through the
-// API or AddProject (used by the states/labels fakes to seed defaults).
-func (s *Server) OnProjectCreated(fn func(s *Server, p *Project)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.projects().onCreate = append(s.projects().onCreate, fn)
 }
 
 // liveProject resolves a project the way the API does: .not_deleting.find.
@@ -277,7 +278,7 @@ func (s *Server) addProjectLocked(attrs map[string]any) *Project {
 		return nil
 	}
 	s.projects().byID[p.ID] = p
-	for _, hook := range s.projects().onCreate {
+	for _, hook := range s.projectHooks {
 		hook(s, p)
 	}
 	return p
@@ -297,7 +298,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			return status, map[string]any{"error": msg, "code": code}
 		}
 		s.projects().byID[p.ID] = p
-		for _, hook := range s.projects().onCreate {
+		for _, hook := range s.projectHooks {
 			hook(s, p)
 		}
 		return http.StatusCreated, s.serializeProject(p, true)

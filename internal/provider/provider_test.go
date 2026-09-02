@@ -3,6 +3,7 @@ package provider
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/flightdecktest"
@@ -61,6 +62,7 @@ func newTestEnv(t *testing.T, resourceKey string) *testEnv {
 		if os.Getenv(envToken) == "" {
 			t.Fatalf("%s must be set when %s is set", envToken, envEndpoint)
 		}
+		liveTestsRun.Add(1)
 		return &testEnv{endpoint: os.Getenv(envEndpoint), token: os.Getenv(envToken)}
 	}
 	fake := flightdecktest.New(t)
@@ -76,8 +78,16 @@ func (e *testEnv) requireFake(t *testing.T) {
 	}
 }
 
-// providerConfig renders a provider block pointing at the backend.
+// providerConfig renders a provider block pointing at the backend. Against a
+// live Flightdeck the block is empty: the provider reads FLIGHTDECK_ENDPOINT
+// and FLIGHTDECK_TOKEN from the environment, so the token is never written
+// into the generated .tf on disk.
 func (e *testEnv) providerConfig() string {
+	if e.live() {
+		return `
+provider "flightdeck" {}
+`
+	}
 	return fmt.Sprintf(`
 provider "flightdeck" {
   endpoint = %q
@@ -93,4 +103,33 @@ func runTest(t *testing.T, tc resource.TestCase) {
 	t.Helper()
 	tc.ProtoV6ProviderFactories = protoV6ProviderFactories
 	resource.UnitTest(t, tc)
+}
+
+// liveTestsRun counts tests that actually ran against a live Flightdeck.
+var liveTestsRun atomic.Int32
+
+// TestMain makes an acceptance run that asserted nothing fail loudly. While
+// every resource is gated in liveReady, a TF_ACC run against a live instance
+// skips everything and would otherwise report green; the scheduled workflow
+// should surface that rather than hide it.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if os.Getenv(resource.EnvTfAcc) != "" && os.Getenv(envEndpoint) != "" {
+		n := liveTestsRun.Load()
+		summary := fmt.Sprintf("Acceptance run against %s: %d test(s) exercised the live API.", os.Getenv(envEndpoint), n)
+		if n == 0 {
+			summary += " Every resource is still gated in liveReady (internal/provider/provider_test.go); nothing was asserted, so this run is reported as a FAILURE."
+			if code == 0 {
+				code = 1
+			}
+		}
+		fmt.Fprintln(os.Stderr, summary)
+		if path := os.Getenv("GITHUB_STEP_SUMMARY"); path != "" {
+			if f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); err == nil {
+				fmt.Fprintf(f, "### Live acceptance coverage\n\n%s\n", summary)
+				_ = f.Close()
+			}
+		}
+	}
+	os.Exit(code)
 }

@@ -48,10 +48,11 @@ func (p *flightdeckProvider) Metadata(_ context.Context, _ provider.MetadataRequ
 
 func (p *flightdeckProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "The `flightdeck` provider manages a [Flightdeck](https://github.com/CruGlobal/flightdeck) " +
-			"workspace's project configuration — projects, workflow states, labels, members, ingestion tokens, " +
+		MarkdownDescription: "The `flightdeck` provider manages a Flightdeck workspace's project configuration " +
+			"— projects, workflow states, labels, members, ingestion tokens, " +
 			"error alert rules and outbound webhooks — through its REST API, so that configuration can live in " +
-			"Terraform alongside the rest of an application's infrastructure.\n\n" +
+			"Terraform alongside the rest of an application's infrastructure. Flightdeck is a project-management " +
+			"application (workspaces, projects, work items) with built-in error tracking and incident management.\n\n" +
 			"## Authentication\n\n" +
 			"The provider authenticates with a Flightdeck **personal access token** (`fd_pat_…`), created under " +
 			"your account's API tokens page in the Flightdeck UI. A token is bound to one workspace, so a provider " +

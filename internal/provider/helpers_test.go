@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
 func regexMust(pattern string) *regexp.Regexp { return regexp.MustCompile(pattern) }
@@ -19,3 +20,6 @@ func randIdentifier() string {
 func randName(prefix string) string {
 	return fmt.Sprintf("%s %s", prefix, strings.ToLower(acctest.RandString(6)))
 }
+
+// tfjsonPath builds a tfjsonpath for a top-level attribute.
+func tfjsonPath(attr string) tfjsonpath.Path { return tfjsonpath.New(attr) }

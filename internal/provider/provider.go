@@ -140,6 +140,10 @@ func (p *flightdeckProvider) Resources(_ context.Context) []func() resource.Reso
 		NewProjectResource,
 		NewStateResource,
 		NewLabelResource,
+		NewProjectMemberResource,
+		NewIngestionTokenResource,
+		NewErrorAlertRuleResource,
+		NewWebhookResource,
 	}
 }
 
@@ -147,6 +151,7 @@ func (p *flightdeckProvider) DataSources(_ context.Context) []func() datasource.
 	return []func() datasource.DataSource{
 		NewProjectDataSource,
 		NewStatesDataSource,
+		NewWorkspaceMemberDataSource,
 	}
 }
 

@@ -270,7 +270,7 @@ func TestProject_staleLockVersionIsReportedNotOverwritten(t *testing.T) {
 					})
 				},
 				Config:      projectConfig(env, identifier, `  name = "Stale v2"`),
-				ExpectError: regexMust(`(?s)modified outside of Terraform.*lock_version 0, the server now has 1.*Nothing was overwritten`),
+				ExpectError: regexMust(`(?s)modified outside of Terraform.*lock_version\s+0,\s+the\s+server\s+now\s+has\s+1.*Nothing\s+was\s+overwritten`),
 			},
 			{
 				// Re-planning picks up the other writer's change and succeeds.

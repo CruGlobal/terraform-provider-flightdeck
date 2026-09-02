@@ -85,6 +85,17 @@ func (s *Server) ForceFeature(key string, value bool) {
 	s.projects().forcedFeatures[key] = value
 }
 
+// AllProjectIDs returns every stored project id, deleting ones included.
+func (s *Server) AllProjectIDs() []int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ids []int64
+	for id := range s.projects().byID {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // Project returns a stored project by id (nil if absent), including ones
 // marked for deletion.
 func (s *Server) Project(id int64) *Project {

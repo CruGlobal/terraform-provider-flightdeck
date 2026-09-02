@@ -48,3 +48,11 @@ func addStaleError(diags *diag.Diagnostics, what string, stateVersion int64, cur
 	}
 	diags.AddError(what+" modified outside of Terraform", detail)
 }
+
+// apiMessage returns the server's message from an API error, or the error text.
+func apiMessage(err error) string {
+	if apiErr, ok := client.AsError(err); ok && apiErr.Message != "" {
+		return apiErr.Message
+	}
+	return err.Error()
+}

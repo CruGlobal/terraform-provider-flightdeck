@@ -9,6 +9,20 @@ import (
 
 var hexColor = regexp.MustCompile(`^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
 
+// canonicalColor stores colours the way a normalising model would: lower-case,
+// six digits. Deliberately stricter than the current model (which stores what
+// it is given) so the provider is proven tolerant of either behaviour.
+func canonicalColor(c string) string {
+	if !hexColor.MatchString(c) {
+		return c
+	}
+	c = strings.ToLower(c)
+	if len(c) == 4 {
+		return "#" + strings.Repeat(string(c[1]), 2) + strings.Repeat(string(c[2]), 2) + strings.Repeat(string(c[3]), 2)
+	}
+	return c
+}
+
 var stateGroups = []string{"backlog", "unstarted", "started", "completed", "cancelled"}
 
 // defaultStates mirrors Project::DEFAULT_STATES, seeded on every project create.
@@ -195,7 +209,7 @@ func (s *Server) applyStateAttrs(st *State, attrs map[string]any) (int, string, 
 		st.Group = g
 	}
 	if v, ok := attrs["color"]; ok && v != nil {
-		st.Color = asString(v)
+		st.Color = canonicalColor(asString(v))
 	}
 	if v, ok := attrs["default"]; ok {
 		st.Default = truthy(v)

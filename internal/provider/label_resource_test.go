@@ -106,3 +106,24 @@ func TestLabel_updateSendsIfMatchAndCreateSendsKey(t *testing.T) {
 		t.Errorf("label PATCHes = %+v", patches)
 	}
 }
+
+func TestLabel_colorSpellingIsSemantic(t *testing.T) {
+	env := newTestEnv(t, "label")
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// The fake stores lower-case; the configured spelling survives the
+				// read-back and the post-apply plan is empty.
+				Config: labelConfig(env, identifier, `
+  name  = "Loud"
+  color = "#DC2626"`),
+				Check: resource.TestCheckResourceAttr(labelRes, "color", "#DC2626"),
+			},
+			{
+				RefreshState: true,
+				Check:        resource.TestCheckResourceAttr(labelRes, "color", "#DC2626"),
+			},
+		},
+	})
+}

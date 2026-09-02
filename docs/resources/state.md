@@ -5,7 +5,8 @@ subcategory: ""
 description: |-
   Manages a workflow state within a Flightdeck project.
   A new project comes with five default states (Backlog, To Do, In Progress, Done, Cancelled); use the flightdeck_states data source to see them, or import one to manage it. New states are appended to the end of their group unless position is set. Exactly one state per project is the default: setting default = true here clears it on whichever state had it.
-  A state that still has work items, or that is the project default, cannot be deleted; the API rejects the delete and the error is reported.
+  A state that still has work items cannot be deleted; the API rejects the delete and the error is reported. A project always has a default state, so the API also refuses to delete the current default: destroying a flightdeck_state that is the default leaves it in place on the server and removes it from Terraform state with a warning. Make another state the default first if it should really go.
+  Making a state the default bumps the previous default's lock_version on the server. If one apply both moves the default to a state and edits the state that had it, the edit can fail as a stale write; change the default in one apply and edit the old default in the next, or add depends_on so the edit follows.
   Import by numeric id: terraform import flightdeck_state.done 17.
 ---
 
@@ -15,7 +16,9 @@ Manages a workflow state within a Flightdeck project.
 
 A new project comes with five default states (Backlog, To Do, In Progress, Done, Cancelled); use the `flightdeck_states` data source to see them, or import one to manage it. New states are appended to the end of their group unless `position` is set. Exactly one state per project is the default: setting `default = true` here clears it on whichever state had it.
 
-A state that still has work items, or that is the project default, cannot be deleted; the API rejects the delete and the error is reported.
+A state that still has work items cannot be deleted; the API rejects the delete and the error is reported. A project always has a default state, so the API also refuses to delete the current default: destroying a `flightdeck_state` that is the default leaves it in place on the server and removes it from Terraform state with a warning. Make another state the default first if it should really go.
+
+Making a state the default bumps the previous default's `lock_version` on the server. If one apply both moves the default to a state and edits the state that had it, the edit can fail as a stale write; change the default in one apply and edit the old default in the next, or add `depends_on` so the edit follows.
 
 Import by numeric id: `terraform import flightdeck_state.done 17`.
 
@@ -55,8 +58,8 @@ resource "flightdeck_state" "triage" {
 
 ### Optional
 
-- `color` (String) Hex color (`#rgb` or `#rrggbb`). Defaults to the server's default.
-- `default` (Boolean) Whether new work items land in this state. Defaults to `false`. Only one state per project can be the default, so declare it on exactly one.
+- `color` (String) Hex color (`#rgb` or `#rrggbb`, compared case-insensitively). Defaults to the server's default.
+- `default` (Boolean) Whether new work items land in this state. A new state is not the default unless set; when unset, the state's current value is kept (so importing the project's default state does not plan to unset it). Only one state per project can be the default, so declare it on exactly one.
 - `position` (Number) Sort position within the group. Assigned by the server (end of the group) when unset.
 
 ### Read-Only

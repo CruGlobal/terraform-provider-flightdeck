@@ -1,0 +1,96 @@
+name: acceptance
+
+# Acceptance tests run the provider's test suite against a LIVE Flightdeck
+# instead of the in-process fake API used by `ci.yml`. They create and delete
+# real projects, states, labels, members, tokens, rules and webhooks, so they
+# need a dedicated test workspace nobody else uses. Intentionally not wired to
+# push/PR triggers. Runs:
+#
+#   * weekly on Monday at 13:00 UTC, to catch drift between the provider and
+#     the deployed API that the fake cannot see.
+#   * on demand via workflow_dispatch (use this when a Flightdeck API change
+#     the provider depends on has just shipped).
+#
+# Requires these repo secrets to be set up beforehand:
+#
+#   FLIGHTDECK_ENDPOINT          — base URL of the target Flightdeck instance,
+#                                  e.g. https://flightdeck.example.com
+#   FLIGHTDECK_TOKEN             — a personal access token (fd_pat_…) minted in
+#                                  the Flightdeck UI by a member of the test
+#                                  workspace; it is bound to that workspace.
+#                                  Webhook and self-healing tests additionally
+#                                  need the token's user to be a workspace
+#                                  admin.
+#   FLIGHTDECK_ACC_MEMBER_EMAIL  — email of an existing member of the test
+#                                  workspace (other than the token's owner),
+#                                  used by the member data source and
+#                                  project_member tests.
+#
+# Per-resource tests are additionally gated in code (`liveReady` in
+# internal/provider/provider_test.go) until the Flightdeck API change each
+# depends on has merged; gated tests skip rather than fail.
+
+on:
+  schedule:
+    - cron: '0 13 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One acceptance run at a time — concurrent runs share the test workspace
+  # and would race each other over the same project identifiers.
+  group: acceptance
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    name: acceptance (terraform ${{ matrix.terraform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      # Every leg writes the same test workspace, so legs run one at a time.
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        terraform:
+          - "1.13.*"
+          - "1.14.*"
+          - "1.15.*"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: .tool-versions
+          cache: true
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ matrix.terraform }}
+          terraform_wrapper: false
+
+      - name: Run acceptance tests
+        env:
+          TF_ACC: "1"
+          FLIGHTDECK_ENDPOINT: ${{ secrets.FLIGHTDECK_ENDPOINT }}
+          FLIGHTDECK_TOKEN: ${{ secrets.FLIGHTDECK_TOKEN }}
+          FLIGHTDECK_ACC_MEMBER_EMAIL: ${{ secrets.FLIGHTDECK_ACC_MEMBER_EMAIL }}
+        run: go test -v -cover -count=1 -timeout 60m ./internal/provider/...
+
+  # Aggregator job. Branch protection cannot require an individual matrix leg
+  # by name (the names change as the matrix changes, and skipped legs report
+  # as missing). This single job succeeds only if every leg succeeded.
+  acceptance-matrix:
+    name: acceptance matrix
+    runs-on: ubuntu-latest
+    needs: acceptance
+    if: always()
+    steps:
+      - name: Check matrix status
+        if: ${{ needs.acceptance.result != 'success' }}
+        run: exit 1

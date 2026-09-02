@@ -5,24 +5,46 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// IdempotencyKey derives a stable Idempotency-Key from a resource's natural
-// identity — its type plus the fields that make it unique within its parent
-// (a project's identifier, a state's project + name, …). The same declared
-// resource therefore always sends the same key, so a create that is retried —
-// by this client after a timeout, or by Terraform on the next apply after a
-// failed one — replays the original 201 instead of creating a duplicate.
+// IdempotencyKey derives a stable Idempotency-Key from the given parts. Use
+// PayloadKey for creates; this is the primitive it is built on.
+func IdempotencyKey(parts ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x1f")))
+	return "tf-" + hex.EncodeToString(sum[:20])
+}
+
+// PayloadKey derives the Idempotency-Key for a create from the resource kind,
+// its parent scope (a project id, or "" for workspace-level resources) and the
+// exact body about to be sent. The same declaration therefore always sends the
+// same key, so a create that is retried — by this client after a throttle or a
+// dropped connection, or by Terraform on the next apply after one that failed
+// before state was written — replays the original 201 instead of creating a
+// duplicate.
+//
+// Terraform does not tell a provider the resource address, so the body is the
+// closest available stand-in for "this declaration". Two declarations that
+// differ in any attribute get different keys; two byte-identical declarations
+// of the same resource in one configuration would share one, which is a
+// configuration error in its own right (the API rejects the duplicate anyway
+// where it enforces uniqueness).
 //
 // The server honours a key for 24 hours. CreateWithReplayGuard handles the one
 // way a stable key can mislead: destroying and recreating the same resource
 // inside that window.
-func IdempotencyKey(parts ...string) string {
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\x1f")))
-	return "tf-" + hex.EncodeToString(sum[:20])
+func PayloadKey(kind, scope string, payload any) string {
+	// encoding/json emits map keys in sorted order, so the encoding is canonical
+	// for the map-based bodies the provider sends.
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		encoded = []byte(fmt.Sprint(payload))
+	}
+	return IdempotencyKey(kind, scope, string(encoded))
 }
 
 // RandomIdempotencyKey returns a one-off key. Used only as the fallback when a

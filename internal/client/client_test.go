@@ -362,6 +362,17 @@ func TestIdempotencyKey_IsStableAndDistinct(t *testing.T) {
 	if RandomIdempotencyKey() == RandomIdempotencyKey() {
 		t.Error("random keys collided")
 	}
+
+	p1 := PayloadKey("project", "", Fields{"name": "A", "identifier": "APP"})
+	p2 := PayloadKey("project", "", Fields{"identifier": "APP", "name": "A"})
+	p3 := PayloadKey("project", "", Fields{"name": "B", "identifier": "APP"})
+	p4 := PayloadKey("state", "12", Fields{"name": "A", "identifier": "APP"})
+	if p1 != p2 {
+		t.Errorf("key order must not matter: %s vs %s", p1, p2)
+	}
+	if p1 == p3 || p1 == p4 {
+		t.Errorf("different payload/scope collided: %s %s %s", p1, p3, p4)
+	}
 }
 
 func TestCreateWithReplayGuard(t *testing.T) {

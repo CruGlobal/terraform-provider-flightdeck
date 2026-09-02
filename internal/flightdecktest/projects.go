@@ -51,11 +51,14 @@ type projectStore struct {
 	byID map[int64]*Project
 	// onCreate hooks let the state/label files seed a new project's defaults.
 	onCreate []func(s *Server, p *Project)
+	// forcedFeatures are toggles the server reports at a fixed value
+	// whatever a client writes, like a plan-gated feature.
+	forcedFeatures map[string]bool
 }
 
 func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
-		s.stores["projects"] = &projectStore{byID: map[int64]*Project{}}
+		s.stores["projects"] = &projectStore{byID: map[int64]*Project{}, forcedFeatures: map[string]bool{}}
 		mux.HandleFunc("GET /api/v1/projects", s.listProjects)
 		mux.HandleFunc("POST /api/v1/projects", s.createProject)
 		mux.HandleFunc("GET /api/v1/projects/{id}", s.showProject)
@@ -74,6 +77,14 @@ func (s *Server) AddProject(name, identifier string) *Project {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.addProjectLocked(map[string]any{"name": name, "identifier": identifier})
+}
+
+// ForceFeature makes the fake report a feature toggle at a fixed value for
+// every project, whatever clients write to it.
+func (s *Server) ForceFeature(key string, value bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.projects().forcedFeatures[key] = value
 }
 
 // Project returns a stored project by id (nil if absent), including ones
@@ -133,6 +144,9 @@ func (s *Server) serializeProject(p *Project, detail bool) map[string]any {
 		features[k] = v
 	}
 	for k, v := range p.Features {
+		features[k] = v
+	}
+	for k, v := range s.projects().forcedFeatures {
 		features[k] = v
 	}
 	out := map[string]any{

@@ -150,6 +150,17 @@ func (r *projectMemberResource) Update(ctx context.Context, req resource.UpdateR
 	}
 	updated, err := r.client.UpdateProjectMember(ctx, projectID, userID, client.Fields{"role": plan.Role.ValueString()}, lockVersion)
 	if err != nil {
+		if lockVersion == nil && (client.IsPreconditionRequired(err) || client.IsStale(err)) {
+			// The API insists on an If-Match the provider could not send because
+			// no lock_version was ever returned for the row: an API/provider
+			// mismatch, not something re-planning can fix.
+			resp.Diagnostics.AddError("Flightdeck requires a precondition on member updates",
+				fmt.Sprintf("Updating the membership of user %d on project %d was refused (%s), but the API did not "+
+					"return a lock_version for the row, so the provider had no If-Match to send. Every membership "+
+					"update will fail until the provider is updated for this API version; please report it.",
+					userID, projectID, apiMessage(err)))
+			return
+		}
 		if client.IsStale(err) {
 			var current *int64
 			if fresh, rerr := r.client.FindProjectMember(ctx, projectID, userID); rerr == nil {
@@ -159,7 +170,7 @@ func (r *projectMemberResource) Update(ctx context.Context, req resource.UpdateR
 			if lockVersion != nil {
 				stateVersion = *lockVersion
 			}
-			addStaleError(&resp.Diagnostics, fmt.Sprintf("Membership of user %d on project %d", userID, projectID), stateVersion, current)
+			addStaleError(&resp.Diagnostics, fmt.Sprintf("Membership of user %d on project %d", userID, projectID), stateVersion, current, err)
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error updating Flightdeck project member", err)

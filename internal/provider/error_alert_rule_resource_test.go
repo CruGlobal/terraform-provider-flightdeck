@@ -263,3 +263,53 @@ func TestErrorAlertRule_staleWriteIsReported(t *testing.T) {
 		},
 	})
 }
+
+func TestErrorAlertRule_disabledSurvivesImportWithoutADefault(t *testing.T) {
+	env := newTestEnv(t, "error_alert_rule")
+	identifier := randIdentifier()
+	disabled := ruleConfig(env, identifier, `
+  name    = "Paused"
+  enabled = false
+  trigger = "new_group"
+  action = {
+    notify_slack = true
+  }`)
+	unspecified := ruleConfig(env, identifier, `
+  name    = "Paused"
+  trigger = "new_group"
+  action = {
+    notify_slack = true
+  }`)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{Config: disabled, Check: resource.TestCheckResourceAttr(ruleRes, "enabled", "false")},
+			{ResourceName: ruleRes, ImportState: true, ImportStateVerify: true},
+			{
+				Config: unspecified,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+				Check: resource.TestCheckResourceAttr(ruleRes, "enabled", "false"),
+			},
+		},
+	})
+}
+
+func TestErrorAlertRule_webhookURLWithoutNotifyWebhookIsRejected(t *testing.T) {
+	env := newTestEnv(t, "error_alert_rule")
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: ruleConfig(env, identifier, `
+  name    = "x"
+  trigger = "new_group"
+  action = {
+    notify_slack = true
+    webhook_url  = "https://alerts.example.com/hook"
+  }`),
+				ExpectError: regexMust(`webhook_url requires notify_webhook`),
+			},
+		},
+	})
+}

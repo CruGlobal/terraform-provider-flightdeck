@@ -61,7 +61,7 @@ resource "flightdeck_project" "payments" {
 
 ### Optional
 
-- `archived` (Boolean) Whether the project is archived. Defaults to `false`.
+- `archived` (Boolean) Whether the project is archived. New projects are not archived. When unset, the project's current value is kept (so importing an archived project does not unarchive it).
 - `description` (String) Free-text description. Removing it from configuration clears it.
 - `emoji` (String) Emoji shown next to the project name. Defaults to the server's default (📁).
 - `features` (Map of Boolean) Feature toggles to manage, as a map of feature key to boolean. Only the keys listed here are managed; keys you leave out keep whatever value the project has. Settable keys: `cycles`, `modules`, `milestones`, `views`, `pages`, `meeting_notes`, `decisions`, `intake`, `errors`, `incidents`, `estimates`. (`self_healing` and `slack` are reported by the `flightdeck_project` data source but cannot be set through the API.)

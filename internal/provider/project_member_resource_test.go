@@ -197,3 +197,23 @@ data "flightdeck_workspace_member" "who" {
 		},
 	})
 }
+
+func TestProjectMember_preconditionRequiredWithoutLockVersionIsDiagnosed(t *testing.T) {
+	env := newTestEnv(t, "project_member")
+	env.requireFake(t)
+	env.fake.RequireMemberPrecondition(true)
+	identifier := randIdentifier()
+	email := memberEmail(t, env)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: memberConfig(env, identifier, email, "member"),
+				Check:  resource.TestCheckNoResourceAttr(memberRes, "lock_version"),
+			},
+			{
+				Config:      memberConfig(env, identifier, email, "admin"),
+				ExpectError: regexMust(`(?s)requires a precondition on member updates.*did not\s+return a lock_version`),
+			},
+		},
+	})
+}

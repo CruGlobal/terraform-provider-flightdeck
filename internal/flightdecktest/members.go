@@ -19,6 +19,10 @@ type ProjectMember struct {
 type memberStore struct {
 	byID     map[int64]*ProjectMember
 	roleKeys []string // custom permission-scheme role keys, assignable like built-ins
+	// requirePrecondition makes PATCH demand an If-Match (428 without one)
+	// while the serializer omits lock_version — the API/provider mismatch the
+	// member resource must diagnose clearly.
+	requirePrecondition bool
 }
 
 func init() {
@@ -39,6 +43,14 @@ func init() {
 func (s *Server) projectMembers() *memberStore {
 	store, _ := s.stores["members"].(*memberStore)
 	return store
+}
+
+// RequireMemberPrecondition makes member PATCHes demand If-Match (428 when
+// absent) while omitting lock_version from member rows.
+func (s *Server) RequireMemberPrecondition(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.projectMembers().requirePrecondition = on
 }
 
 // AddRoleKey makes a custom role key assignable (FD-230 permission schemes).
@@ -97,6 +109,9 @@ func (s *Server) roleAssignable(role string) bool {
 func (s *Server) serializeMember(m *ProjectMember) map[string]any {
 	out := map[string]any{
 		"id": m.ID, "project_id": m.ProjectID, "user_id": m.UserID, "role": m.Role, "lock_version": m.LockVersion,
+	}
+	if s.projectMembers().requirePrecondition {
+		delete(out, "lock_version")
 	}
 	if u := s.workspaceUser(m.UserID); u != nil {
 		out["name"] = u.Name
@@ -188,6 +203,10 @@ func (s *Server) updateMember(w http.ResponseWriter, r *http.Request) {
 	m := s.memberLocked(pid, uid)
 	if m == nil {
 		notFound(w)
+		return
+	}
+	if s.projectMembers().requirePrecondition && r.Header.Get("If-Match") == "" {
+		writeError(w, http.StatusPreconditionRequired, "precondition_required", "If-Match header is required")
 		return
 	}
 	if !checkIfMatch(w, r, m.LockVersion) {

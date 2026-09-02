@@ -27,53 +27,40 @@ type ErrorAlertRule struct {
 	LockVersion int64                      `json:"lock_version"`
 }
 
+// ResourceID implements Identified.
+func (r *ErrorAlertRule) ResourceID() int64 { return r.ID }
+
+const errorAlertRuleRoot = "error_alert_rule"
+
 func errorAlertRulesPath(projectID int64) string {
 	return "/projects/" + strconv.FormatInt(projectID, 10) + "/error_alert_rules"
 }
 
+func errorAlertRulePath(id int64) string { return "/error_alert_rules/" + strconv.FormatInt(id, 10) }
+
 // ListErrorAlertRules returns a project's rules.
 func (c *Client) ListErrorAlertRules(ctx context.Context, projectID int64) ([]ErrorAlertRule, error) {
-	return List[ErrorAlertRule](ctx, c, errorAlertRulesPath(projectID))
+	return ListResources[ErrorAlertRule](ctx, c, errorAlertRulesPath(projectID), errorAlertRuleRoot)
 }
 
 // GetErrorAlertRule fetches one rule.
 func (c *Client) GetErrorAlertRule(ctx context.Context, id int64) (*ErrorAlertRule, error) {
-	var r ErrorAlertRule
-	if err := c.Get(ctx, "/error_alert_rules/"+strconv.FormatInt(id, 10), &r); err != nil {
-		return nil, err
-	}
-	return &r, nil
+	return GetResource[*ErrorAlertRule](ctx, c, errorAlertRulePath(id), errorAlertRuleRoot)
 }
 
-// CreateErrorAlertRule creates a rule, guarded like CreateProject.
+// CreateErrorAlertRule creates a rule through the verified create path.
 func (c *Client) CreateErrorAlertRule(ctx context.Context, projectID int64, fields Fields, idempotencyKey string) (*ErrorAlertRule, error) {
-	return CreateWithReplayGuard(ctx, idempotencyKey,
-		func(ctx context.Context, key string) (*ErrorAlertRule, error) {
-			var r ErrorAlertRule
-			if err := c.Post(ctx, errorAlertRulesPath(projectID), map[string]any{"error_alert_rule": fields}, &r, WithIdempotencyKey(key)); err != nil {
-				return nil, err
-			}
-			return &r, nil
-		},
-		func(ctx context.Context, created *ErrorAlertRule) error {
-			_, err := c.GetErrorAlertRule(ctx, created.ID)
-			return err
-		})
+	return CreateResource(ctx, c, errorAlertRulesPath(projectID), errorAlertRuleRoot, fields, idempotencyKey, VerifyByGet(c.GetErrorAlertRule))
 }
 
 // UpdateErrorAlertRule PATCHes a rule with an If-Match precondition.
 func (c *Client) UpdateErrorAlertRule(ctx context.Context, id int64, fields Fields, lockVersion int64) (*ErrorAlertRule, error) {
-	var r ErrorAlertRule
-	err := c.Patch(ctx, "/error_alert_rules/"+strconv.FormatInt(id, 10), map[string]any{"error_alert_rule": fields}, &r, WithIfMatch(lockVersion))
-	if err != nil {
-		return nil, err
-	}
-	return &r, nil
+	return PatchResource[*ErrorAlertRule](ctx, c, errorAlertRulePath(id), errorAlertRuleRoot, fields, &lockVersion)
 }
 
 // DeleteErrorAlertRule deletes a rule; 404 is success.
 func (c *Client) DeleteErrorAlertRule(ctx context.Context, id int64) error {
-	err := c.Delete(ctx, "/error_alert_rules/"+strconv.FormatInt(id, 10), nil)
+	err := c.Delete(ctx, errorAlertRulePath(id), nil)
 	if err != nil && !IsNotFound(err) {
 		return err
 	}

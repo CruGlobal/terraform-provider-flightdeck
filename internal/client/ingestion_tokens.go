@@ -25,6 +25,16 @@ type IngestionToken struct {
 	CreatedAt   string  `json:"created_at"`
 }
 
+// ResourceID implements Identified.
+func (t *IngestionToken) ResourceID() int64 { return t.ID }
+
+// Revoked reports whether the API marked the token revoked. Only a non-empty
+// revoked_at counts, so a deployment that serialises the field as "" or null
+// for live tokens is read the same way.
+func (t *IngestionToken) Revoked() bool { return t.RevokedAt != nil && *t.RevokedAt != "" }
+
+const ingestionTokenRoot = "ingestion_token"
+
 func ingestionTokensPath(projectID int64) string {
 	return "/projects/" + strconv.FormatInt(projectID, 10) + "/ingestion_tokens"
 }
@@ -32,7 +42,7 @@ func ingestionTokensPath(projectID int64) string {
 // ListIngestionTokens returns a project's tokens (masked; revoked ones may be
 // included with revoked_at set).
 func (c *Client) ListIngestionTokens(ctx context.Context, projectID int64) ([]IngestionToken, error) {
-	return List[IngestionToken](ctx, c, ingestionTokensPath(projectID))
+	return ListResources[IngestionToken](ctx, c, ingestionTokensPath(projectID), ingestionTokenRoot)
 }
 
 // FindIngestionToken returns the active token with the given id or a 404
@@ -43,7 +53,7 @@ func (c *Client) FindIngestionToken(ctx context.Context, projectID, id int64) (*
 		return nil, err
 	}
 	for i := range tokens {
-		if tokens[i].ID == id && tokens[i].RevokedAt == nil {
+		if tokens[i].ID == id && !tokens[i].Revoked() {
 			return &tokens[i], nil
 		}
 	}
@@ -54,19 +64,29 @@ func (c *Client) FindIngestionToken(ctx context.Context, projectID, id int64) (*
 }
 
 // CreateIngestionToken mints a token. The response carries the plaintext once.
+// Tokens have no show route, so the create is verified against the project's
+// token list by id. Listed and live is present; listed but revoked is the one
+// authoritative "gone" (the 201 replayed an earlier, since-revoked token);
+// absent from the list is inconclusive and is reported rather than minting a
+// second, unrecorded credential.
 func (c *Client) CreateIngestionToken(ctx context.Context, projectID int64, fields Fields, idempotencyKey string) (*IngestionToken, error) {
-	return CreateWithReplayGuard(ctx, idempotencyKey,
-		func(ctx context.Context, key string) (*IngestionToken, error) {
-			var t IngestionToken
-			if err := c.Post(ctx, ingestionTokensPath(projectID), map[string]any{"ingestion_token": fields}, &t, WithIdempotencyKey(key)); err != nil {
-				return nil, err
+	verify := func(ctx context.Context, created *IngestionToken) (Verdict, error) {
+		tokens, err := c.ListIngestionTokens(ctx, projectID)
+		if err != nil {
+			return VerifiedUnknown, err
+		}
+		for i := range tokens {
+			if tokens[i].ID != created.ID {
+				continue
 			}
-			return &t, nil
-		},
-		func(ctx context.Context, created *IngestionToken) error {
-			_, err := c.FindIngestionToken(ctx, projectID, created.ID)
-			return err
-		})
+			if tokens[i].Revoked() {
+				return VerifiedGone, nil
+			}
+			return VerifiedPresent, nil
+		}
+		return VerifiedUnknown, nil
+	}
+	return CreateResource(ctx, c, ingestionTokensPath(projectID), ingestionTokenRoot, fields, idempotencyKey, verify)
 }
 
 // RevokeIngestionToken revokes a token (the API's DELETE); 404 is success.

@@ -25,7 +25,12 @@ type IngestionToken struct {
 	CreatedAt   time.Time
 }
 
-type ingestionTokenStore struct{ byID map[int64]*IngestionToken }
+type ingestionTokenStore struct {
+	byID map[int64]*IngestionToken
+	// hideFromList simulates a list that filters out (or mis-serialises) a
+	// just-created token, so its create can never be verified.
+	hideFromList bool
+}
 
 func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
@@ -39,6 +44,13 @@ func init() {
 func (s *Server) ingestionTokens() *ingestionTokenStore {
 	store, _ := s.stores["ingestion_tokens"].(*ingestionTokenStore)
 	return store
+}
+
+// HideIngestionTokensFromList makes the list endpoint omit every token.
+func (s *Server) HideIngestionTokensFromList(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ingestionTokens().hideFromList = on
 }
 
 // IngestionToken returns a stored token (revoked or not), or nil.
@@ -91,7 +103,7 @@ func (s *Server) listIngestionTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	var rows []*IngestionToken
 	for _, t := range s.ingestionTokens().byID {
-		if t.ProjectID == pid {
+		if t.ProjectID == pid && !s.ingestionTokens().hideFromList {
 			rows = append(rows, t)
 		}
 	}

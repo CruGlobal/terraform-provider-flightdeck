@@ -6,6 +6,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 const stateRes = "flightdeck_state.test"
@@ -240,4 +241,189 @@ resource "flightdeck_state" "test" {
 			},
 		},
 	})
+}
+
+func TestState_colorSpellingIsSemantic(t *testing.T) {
+	env := newTestEnv(t, "state")
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// Upper-case shorthand in configuration; the fake stores lower-case
+				// six-digit (#aabbcc). Without semantic equality that read-back
+				// would fail the apply as an inconsistent result; with it the
+				// configured spelling is kept and the plan afterwards is empty.
+				Config: stateConfig(env, identifier, `
+  name  = "Shorthand"
+  group = "started"
+  color = "#ABC"`),
+				Check: resource.TestCheckResourceAttr(stateRes, "color", "#ABC"),
+			},
+			{
+				RefreshState: true,
+				Check:        resource.TestCheckResourceAttr(stateRes, "color", "#ABC"),
+			},
+		},
+	})
+}
+
+func TestState_importedDefaultStateIsNotUnsetByAPlan(t *testing.T) {
+	env := newTestEnv(t, "state")
+	identifier := randIdentifier()
+	backlogConfig := projectFixture(env, identifier) + `
+data "flightdeck_states" "all" {
+  project_id = flightdeck_project.parent.id
+}
+
+resource "flightdeck_state" "test" {
+  project_id = flightdeck_project.parent.id
+  name       = "Backlog"
+  group      = "backlog"
+}
+`
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectFixture(env, identifier) + `
+data "flightdeck_states" "all" {
+  project_id = flightdeck_project.parent.id
+}
+`,
+				Check: checkSingleDefault("data.flightdeck_states.all", "Backlog"),
+			},
+			{
+				// Import the seeded default state under a configuration that says
+				// nothing about `default`.
+				ResourceName:       stateRes,
+				ImportState:        true,
+				ImportStatePersist: true,
+				Config:             backlogConfig,
+				ImportStateIdFunc: func(s *terraform.State) (string, error) {
+					ds := s.RootModule().Resources["data.flightdeck_states.all"].Primary.Attributes
+					for i := 0; ; i++ {
+						name, ok := ds[fmt.Sprintf("states.%d.name", i)]
+						if !ok {
+							return "", fmt.Errorf("no Backlog state in %v", ds)
+						}
+						if name == "Backlog" {
+							return ds[fmt.Sprintf("states.%d.id", i)], nil
+						}
+					}
+				},
+			},
+			{
+				// The first plan after import must be empty: `default` stays true.
+				Config: backlogConfig,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(stateRes, "default", "true"),
+					checkSingleDefault("data.flightdeck_states.all", "Backlog"),
+				),
+			},
+		},
+	})
+}
+
+func TestState_defaultHandOverRacesTheOldDefaultsEdit(t *testing.T) {
+	env := newTestEnv(t, "state")
+	identifier := randIdentifier()
+	// Step 1: two managed states, "old" is the default.
+	step1 := projectFixture(env, identifier) + `
+resource "flightdeck_state" "old" {
+  project_id = flightdeck_project.parent.id
+  name       = "Old default"
+  group      = "backlog"
+  default    = true
+}
+
+resource "flightdeck_state" "new" {
+  project_id = flightdeck_project.parent.id
+  name       = "New default"
+  group      = "unstarted"
+  depends_on = [flightdeck_state.old]
+}
+`
+	// Step 2: hand the default to "new" and, in the same apply, rename "old".
+	// depends_on forces the hand-over to apply first, which bumps "old"'s
+	// lock_version on the server; "old"'s edit then carries a stale If-Match.
+	step2 := projectFixture(env, identifier) + `
+resource "flightdeck_state" "new" {
+  project_id = flightdeck_project.parent.id
+  name       = "New default"
+  group      = "unstarted"
+  default    = true
+}
+
+resource "flightdeck_state" "old" {
+  project_id = flightdeck_project.parent.id
+  name       = "Old default (renamed)"
+  group      = "backlog"
+  default    = false
+  depends_on = [flightdeck_state.new]
+}
+`
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: step1,
+				Check:  resource.TestCheckResourceAttr("flightdeck_state.old", "default", "true"),
+			},
+			{
+				Config:      step2,
+				ExpectError: regexMust(`(?s)State "Old default" modified outside of Terraform`),
+			},
+			{
+				// The next plan refreshes "old" (default now false, new lock_version)
+				// and the rename goes through.
+				Config: step2,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("flightdeck_state.new", "default", "true"),
+					resource.TestCheckResourceAttr("flightdeck_state.old", "default", "false"),
+					resource.TestCheckResourceAttr("flightdeck_state.old", "name", "Old default (renamed)"),
+				),
+			},
+		},
+	})
+}
+
+func TestState_destroyingTheDefaultStateLeavesItInPlace(t *testing.T) {
+	env := newTestEnv(t, "state")
+	identifier := randIdentifier()
+	var id string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: stateConfig(env, identifier, `
+  name    = "Triage"
+  group   = "backlog"
+  default = true`),
+				Check: captureAttr(stateRes, "id", &id),
+			},
+			{
+				// Removing the resource: the API refuses to delete the project's
+				// default state, so the provider drops it from Terraform state
+				// with a warning rather than failing the destroy.
+				Config: projectFixture(env, identifier),
+			},
+		},
+	})
+	if !env.live() {
+		if stateProjectID(env, mustInt(id)) == 0 {
+			t.Fatalf("default state %s should still exist on the server", id)
+		}
+	}
+}
+
+// stateProjectID finds the project owning a state in the fake (0 if unknown).
+func stateProjectID(env *testEnv, stateID int64) int64 {
+	for _, p := range env.fake.AllProjectIDs() {
+		for _, st := range env.fake.StatesOf(p) {
+			if st.ID == stateID {
+				return p
+			}
+		}
+	}
+	return 0
 }

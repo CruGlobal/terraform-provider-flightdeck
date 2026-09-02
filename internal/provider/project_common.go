@@ -2,7 +2,10 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"regexp"
+	"sort"
+	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -27,7 +30,7 @@ var (
 )
 
 // projectModel is the Terraform state shape shared by the resource and the
-// data source (the data source has no self_healing block).
+// data source.
 type projectModel struct {
 	ID                 types.Int64  `tfsdk:"id"`
 	Name               types.String `tfsdk:"name"`
@@ -145,4 +148,45 @@ func projectFields(ctx context.Context, plan *projectModel, diags *diag.Diagnost
 		fields["self_healing"] = thresholds
 	}
 	return fields
+}
+
+// reconcileFeatures makes a server-side override of a managed feature toggle
+// surface as a diff rather than an apply error. The API may refuse to honour
+// a toggle (a plan-gated feature, say) or omit a key entirely; Terraform
+// requires the post-apply state to equal the plan for known values, so the
+// plan's toggles are written to state as requested and a warning names the
+// keys the server reports differently. The next refresh reads the server's
+// values back, and the difference shows up as a plan.
+func reconcileFeatures(ctx context.Context, state, plan *projectModel, diags *diag.Diagnostics) {
+	if plan.Features.IsNull() || plan.Features.IsUnknown() {
+		return
+	}
+	var wanted, got map[string]bool
+	diags.Append(plan.Features.ElementsAs(ctx, &wanted, false)...)
+	if !state.Features.IsNull() && !state.Features.IsUnknown() {
+		diags.Append(state.Features.ElementsAs(ctx, &got, false)...)
+	}
+	var differing []string
+	for k, v := range wanted {
+		if actual, ok := got[k]; !ok || actual != v {
+			differing = append(differing, fmt.Sprintf("%s (asked %t, server reports %s)", k, v, reportValue(got, k)))
+		}
+	}
+	if len(differing) == 0 {
+		return
+	}
+	sort.Strings(differing)
+	state.Features = plan.Features
+	diags.AddWarning("Flightdeck did not apply every feature toggle as requested",
+		"The API reports a different effective value for: "+strings.Join(differing, "; ")+
+			". State records the requested values; the next `terraform plan` will show the difference. "+
+			"A toggle the API keeps overriding is not settable for this project through the API.")
+}
+
+func reportValue(m map[string]bool, k string) string {
+	v, ok := m[k]
+	if !ok {
+		return "no value"
+	}
+	return fmt.Sprint(v)
 }

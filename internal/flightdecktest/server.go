@@ -57,15 +57,24 @@ type Server struct {
 
 	// Resource stores live in their own files alongside their handlers and
 	// register themselves through registerResource.
-	stores map[string]any
+	stores     map[string]any
+	idempotent map[string]idempotentResponse
 
 	// Fault injection.
 	throttleNext   int
 	throttleRetry  time.Duration
 	inFlightNext   int
 	failNext       []int
+	beforeRequest  []requestHook
 	requests       []RecordedRequest
 	workspaceAdmin bool
+}
+
+// requestHook runs once, just before the first request matching method + path
+// is handled — the seam for "someone else wrote in between plan and apply".
+type requestHook struct {
+	method, path string
+	fn           func()
 }
 
 // resourceHook wires one resource family (store + routes) into a Server. Each
@@ -83,6 +92,7 @@ func New(t testing.TB) *Server {
 		token:          DefaultToken,
 		nextID:         1000,
 		stores:         map[string]any{},
+		idempotent:     map[string]idempotentResponse{},
 		workspaceAdmin: true,
 	}
 	s.members = []User{
@@ -122,6 +132,14 @@ func (s *Server) InFlightNext(n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.inFlightNext = n
+}
+
+// OnNextRequest runs fn once, immediately before the next request with the
+// given method and exact path is handled (after fault injection and auth).
+func (s *Server) OnNextRequest(method, path string, fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.beforeRequest = append(s.beforeRequest, requestHook{method: method, path: path, fn: fn})
 }
 
 // FailNext queues HTTP statuses to answer the next requests with, in order,
@@ -229,6 +247,17 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			writeError(rec, http.StatusNotAcceptable, "not_acceptable", "JSON only")
 			return
 		}
+		s.mu.Lock()
+		for i, h := range s.beforeRequest {
+			if h.method == r.Method && h.path == r.URL.Path {
+				s.beforeRequest = append(s.beforeRequest[:i], s.beforeRequest[i+1:]...)
+				s.mu.Unlock()
+				h.fn()
+				s.mu.Lock()
+				break
+			}
+		}
+		s.mu.Unlock()
 		next.ServeHTTP(rec, r)
 	})
 }

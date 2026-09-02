@@ -168,3 +168,27 @@ func TestIngestionToken_tokenIsSensitiveInPlanOutput(t *testing.T) {
 		},
 	})
 }
+
+func TestIngestionToken_unverifiableCreateIsAnErrorNotASecondToken(t *testing.T) {
+	env := newTestEnv(t, "ingestion_token")
+	env.requireFake(t)
+	env.fake.HideIngestionTokensFromList(true)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config:      tokenConfig(env, identifier, `  name = "api"`),
+				ExpectError: regexMust(`(?s)follow-up read could not find it.*refusing to create another`),
+			},
+		},
+	})
+	var posts int
+	for _, r := range env.fake.Requests() {
+		if r.Method == "POST" && len(r.Path) > 17 && r.Path[len(r.Path)-17:] == "/ingestion_tokens" {
+			posts++
+		}
+	}
+	if posts != 1 {
+		t.Fatalf("expected exactly one token to be minted, saw %d POSTs", posts)
+	}
+}

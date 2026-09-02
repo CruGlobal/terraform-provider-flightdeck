@@ -12,7 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -154,10 +154,11 @@ func (r *webhookResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				},
 			},
 			"active": schema.BoolAttribute{
-				MarkdownDescription: "Whether deliveries are sent. Defaults to `true`.",
-				Optional:            true,
-				Computed:            true,
-				Default:             booldefault.StaticBool(true),
+				MarkdownDescription: "Whether deliveries are sent. A new webhook is active. When unset, the webhook's " +
+					"current value is kept (so importing a paused webhook does not plan to reactivate it).",
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"lock_version": schema.Int64Attribute{
 				MarkdownDescription: "Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates.",
@@ -230,7 +231,7 @@ func (r *webhookResource) Update(ctx context.Context, req resource.UpdateRequest
 			if fresh, rerr := r.client.GetWebhook(ctx, id); rerr == nil {
 				current = &fresh.LockVersion
 			}
-			addStaleError(&resp.Diagnostics, fmt.Sprintf("Webhook %d", id), state.LockVersion.ValueInt64(), current)
+			addStaleError(&resp.Diagnostics, fmt.Sprintf("Webhook %d", id), state.LockVersion.ValueInt64(), current, err)
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error updating Flightdeck webhook", err)

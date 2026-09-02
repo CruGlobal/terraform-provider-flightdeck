@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -128,10 +129,11 @@ func (r *errorAlertRuleResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"enabled": schema.BoolAttribute{
-				MarkdownDescription: "Whether the rule is evaluated. Defaults to `true`.",
-				Optional:            true,
-				Computed:            true,
-				Default:             booldefault.StaticBool(true),
+				MarkdownDescription: "Whether the rule is evaluated. A new rule is enabled. When unset, the rule's current " +
+					"value is kept (so importing a disabled rule does not plan to enable it).",
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"trigger": schema.StringAttribute{
 				MarkdownDescription: "What fires the rule: `new_group` (a never-seen error), `regression` (a resolved error " +
@@ -225,6 +227,10 @@ func (r *errorAlertRuleResource) ValidateConfig(ctx context.Context, req resourc
 		resp.Diagnostics.AddAttributeError(path.Root("action").AtName("webhook_url"), "webhook_url required",
 			"`notify_webhook` is enabled, so `webhook_url` must be set.")
 	}
+	if !action.WebhookURL.IsNull() && !action.NotifyWebhook.IsUnknown() && !action.NotifyWebhook.ValueBool() {
+		resp.Diagnostics.AddAttributeError(path.Root("action").AtName("webhook_url"), "webhook_url requires notify_webhook",
+			"`webhook_url` is set but `notify_webhook` is not true, so it would never be used; set both or neither.")
+	}
 	if !action.EscalationPolicyID.IsNull() && !action.OpenIncident.IsUnknown() && !action.OpenIncident.ValueBool() {
 		resp.Diagnostics.AddAttributeError(path.Root("action").AtName("escalation_policy_id"), "escalation_policy_id requires open_incident",
 			"The API only stores `escalation_policy_id` when `open_incident` is true; set both or neither.")
@@ -283,10 +289,10 @@ func alertRuleFields(ctx context.Context, plan *errorAlertRuleModel, diags *diag
 
 func alertRuleToModel(rule *client.ErrorAlertRule, diags *diag.Diagnostics) errorAlertRuleModel {
 	condition, d := types.ObjectValue(alertConditionAttrTypes, map[string]attr.Value{
-		"min_level":      rawString(rule.Condition["min_level"]),
-		"environment":    rawString(rule.Condition["environment"]),
-		"count":          rawInt64(rule.Condition["count"]),
-		"window_minutes": rawInt64(rule.Condition["window_minutes"]),
+		"min_level":      rawString("condition.min_level", rule.Condition["min_level"], diags),
+		"environment":    rawString("condition.environment", rule.Condition["environment"], diags),
+		"count":          rawInt64("condition.count", rule.Condition["count"], diags),
+		"window_minutes": rawInt64("condition.window_minutes", rule.Condition["window_minutes"], diags),
 	})
 	diags.Append(d...)
 	action, d := types.ObjectValue(alertActionAttrTypes, map[string]attr.Value{
@@ -296,8 +302,8 @@ func alertRuleToModel(rule *client.ErrorAlertRule, diags *diag.Diagnostics) erro
 		"file_intake":          rawBool(rule.Action["file_intake"]),
 		"notify_webhook":       rawBool(rule.Action["notify_webhook"]),
 		"open_incident":        rawBool(rule.Action["open_incident"]),
-		"webhook_url":          rawString(rule.Action["webhook_url"]),
-		"escalation_policy_id": rawInt64(rule.Action["escalation_policy_id"]),
+		"webhook_url":          rawString("action.webhook_url", rule.Action["webhook_url"], diags),
+		"escalation_policy_id": rawInt64("action.escalation_policy_id", rule.Action["escalation_policy_id"], diags),
 	})
 	diags.Append(d...)
 	return errorAlertRuleModel{
@@ -313,23 +319,27 @@ func alertRuleToModel(rule *client.ErrorAlertRule, diags *diag.Diagnostics) erro
 }
 
 // The API stores condition/action values as whatever JSON the writer sent, so
-// the readers below accept the natural type and its string spelling.
+// the readers below accept the natural type and its string spelling — and
+// nothing else: a value of the wrong shape is an error naming the field, not a
+// silent truncation or a JSON fragment smuggled into a string.
 
-func rawString(raw json.RawMessage) types.String {
+func rawString(field string, raw json.RawMessage, diags *diag.Diagnostics) types.String {
 	if len(raw) == 0 || string(raw) == "null" {
 		return types.StringNull()
 	}
 	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		if s == "" {
-			return types.StringNull()
-		}
-		return types.StringValue(s)
+	if err := json.Unmarshal(raw, &s); err != nil {
+		diags.AddError("Unexpected value from Flightdeck",
+			fmt.Sprintf("%s should be a string but the API returned %s.", field, strings.TrimSpace(string(raw))))
+		return types.StringNull()
 	}
-	return types.StringValue(strings.Trim(string(raw), `"`))
+	if s == "" {
+		return types.StringNull()
+	}
+	return types.StringValue(s)
 }
 
-func rawInt64(raw json.RawMessage) types.Int64 {
+func rawInt64(field string, raw json.RawMessage, diags *diag.Diagnostics) types.Int64 {
 	if len(raw) == 0 || string(raw) == "null" {
 		return types.Int64Null()
 	}
@@ -338,9 +348,9 @@ func rawInt64(raw json.RawMessage) types.Int64 {
 		if i, err := n.Int64(); err == nil {
 			return types.Int64Value(i)
 		}
-		if f, err := n.Float64(); err == nil {
-			return types.Int64Value(int64(f))
-		}
+		diags.AddError("Unexpected value from Flightdeck",
+			fmt.Sprintf("%s should be an integer but the API returned %s.", field, n.String()))
+		return types.Int64Null()
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
@@ -348,6 +358,8 @@ func rawInt64(raw json.RawMessage) types.Int64 {
 			return types.Int64Value(i)
 		}
 	}
+	diags.AddError("Unexpected value from Flightdeck",
+		fmt.Sprintf("%s should be an integer but the API returned %s.", field, strings.TrimSpace(string(raw))))
 	return types.Int64Null()
 }
 
@@ -387,6 +399,7 @@ func (r *errorAlertRuleResource) Create(ctx context.Context, req resource.Create
 		return
 	}
 	state := alertRuleToModel(created, &resp.Diagnostics)
+	reconcileAlertAction(ctx, &state, &plan, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -428,14 +441,46 @@ func (r *errorAlertRuleResource) Update(ctx context.Context, req resource.Update
 			if fresh, rerr := r.client.GetErrorAlertRule(ctx, id); rerr == nil {
 				current = &fresh.LockVersion
 			}
-			addStaleError(&resp.Diagnostics, fmt.Sprintf("Error alert rule %q", state.Name.ValueString()), state.LockVersion.ValueInt64(), current)
+			addStaleError(&resp.Diagnostics, fmt.Sprintf("Error alert rule %q", state.Name.ValueString()), state.LockVersion.ValueInt64(), current, err)
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error updating Flightdeck error alert rule", err)
 		return
 	}
 	newState := alertRuleToModel(updated, &resp.Diagnostics)
+	reconcileAlertAction(ctx, &newState, &plan, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
+}
+
+// reconcileAlertAction keeps a planned webhook_url / escalation_policy_id that
+// the server dropped (it only stores escalation_policy_id alongside
+// open_incident, and normalises the action object) so the apply is consistent;
+// a warning names the field and the next refresh shows the drop as a diff.
+func reconcileAlertAction(ctx context.Context, state, plan *errorAlertRuleModel, diags *diag.Diagnostics) {
+	if plan.Action.IsNull() || plan.Action.IsUnknown() || state.Action.IsNull() {
+		return
+	}
+	var wanted, got alertActionModel
+	diags.Append(plan.Action.As(ctx, &wanted, objectAsOptions)...)
+	diags.Append(state.Action.As(ctx, &got, objectAsOptions)...)
+	var dropped []string
+	if !wanted.WebhookURL.IsNull() && !wanted.WebhookURL.IsUnknown() && got.WebhookURL.IsNull() {
+		got.WebhookURL = wanted.WebhookURL
+		dropped = append(dropped, "action.webhook_url")
+	}
+	if !wanted.EscalationPolicyID.IsNull() && !wanted.EscalationPolicyID.IsUnknown() && got.EscalationPolicyID.IsNull() {
+		got.EscalationPolicyID = wanted.EscalationPolicyID
+		dropped = append(dropped, "action.escalation_policy_id")
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	obj, d := types.ObjectValueFrom(ctx, alertActionAttrTypes, got)
+	diags.Append(d...)
+	state.Action = obj
+	diags.AddWarning("Flightdeck did not store every action value",
+		"The API dropped "+strings.Join(dropped, " and ")+" (it keeps escalation_policy_id only while open_incident "+
+			"is true). State records the configured value; the next `terraform plan` will show the difference.")
 }
 
 func (r *errorAlertRuleResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

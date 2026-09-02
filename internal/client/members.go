@@ -19,7 +19,7 @@ type WorkspaceMember struct {
 
 // ListWorkspaceMembers returns the workspace's member directory.
 func (c *Client) ListWorkspaceMembers(ctx context.Context) ([]WorkspaceMember, error) {
-	return List[WorkspaceMember](ctx, c, "/workspace_members")
+	return ListResources[WorkspaceMember](ctx, c, "/workspace_members", "workspace_member")
 }
 
 // FindWorkspaceMemberByEmail resolves a member by email (case-insensitive).
@@ -53,8 +53,13 @@ type ProjectMember struct {
 	LockVersion *int64 `json:"lock_version"`
 }
 
+// ResourceID implements Identified.
+func (m *ProjectMember) ResourceID() int64 { return m.ID }
+
 // ProjectMemberRoles are the built-in roles; custom role keys are also valid.
 var ProjectMemberRoles = []string{"guest", "member", "admin", "commenter"}
+
+const memberRoot = "member"
 
 func membersPath(projectID int64) string {
 	return "/projects/" + strconv.FormatInt(projectID, 10) + "/members"
@@ -62,7 +67,7 @@ func membersPath(projectID int64) string {
 
 // ListProjectMembers returns a project's explicit member rows.
 func (c *Client) ListProjectMembers(ctx context.Context, projectID int64) ([]ProjectMember, error) {
-	return List[ProjectMember](ctx, c, membersPath(projectID))
+	return ListResources[ProjectMember](ctx, c, membersPath(projectID), memberRoot)
 }
 
 // FindProjectMember returns the member row for userID, or a 404 *Error.
@@ -82,35 +87,31 @@ func (c *Client) FindProjectMember(ctx context.Context, projectID, userID int64)
 	}
 }
 
-// AddProjectMember adds a user to a project with a role.
+// AddProjectMember adds a user to a project with a role. Membership rows have
+// no show route, so the create is verified against the member list by row id.
+// A row missing from the list is inconclusive (VerifiedUnknown) rather than
+// proof of a replayed create: the provider reports it instead of adding the
+// user twice.
 func (c *Client) AddProjectMember(ctx context.Context, projectID int64, fields Fields, idempotencyKey string) (*ProjectMember, error) {
-	return CreateWithReplayGuard(ctx, idempotencyKey,
-		func(ctx context.Context, key string) (*ProjectMember, error) {
-			var m ProjectMember
-			if err := c.Post(ctx, membersPath(projectID), map[string]any{"member": fields}, &m, WithIdempotencyKey(key)); err != nil {
-				return nil, err
+	verify := func(ctx context.Context, created *ProjectMember) (Verdict, error) {
+		members, err := c.ListProjectMembers(ctx, projectID)
+		if err != nil {
+			return VerifiedUnknown, err
+		}
+		for i := range members {
+			if members[i].ID == created.ID {
+				return VerifiedPresent, nil
 			}
-			return &m, nil
-		},
-		func(ctx context.Context, created *ProjectMember) error {
-			_, err := c.FindProjectMember(ctx, projectID, created.UserID)
-			return err
-		})
+		}
+		return VerifiedUnknown, nil
+	}
+	return CreateResource(ctx, c, membersPath(projectID), memberRoot, fields, idempotencyKey, verify)
 }
 
 // UpdateProjectMember changes a member's role. lockVersion is sent as If-Match
 // when non-nil (the API may or may not version membership rows).
 func (c *Client) UpdateProjectMember(ctx context.Context, projectID, userID int64, fields Fields, lockVersion *int64) (*ProjectMember, error) {
-	var m ProjectMember
-	var opts []RequestOption
-	if lockVersion != nil {
-		opts = append(opts, WithIfMatch(*lockVersion))
-	}
-	err := c.Patch(ctx, membersPath(projectID)+"/"+strconv.FormatInt(userID, 10), map[string]any{"member": fields}, &m, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return &m, nil
+	return PatchResource[*ProjectMember](ctx, c, membersPath(projectID)+"/"+strconv.FormatInt(userID, 10), memberRoot, fields, lockVersion)
 }
 
 // RemoveProjectMember removes a user from a project; 404 is success.

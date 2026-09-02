@@ -75,7 +75,7 @@ resource "flightdeck_error_alert_rule" "error_storm" {
 ### Optional
 
 - `condition` (Attributes) Conditions, all of which must hold (omit for none). (see [below for nested schema](#nestedatt--condition))
-- `enabled` (Boolean) Whether the rule is evaluated. Defaults to `true`.
+- `enabled` (Boolean) Whether the rule is evaluated. A new rule is enabled. When unset, the rule's current value is kept (so importing a disabled rule does not plan to enable it).
 
 ### Read-Only
 

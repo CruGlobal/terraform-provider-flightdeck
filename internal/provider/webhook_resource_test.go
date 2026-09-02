@@ -214,3 +214,27 @@ func TestWebhook_staleWriteAndHeaders(t *testing.T) {
 		t.Errorf("webhook PATCHes = %+v", patches)
 	}
 }
+
+func TestWebhook_inactiveSurvivesImportWithoutADefault(t *testing.T) {
+	env := newTestEnv(t, "webhook")
+	paused := webhookConfig(env, `
+  url    = "https://ci.example.com/hooks/paused"
+  events = ["project.updated"]
+  active = false`)
+	unspecified := webhookConfig(env, `
+  url    = "https://ci.example.com/hooks/paused"
+  events = ["project.updated"]`)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{Config: paused, Check: resource.TestCheckResourceAttr(webhookRes, "active", "false")},
+			{ResourceName: webhookRes, ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"secret"}},
+			{
+				Config: unspecified,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+				Check: resource.TestCheckResourceAttr(webhookRes, "active", "false"),
+			},
+		},
+	})
+}

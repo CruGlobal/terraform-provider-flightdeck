@@ -28,48 +28,36 @@ type Webhook struct {
 	LockVersion int64    `json:"lock_version"`
 }
 
+// ResourceID implements Identified.
+func (w *Webhook) ResourceID() int64 { return w.ID }
+
+const webhookRoot = "webhook"
+
+func webhookPath(id int64) string { return "/webhooks/" + strconv.FormatInt(id, 10) }
+
 // ListWebhooks returns the workspace's webhooks.
 func (c *Client) ListWebhooks(ctx context.Context) ([]Webhook, error) {
-	return List[Webhook](ctx, c, "/webhooks")
+	return ListResources[Webhook](ctx, c, "/webhooks", webhookRoot)
 }
 
 // GetWebhook fetches one webhook.
 func (c *Client) GetWebhook(ctx context.Context, id int64) (*Webhook, error) {
-	var w Webhook
-	if err := c.Get(ctx, "/webhooks/"+strconv.FormatInt(id, 10), &w); err != nil {
-		return nil, err
-	}
-	return &w, nil
+	return GetResource[*Webhook](ctx, c, webhookPath(id), webhookRoot)
 }
 
-// CreateWebhook creates a webhook, guarded like CreateProject.
+// CreateWebhook creates a webhook through the verified create path.
 func (c *Client) CreateWebhook(ctx context.Context, fields Fields, idempotencyKey string) (*Webhook, error) {
-	return CreateWithReplayGuard(ctx, idempotencyKey,
-		func(ctx context.Context, key string) (*Webhook, error) {
-			var w Webhook
-			if err := c.Post(ctx, "/webhooks", map[string]any{"webhook": fields}, &w, WithIdempotencyKey(key)); err != nil {
-				return nil, err
-			}
-			return &w, nil
-		},
-		func(ctx context.Context, created *Webhook) error {
-			_, err := c.GetWebhook(ctx, created.ID)
-			return err
-		})
+	return CreateResource(ctx, c, "/webhooks", webhookRoot, fields, idempotencyKey, VerifyByGet(c.GetWebhook))
 }
 
 // UpdateWebhook PATCHes a webhook with an If-Match precondition.
 func (c *Client) UpdateWebhook(ctx context.Context, id int64, fields Fields, lockVersion int64) (*Webhook, error) {
-	var w Webhook
-	if err := c.Patch(ctx, "/webhooks/"+strconv.FormatInt(id, 10), map[string]any{"webhook": fields}, &w, WithIfMatch(lockVersion)); err != nil {
-		return nil, err
-	}
-	return &w, nil
+	return PatchResource[*Webhook](ctx, c, webhookPath(id), webhookRoot, fields, &lockVersion)
 }
 
 // DeleteWebhook deletes a webhook; 404 is success.
 func (c *Client) DeleteWebhook(ctx context.Context, id int64) error {
-	err := c.Delete(ctx, "/webhooks/"+strconv.FormatInt(id, 10), nil)
+	err := c.Delete(ctx, webhookPath(id), nil)
 	if err != nil && !IsNotFound(err) {
 		return err
 	}

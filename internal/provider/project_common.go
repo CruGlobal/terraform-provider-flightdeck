@@ -38,6 +38,7 @@ type projectModel struct {
 	Features           types.Map    `tfsdk:"features"`
 	GithubRepoFullName types.String `tfsdk:"github_repo_full_name"`
 	LockVersion        types.Int64  `tfsdk:"lock_version"`
+	SelfHealing        types.Object `tfsdk:"self_healing"`
 }
 
 // featureKeyFilter says which feature keys to keep when mapping the API's
@@ -69,6 +70,7 @@ func projectToModel(ctx context.Context, p *client.Project, prior *projectModel,
 		Archived:           types.BoolValue(p.Archived),
 		GithubRepoFullName: stringPointerValue(p.GithubRepoFullName),
 		LockVersion:        types.Int64Value(p.LockVersion),
+		SelfHealing:        selfHealingToObject(p.SelfHealing, diags),
 	}
 
 	var keep map[string]bool
@@ -135,6 +137,12 @@ func projectFields(ctx context.Context, plan *projectModel, diags *diag.Diagnost
 		var features map[string]bool
 		diags.Append(plan.Features.ElementsAs(ctx, &features, false)...)
 		fields["features"] = features
+	}
+	// Only sent when the block is configured with at least one known
+	// threshold, so a token without workspace-admin rights that leaves the
+	// block alone never trips the admin gate.
+	if thresholds := selfHealingFields(ctx, plan.SelfHealing, diags); len(thresholds) > 0 {
+		fields["self_healing"] = thresholds
 	}
 	return fields
 }

@@ -109,6 +109,7 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				MarkdownDescription: "Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates.",
 				Computed:            true,
 			},
+			"self_healing": selfHealingSchema(),
 		},
 	}
 }

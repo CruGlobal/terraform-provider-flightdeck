@@ -83,6 +83,25 @@ func (d *projectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				MarkdownDescription: "Optimistic-locking version the API bumps on every change.",
 				Computed:            true,
 			},
+			"self_healing": schema.SingleNestedAttribute{
+				MarkdownDescription: "Resolved self-healing control-loop configuration (armed flag and thresholds). " +
+					"Reported only when the token's user is a workspace admin; null otherwise.",
+				Computed: true,
+				Attributes: map[string]schema.Attribute{
+					"armed":                   schema.BoolAttribute{MarkdownDescription: "Whether live rollback is armed.", Computed: true},
+					"bake_minutes":            schema.Int64Attribute{MarkdownDescription: "Eligibility window after a deploy, in minutes.", Computed: true},
+					"baseline_multiplier":     schema.Float64Attribute{MarkdownDescription: "Required multiple of the baseline error rate.", Computed: true},
+					"absolute_floor":          schema.Float64Attribute{MarkdownDescription: "Required errors per minute floor.", Computed: true},
+					"long_window_minutes":     schema.Int64Attribute{MarkdownDescription: "Long burn-rate window in minutes.", Computed: true},
+					"short_window_minutes":    schema.Int64Attribute{MarkdownDescription: "Short burn-rate window in minutes.", Computed: true},
+					"burn_rate":               schema.Float64Attribute{MarkdownDescription: "Burn rate that counts as severe.", Computed: true},
+					"sustain_count":           schema.Int64Attribute{MarkdownDescription: "Consecutive trips required before acting.", Computed: true},
+					"consecutive_error_limit": schema.Int64Attribute{MarkdownDescription: "Metrics-query failures tolerated before inconclusive.", Computed: true},
+					"cooldown_minutes":        schema.Int64Attribute{MarkdownDescription: "Cooldown between actions, in minutes.", Computed: true},
+					"max_rollbacks_per_hour":  schema.Int64Attribute{MarkdownDescription: "Per-app blast-radius cap.", Computed: true},
+					"recovery_window_minutes": schema.Int64Attribute{MarkdownDescription: "Post-rollback grace period, in minutes.", Computed: true},
+				},
+			},
 		},
 	}
 }

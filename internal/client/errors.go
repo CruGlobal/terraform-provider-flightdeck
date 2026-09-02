@@ -33,6 +33,13 @@ type Error struct {
 	Message    string
 	RetryAfter time.Duration
 	Err        error
+
+	// Idempotent and Preconditioned record whether the failed request carried
+	// an Idempotency-Key or an If-Match header. They let a 409 without a code
+	// be classified: a create's 409 is the in-flight replay window, an
+	// update's 409 is a lost optimistic-locking race.
+	Idempotent     bool
+	Preconditioned bool
 }
 
 func (e *Error) Error() string {
@@ -56,14 +63,19 @@ func (e *Error) Unwrap() error { return e.Err }
 
 // Retryable reports whether waiting and trying again could succeed: a 429, the
 // 409 that means "your own create is still in flight" (its replay becomes
-// available once the original finishes), and gateway-class 5xx.
+// available once the original finishes), and gateway-class 5xx. A 409 without
+// a code counts as in-flight only when the request was a keyed create and the
+// message does not read like a lock conflict.
 func (e *Error) Retryable() bool {
 	switch {
 	case e.Status == http.StatusTooManyRequests:
 		return true
-	case e.Status == http.StatusConflict && e.Code == CodeIdempotencyKeyInFlight:
-		return true
-	case e.Status == http.StatusBadGateway, e.Status == http.StatusServiceUnavailable, e.Status == http.StatusGatewayTimeout:
+	case e.Status == http.StatusConflict:
+		if e.Code != "" {
+			return e.Code == CodeIdempotencyKeyInFlight
+		}
+		return e.Idempotent && !looksStale(e.Message)
+	case isGatewayStatus(e.Status):
 		return true
 	}
 	return false
@@ -75,10 +87,30 @@ func (e *Error) Retryable() bool {
 func IsNotFound(err error) bool { return hasStatus(err, http.StatusNotFound) }
 
 // IsStale reports a 409 caused by a lost optimistic-locking race (If-Match /
-// lock_version). Distinct from the retryable in-flight idempotency 409.
+// lock_version). With a code, that is exactly stale_object. Without one, an
+// update that carried If-Match is presumed stale, as is any 409 whose message
+// mentions the lock; a 409 on a keyed create is the in-flight window instead,
+// and any other uncoded 409 (for example a uniqueness conflict) is neither.
 func IsStale(err error) bool {
 	e, ok := asError(err)
-	return ok && e.Status == http.StatusConflict && e.Code != CodeIdempotencyKeyInFlight
+	if !ok || e.Status != http.StatusConflict {
+		return false
+	}
+	if e.Code != "" {
+		return e.Code == CodeStaleObject
+	}
+	if looksStale(e.Message) {
+		return true
+	}
+	return e.Preconditioned && !e.Idempotent
+}
+
+// looksStale is the prose fallback for a 409 without a code: the API's
+// conflict message has always named lock_version / If-Match.
+func looksStale(message string) bool {
+	m := strings.ToLower(message)
+	return strings.Contains(m, "lock_version") || strings.Contains(m, "if-match") ||
+		strings.Contains(m, "modified by someone else")
 }
 
 // IsUnauthorized reports a 401.
@@ -90,6 +122,10 @@ func IsForbidden(err error) bool { return hasStatus(err, http.StatusForbidden) }
 // IsValidation reports a 422 of either flavour (validation_failed or
 // invalid_attribute): the request is wrong, not the timing.
 func IsValidation(err error) bool { return hasStatus(err, http.StatusUnprocessableEntity) }
+
+// IsPreconditionRequired reports a 428: the server insists on an If-Match the
+// client did not have to send.
+func IsPreconditionRequired(err error) bool { return hasStatus(err, http.StatusPreconditionRequired) }
 
 func hasStatus(err error, status int) bool {
 	e, ok := asError(err)
@@ -110,6 +146,9 @@ func asError(err error) (*Error, bool) {
 	return nil, false
 }
 
+// AsError returns the *Error in err's chain, if any.
+func AsError(err error) (*Error, bool) { return asError(err) }
+
 // errorEnvelope is the API's uniform non-2xx body.
 type errorEnvelope struct {
 	Error string `json:"error"`
@@ -123,6 +162,9 @@ func newError(method, path string, resp *http.Response, body []byte) *Error {
 		e.Message = env.Error
 		e.Code = env.Code
 	} else if msg := strings.TrimSpace(string(body)); msg != "" {
+		if len(msg) > maxErrorBody {
+			msg = msg[:maxErrorBody] + "… (truncated)"
+		}
 		e.Message = msg
 	} else {
 		e.Message = http.StatusText(resp.StatusCode)

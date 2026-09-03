@@ -3,14 +3,13 @@ resource "flightdeck_project" "app" {
   identifier  = "APP"
   description = "The customer-facing mobile application"
   emoji       = "📱"
+  network     = "private_project" # explicit members only; new projects are public
 
   # Only the feature keys listed here are managed; others keep their value.
   features = {
     intake = true
     errors = true
   }
-
-  github_repo_full_name = "example-org/mobile-app"
 }
 
 # Self-healing thresholds (workspace admins only). `armed` is read-only:

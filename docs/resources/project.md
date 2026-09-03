@@ -27,14 +27,13 @@ resource "flightdeck_project" "app" {
   identifier  = "APP"
   description = "The customer-facing mobile application"
   emoji       = "📱"
+  network     = "private_project" # explicit members only; new projects are public
 
   # Only the feature keys listed here are managed; others keep their value.
   features = {
     intake = true
     errors = true
   }
-
-  github_repo_full_name = "example-org/mobile-app"
 }
 
 # Self-healing thresholds (workspace admins only). `armed` is read-only:
@@ -65,30 +64,32 @@ resource "flightdeck_project" "payments" {
 - `description` (String) Free-text description. Removing it from configuration clears it.
 - `emoji` (String) Emoji shown next to the project name. Defaults to the server's default (📁).
 - `features` (Map of Boolean) Feature toggles to manage, as a map of feature key to boolean. Only the keys listed here are managed; keys you leave out keep whatever value the project has. Settable keys: `cycles`, `modules`, `milestones`, `views`, `pages`, `meeting_notes`, `decisions`, `intake`, `errors`, `incidents`, `estimates`. (`self_healing` and `slack` are reported by the `flightdeck_project` data source but cannot be set through the API.)
-- `github_repo_full_name` (String) GitHub repository this project maps to, as `owner/repo`. Records the mapping only; connecting the repository's webhook still happens in the project's integration settings. Removing it from configuration clears it.
-- `self_healing` (Attributes) Self-healing (automated rollback) control-loop configuration. Reading and writing this block requires the token's user to be a **workspace admin**; for other tokens it is null. Thresholds you leave unset take the server's documented defaults. `armed` is read-only: arming a project is a console-only operation, and the API refuses a write to it. The `self_healing` *feature* flag is likewise not settable through the API. (see [below for nested schema](#nestedatt--self_healing))
+- `lead_id` (Number) User id of the project lead; must be a workspace member. Defaults to the token's user on create. When unset, the current lead is kept.
+- `network` (String) Project visibility: `public_project` (every workspace member can see it) or `private_project` (explicit members only). New projects are public. When unset, the current value is kept. Making a project private also gives the token's user and the project lead admin memberships so nobody is locked out; members who lose implicit access are not notified.
+- `self_healing` (Attributes) Self-healing (automated rollback) control-loop configuration, managed through the project's `self-healing` API resource. Reading and writing it requires the token's user to be a **workspace admin**; for other tokens, and on a Flightdeck version without the endpoint, the block is null. Thresholds you leave unset take the server's documented defaults. `armed` is read-only: arming a project is a console-only operation and the API refuses a write that would change it. `short_window_minutes` must not exceed `long_window_minutes`. A write here bumps the project's `lock_version`. (see [below for nested schema](#nestedatt--self_healing))
 
 ### Read-Only
 
+- `github_repo_full_name` (String) GitHub repository this project is linked to, as `owner/repo`. **Read-only**: linking and unlinking need the webhook-secret round-trip the project's Settings → Integrations page performs, so the API refuses writes to this field.
 - `id` (Number) Numeric id of the project.
-- `lock_version` (Number) Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates.
+- `lock_version` (Number) Optimistic-locking version the API bumps on every change (including self-healing writes). Sent as `If-Match` on updates.
 
 <a id="nestedatt--self_healing"></a>
 ### Nested Schema for `self_healing`
 
 Optional:
 
-- `absolute_floor` (Number) …and at least this many errors per minute, guarding a near-zero baseline (default 5.0).
-- `bake_minutes` (Number) Eligibility window after a deploy, in minutes (default 20).
-- `baseline_multiplier` (Number) Post-deploy error rate must be at least this multiple of the baseline (default 5.0).
-- `burn_rate` (Number) Multi-window burn rate that counts as severe (default 14.4).
-- `consecutive_error_limit` (Number) Metrics-query failures tolerated before a decision is inconclusive (default 3).
-- `cooldown_minutes` (Number) No action on the same app within this window, in minutes (default 30).
-- `long_window_minutes` (Number) Long burn-rate window in minutes (default 60).
-- `max_rollbacks_per_hour` (Number) Per-app blast-radius cap (default 1).
-- `recovery_window_minutes` (Number) Grace period after a rollback before a still-severe signal escalates, in minutes (default 15).
-- `short_window_minutes` (Number) Short burn-rate window in minutes (default 5).
-- `sustain_count` (Number) Consecutive trips required before acting (default 3).
+- `absolute_floor` (Number) …and at least this many errors per minute, guarding a near-zero baseline (default 5.0). Must be greater than 0 and at most 100000; the API refuses non-positive values because the engine treats them as "no limit".
+- `bake_minutes` (Number) Eligibility window after a deploy, in minutes (default 20). Must be between 1 and 1440; the API refuses non-positive values because the engine treats them as "no limit".
+- `baseline_multiplier` (Number) Post-deploy error rate must be at least this multiple of the baseline (default 5.0). Must be greater than 0 and at most 1000; the API refuses non-positive values because the engine treats them as "no limit".
+- `burn_rate` (Number) Multi-window burn rate that counts as severe (default 14.4). Must be greater than 0 and at most 1000; the API refuses non-positive values because the engine treats them as "no limit".
+- `consecutive_error_limit` (Number) Metrics-query failures tolerated before a decision is inconclusive (default 3). Must be between 1 and 100; the API refuses non-positive values because the engine treats them as "no limit".
+- `cooldown_minutes` (Number) No action on the same app within this window, in minutes (default 30). Must be between 1 and 1440; the API refuses non-positive values because the engine treats them as "no limit".
+- `long_window_minutes` (Number) Long burn-rate window in minutes (default 60). Must be between 1 and 1440; the API refuses non-positive values because the engine treats them as "no limit".
+- `max_rollbacks_per_hour` (Number) Per-app blast-radius cap (default 1). Must be between 1 and 100; the API refuses non-positive values because the engine treats them as "no limit".
+- `recovery_window_minutes` (Number) Grace period after a rollback before a still-severe signal escalates, in minutes (default 15). Must be between 1 and 1440; the API refuses non-positive values because the engine treats them as "no limit".
+- `short_window_minutes` (Number) Short burn-rate window in minutes (default 5). Must be between 1 and 1440; the API refuses non-positive values because the engine treats them as "no limit".
+- `sustain_count` (Number) Consecutive trips required before acting (default 3). Must be between 1 and 100; the API refuses non-positive values because the engine treats them as "no limit".
 
 Read-Only:
 

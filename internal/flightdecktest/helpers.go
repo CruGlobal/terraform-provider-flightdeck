@@ -2,10 +2,13 @@ package flightdecktest
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -80,14 +83,41 @@ func checkIfMatch(w http.ResponseWriter, r *http.Request, current int64) bool {
 }
 
 type idempotentResponse struct {
-	status int
-	body   []byte
+	status      int
+	body        []byte
+	fingerprint string
+}
+
+// fingerprintOf mirrors IdempotentRequests#idempotency_fingerprint: a hash of
+// the submitted attributes, stringified and sorted.
+func fingerprintOf(attrs map[string]any) string {
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(asString(attrs[k]))
+		b.WriteByte('\n')
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
 }
 
 // withIdempotency wraps a create. The same Idempotency-Key replays the stored
 // 2xx verbatim; only successful responses are remembered. Keys are scoped per
 // endpoint, as IdempotentRequests does.
 func (s *Server) withIdempotency(w http.ResponseWriter, r *http.Request, scope string, create func() (int, any)) {
+	s.withIdempotencyFingerprint(w, r, scope, "", create)
+}
+
+// withIdempotencyFingerprint is withIdempotency for a create that opts into
+// body fingerprinting (FD-794): the same key with different attributes is a
+// 409 idempotency_key_reused instead of a replay. An empty fingerprint opts out.
+func (s *Server) withIdempotencyFingerprint(w http.ResponseWriter, r *http.Request, scope, fingerprint string, create func() (int, any)) {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" || len(key) > 255 {
 		status, body := create()
@@ -98,6 +128,11 @@ func (s *Server) withIdempotency(w http.ResponseWriter, r *http.Request, scope s
 	s.mu.Lock()
 	if stored, ok := s.idempotent[cacheKey]; ok {
 		s.mu.Unlock()
+		if fingerprint != "" && stored.fingerprint != "" && stored.fingerprint != fingerprint {
+			writeError(w, http.StatusConflict, "idempotency_key_reused",
+				"This Idempotency-Key was already used for a create with different attributes. Send the original attributes to replay it, or a new key to create a separate resource.")
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Idempotent-Replayed", "true")
 		w.WriteHeader(stored.status)
@@ -117,7 +152,7 @@ func (s *Server) withIdempotency(w http.ResponseWriter, r *http.Request, scope s
 	encoded, _ := json.Marshal(body)
 	if status >= 200 && status < 300 {
 		s.mu.Lock()
-		s.idempotent[cacheKey] = idempotentResponse{status: status, body: encoded}
+		s.idempotent[cacheKey] = idempotentResponse{status: status, body: encoded, fingerprint: fingerprint}
 		s.mu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")

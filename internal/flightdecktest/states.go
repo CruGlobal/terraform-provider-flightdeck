@@ -88,6 +88,27 @@ func (s *Server) StatesOf(projectID int64) []State {
 	return out
 }
 
+// RemoveOtherStates deletes every state of the project except keepID, so the
+// survivor is the project's last state.
+func (s *Server) RemoveOtherStates(projectID, keepID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, st := range s.states().byID {
+		if st.ProjectID == projectID && id != keepID {
+			delete(s.states().byID, id)
+		}
+	}
+}
+
+// AddState seeds a state directly (no HTTP).
+func (s *Server) AddState(projectID int64, name, group string) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := &State{ID: s.id(), ProjectID: projectID, Name: name, Group: group, Color: "#9ca3af"}
+	s.states().byID[st.ID] = st
+	return st.ID
+}
+
 // MarkStateInUse simulates work items sitting in the state, which blocks delete.
 func (s *Server) MarkStateInUse(id int64, inUse bool) {
 	s.mu.Lock()
@@ -322,14 +343,23 @@ func (s *Server) destroyState(w http.ResponseWriter, r *http.Request) {
 		notFound(w)
 		return
 	}
-	if st.InUse {
-		writeError(w, http.StatusUnprocessableEntity, "validation_failed",
-			"Cannot delete record because dependent work items exist")
+	if !checkIfMatch(w, r, st.LockVersion) {
+		return
+	}
+	// The three guards, in the API's order and with its codes.
+	if len(s.projectStatesLocked(st.ProjectID)) == 1 {
+		writeError(w, http.StatusUnprocessableEntity, "last_state",
+			"A project must keep at least one state — this is the last one. Create another state before deleting it.")
 		return
 	}
 	if st.Default {
-		writeError(w, http.StatusUnprocessableEntity, "validation_failed",
-			"Cannot delete the project's default state; make another state the default first")
+		writeError(w, http.StatusUnprocessableEntity, "state_is_default",
+			"This is the project's default state. Make another state the default (PATCH it with default: true) before deleting this one.")
+		return
+	}
+	if st.InUse {
+		writeError(w, http.StatusUnprocessableEntity, "state_in_use",
+			"Cannot delete record because dependent work items exist. Move or delete the work items in this state first, or PATCH them to another state.")
 		return
 	}
 	delete(s.states().byID, id)

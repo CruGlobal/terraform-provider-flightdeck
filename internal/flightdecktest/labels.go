@@ -201,8 +201,12 @@ func (s *Server) destroyLabel(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.liveLabel(id) == nil {
+	l := s.liveLabel(id)
+	if l == nil {
 		notFound(w)
+		return
+	}
+	if !checkIfMatch(w, r, l.LockVersion) {
 		return
 	}
 	delete(s.labels().byID, id)

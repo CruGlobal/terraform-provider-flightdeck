@@ -3,7 +3,10 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/CruGlobal/terraform-provider-flightdeck/internal/flightdecktest"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
@@ -146,13 +149,10 @@ func TestProjectSelfHealing_nonAdminToken(t *testing.T) {
   self_healing = {
     bake_minutes = 30
   }`),
-				ExpectError: regexMust(`(?s)Error updating Flightdeck project.*HTTP 403 \(forbidden\).*Workspace admin`),
+				ExpectError: regexMust(`Self-healing configuration requires a workspace admin`),
 			},
 		},
 	})
-	if got := len(env.fake.RequestsMatching("PATCH", "/api/v1/projects/")); got != 1 {
-		t.Errorf("expected exactly one PATCH (the rejected thresholds write), got %d", got)
-	}
 }
 
 func TestProjectDataSource_selfHealing(t *testing.T) {
@@ -208,18 +208,142 @@ func TestProjectSelfHealing_unrelatedUpdateDoesNotRewriteThresholds(t *testing.T
 			},
 		},
 	})
-	patches := env.fake.RequestsMatching("PATCH", "/api/v1/projects/")
-	if len(patches) != 1 {
-		t.Fatalf("expected exactly one PATCH (the rename), got %d", len(patches))
+	var projectPatches, selfHealingPatches int
+	for _, r := range env.fake.RequestsMatching("PATCH", "/api/v1/projects/") {
+		if strings.HasSuffix(r.Path, "/self-healing") {
+			selfHealingPatches++
+		} else {
+			projectPatches++
+		}
 	}
-	var body map[string]map[string]any
-	if err := json.Unmarshal(patches[0].Body, &body); err != nil {
-		t.Fatalf("PATCH body: %v", err)
+	if projectPatches != 1 {
+		t.Fatalf("expected exactly one project PATCH (the rename), got %d", projectPatches)
 	}
-	if _, has := body["project"]["self_healing"]; has {
-		t.Fatalf("rename PATCH rewrote self_healing: %s", patches[0].Body)
-	}
-	if body["project"]["name"] != "Thresholds renamed" {
-		t.Fatalf("PATCH body = %s", patches[0].Body)
+	// Exactly one self-healing PATCH: the one in step 1 that set the threshold.
+	if selfHealingPatches != 1 {
+		t.Fatalf("expected the rename to leave self-healing alone, saw %d self-healing PATCHes", selfHealingPatches)
 	}
 }
+
+func TestProjectSelfHealing_writesGoToTheOwnEndpointWithTheProjectLockVersion(t *testing.T) {
+	env := newTestEnv(t, "self_healing")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `
+  name = "Transport"
+  self_healing = {
+    bake_minutes = 30
+    burn_rate    = 10.0
+  }`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "self_healing.bake_minutes", "30"),
+					// Created at 0, bumped once by the self-healing write.
+					resource.TestCheckResourceAttr(projectRes, "lock_version", "1"),
+				),
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name = "Transport"
+  self_healing = {
+    bake_minutes = 45
+    burn_rate    = 10.0
+  }`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "self_healing.bake_minutes", "45"),
+					// Project PATCH (2) then self-healing PATCH (3).
+					resource.TestCheckResourceAttr(projectRes, "lock_version", "3"),
+				),
+			},
+		},
+	})
+	patches := env.fake.RequestsMatching("PATCH", "/api/v1/projects/")
+	var shPatches []flightdecktestRequest
+	for _, r := range patches {
+		if strings.HasSuffix(r.Path, "/self-healing") {
+			shPatches = append(shPatches, r)
+		}
+	}
+	if len(shPatches) != 2 {
+		t.Fatalf("expected 2 self-healing PATCHes, got %d", len(shPatches))
+	}
+	var body map[string]map[string]any
+	if err := json.Unmarshal(shPatches[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	settings := body["self_healing"]
+	if settings["bake_minutes"] != float64(30) || settings["burn_rate"] != float64(10) {
+		t.Errorf("self-healing PATCH body = %s", shPatches[0].Body)
+	}
+	for k := range settings {
+		if k == "armed" || k == "config" || k == "feature_enabled" {
+			t.Errorf("self-healing PATCH must send threshold keys only, got %q", k)
+		}
+	}
+	if shPatches[0].Header.Get("If-Match") != `"0"` || shPatches[1].Header.Get("If-Match") != `"2"` {
+		t.Errorf("self-healing If-Match must be the project's current lock_version: %q, %q",
+			shPatches[0].Header.Get("If-Match"), shPatches[1].Header.Get("If-Match"))
+	}
+}
+
+func TestProjectSelfHealing_endpointAbsent(t *testing.T) {
+	env := newTestEnv(t, "self_healing")
+	env.requireFake(t)
+	env.fake.SetSelfHealingEndpoint(false)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// A Flightdeck without the endpoint: the block reads as null.
+				Config: projectConfig(env, identifier, `  name = "Old server"`),
+				Check:  resource.TestCheckNoResourceAttr(projectRes, "self_healing.%"),
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name = "Old server"
+  self_healing = {
+    bake_minutes = 30
+  }`),
+				ExpectError: regexMust(`Self-healing configuration is not available on this Flightdeck`),
+			},
+		},
+	})
+}
+
+func TestProjectSelfHealing_thresholdValidation(t *testing.T) {
+	env := newTestEnv(t, "self_healing")
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `
+  name = "x"
+  self_healing = {
+    max_rollbacks_per_hour = 0
+  }`),
+				ExpectError: regexMust(`(?s)value must be between 1 and\s+100`),
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name = "x"
+  self_healing = {
+    burn_rate = 0
+  }`),
+				ExpectError: regexMust(`must be greater than 0`),
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name = "x"
+  self_healing = {
+    short_window_minutes = 90
+    long_window_minutes  = 60
+  }`),
+				ExpectError: regexMust(`Incoherent burn-rate windows`),
+			},
+		},
+	})
+}
+
+type flightdecktestRequest = flightdecktest.RecordedRequest

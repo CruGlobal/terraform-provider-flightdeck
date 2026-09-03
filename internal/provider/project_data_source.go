@@ -76,7 +76,15 @@ func (d *projectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				Computed:    true,
 			},
 			"github_repo_full_name": schema.StringAttribute{
-				MarkdownDescription: "GitHub repository the project maps to, as `owner/repo`, if any.",
+				MarkdownDescription: "GitHub repository the project is linked to, as `owner/repo`, if any.",
+				Computed:            true,
+			},
+			"lead_id": schema.Int64Attribute{
+				MarkdownDescription: "User id of the project lead.",
+				Computed:            true,
+			},
+			"network": schema.StringAttribute{
+				MarkdownDescription: "Project visibility, `public_project` or `private_project`.",
 				Computed:            true,
 			},
 			"lock_version": schema.Int64Attribute{
@@ -84,8 +92,9 @@ func (d *projectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				Computed:            true,
 			},
 			"self_healing": schema.SingleNestedAttribute{
-				MarkdownDescription: "Resolved self-healing control-loop configuration (armed flag and thresholds). " +
-					"Reported only when the token's user is a workspace admin; null otherwise.",
+				MarkdownDescription: "Resolved self-healing control-loop configuration (armed flag and thresholds), read from " +
+					"the project's `self-healing` API resource. Null unless the token's user is a workspace admin and " +
+					"the Flightdeck version exposes the endpoint.",
 				Computed: true,
 				Attributes: map[string]schema.Attribute{
 					"armed":                   schema.BoolAttribute{MarkdownDescription: "Whether live rollback is armed.", Computed: true},
@@ -128,5 +137,6 @@ func (d *projectDataSource) Read(ctx context.Context, req datasource.ReadRequest
 	}
 
 	state := projectToModel(ctx, p, nil, featuresAll, &resp.Diagnostics)
+	state.SelfHealing = readSelfHealing(ctx, d.client, p.ID, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }

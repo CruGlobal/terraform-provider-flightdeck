@@ -170,7 +170,21 @@ func (r *labelResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.client.DeleteLabel(ctx, state.ID.ValueInt64()); err != nil {
+	id := state.ID.ValueInt64()
+	err := deleteWithIfMatch(ctx, state.LockVersion.ValueInt64(),
+		func(ctx context.Context, lv int64) error { return r.client.DeleteLabel(ctx, id, lv) },
+		func(ctx context.Context) (int64, error) {
+			fresh, err := r.client.GetLabel(ctx, id)
+			if err != nil {
+				return 0, err
+			}
+			return fresh.LockVersion, nil
+		})
+	if err != nil {
+		if client.IsStale(err) {
+			addStaleError(&resp.Diagnostics, fmt.Sprintf("Label %q", state.Name.ValueString()), state.LockVersion.ValueInt64(), nil, err)
+			return
+		}
 		addAPIError(&resp.Diagnostics, "Error deleting Flightdeck label", err)
 	}
 }

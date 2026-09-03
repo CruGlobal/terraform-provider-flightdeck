@@ -42,9 +42,10 @@ func (c *Client) UpdateLabel(ctx context.Context, id int64, fields Fields, lockV
 	return PatchResource[*Label](ctx, c, labelPath(id), labelRoot, fields, &lockVersion)
 }
 
-// DeleteLabel deletes a label; an already-gone 404 is success.
-func (c *Client) DeleteLabel(ctx context.Context, id int64) error {
-	err := c.Delete(ctx, labelPath(id), nil)
+// DeleteLabel deletes a label under an If-Match precondition; an already-gone
+// 404 is success.
+func (c *Client) DeleteLabel(ctx context.Context, id, lockVersion int64) error {
+	err := c.Delete(ctx, labelPath(id), nil, WithIfMatch(lockVersion))
 	if err != nil && !IsNotFound(err) {
 		return err
 	}

@@ -20,8 +20,23 @@ const (
 	CodeInvalidAttribute       = "invalid_attribute"
 	CodeStaleObject            = "stale_object"
 	CodeIdempotencyKeyInFlight = "idempotency_key_in_flight"
-	CodeRateLimited            = "rate_limited"
+	// 409: the same Idempotency-Key was already used for a create with different
+	// attributes; retrying does not help.
+	CodeIdempotencyKeyReused = "idempotency_key_reused"
+	CodeRateLimited          = "rate_limited"
+	// State delete guards (422), each needing different handling.
+	CodeStateInUse     = "state_in_use"
+	CodeStateIsDefault = "state_is_default"
+	CodeLastState      = "last_state"
+	// Self-healing: a write that would change `armed` (422).
+	CodeArmingRefused = "arming_refused"
 )
+
+// HasCode reports whether err is an API error carrying the given code.
+func HasCode(err error, code string) bool {
+	e, ok := asError(err)
+	return ok && e.Code == code
+}
 
 // Error is any non-2xx answer (or a transport failure) from the API. Status is
 // 0 for transport failures. Code is empty when the server did not send one.

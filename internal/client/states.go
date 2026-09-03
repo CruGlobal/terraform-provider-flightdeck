@@ -49,11 +49,12 @@ func (c *Client) UpdateState(ctx context.Context, id int64, fields Fields, lockV
 	return PatchResource[*State](ctx, c, statePath(id), stateRoot, fields, &lockVersion)
 }
 
-// DeleteState deletes a state. The API refuses (422) to delete a state that
-// still has work items or is the project default; that error is returned.
-// An already-gone 404 is success.
-func (c *Client) DeleteState(ctx context.Context, id int64) error {
-	err := c.Delete(ctx, statePath(id), nil)
+// DeleteState deletes a state under an If-Match precondition. The API refuses
+// (422) to delete a state that still has work items (state_in_use), is the
+// project default (state_is_default) or is the project's last state
+// (last_state); those errors are returned. An already-gone 404 is success.
+func (c *Client) DeleteState(ctx context.Context, id, lockVersion int64) error {
+	err := c.Delete(ctx, statePath(id), nil, WithIfMatch(lockVersion))
 	if err != nil && !IsNotFound(err) {
 		return err
 	}

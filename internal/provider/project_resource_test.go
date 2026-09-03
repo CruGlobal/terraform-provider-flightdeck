@@ -3,7 +3,10 @@ package provider
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
@@ -48,6 +51,8 @@ func TestProject_basicLifecycle(t *testing.T) {
 					resource.TestCheckResourceAttr(projectRes, "features.%", "1"),
 					resource.TestCheckResourceAttr(projectRes, "features.intake", "true"),
 					resource.TestCheckNoResourceAttr(projectRes, "github_repo_full_name"),
+					resource.TestCheckResourceAttrSet(projectRes, "lead_id"),
+					resource.TestCheckResourceAttr(projectRes, "network", "public_project"),
 					resource.TestCheckResourceAttrSet(projectRes, "lock_version"),
 					captureAttr(projectRes, "id", &firstID),
 				),
@@ -85,11 +90,10 @@ func TestProject_basicLifecycle(t *testing.T) {
 			{
 				// Update every mutable attribute in place (same id).
 				Config: projectConfig(env, identifier, fmt.Sprintf(`
-  name                  = %q
-  description           = "Renamed"
-  emoji                 = "🚀"
-  archived              = true
-  github_repo_full_name = "example-org/mobile-app"
+  name        = %q
+  description = "Renamed"
+  emoji       = "🚀"
+  archived    = true
   features = {
     intake = false
     errors = true
@@ -104,7 +108,6 @@ func TestProject_basicLifecycle(t *testing.T) {
 					resource.TestCheckResourceAttr(projectRes, "description", "Renamed"),
 					resource.TestCheckResourceAttr(projectRes, "emoji", "🚀"),
 					resource.TestCheckResourceAttr(projectRes, "archived", "true"),
-					resource.TestCheckResourceAttr(projectRes, "github_repo_full_name", "example-org/mobile-app"),
 					resource.TestCheckResourceAttr(projectRes, "features.%", "2"),
 					resource.TestCheckResourceAttr(projectRes, "features.intake", "false"),
 					resource.TestCheckResourceAttr(projectRes, "features.errors", "true"),
@@ -120,7 +123,6 @@ func TestProject_basicLifecycle(t *testing.T) {
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttrPtr(projectRes, "id", &firstID),
 					resource.TestCheckNoResourceAttr(projectRes, "description"),
-					resource.TestCheckNoResourceAttr(projectRes, "github_repo_full_name"),
 					resource.TestCheckResourceAttr(projectRes, "emoji", "🚀"),
 					resource.TestCheckResourceAttr(projectRes, "archived", "false"),
 					resource.TestCheckNoResourceAttr(projectRes, "features.%"),
@@ -172,10 +174,11 @@ func TestProject_validation(t *testing.T) {
 				ExpectError: regexMust(`not_a_feature`),
 			},
 			{
+				// Read-only over the API: Terraform itself refuses a configured value.
 				Config: projectConfig(env, "OK", `
   name                  = "x"
-  github_repo_full_name = "no-slash"`),
-				ExpectError: regexMust(`owner/repo`),
+  github_repo_full_name = "example-org/app"`),
+				ExpectError: regexMust(`Invalid Configuration for Read-Only Attribute`),
 			},
 		},
 	})
@@ -484,4 +487,171 @@ func TestProject_staleDiagnosticQuotesTheServer(t *testing.T) {
 			},
 		},
 	})
+}
+
+func TestProject_readOnlyFieldsReflectTheServer(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	var id string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `  name = "Linked"`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					captureAttr(projectRes, "id", &id),
+					resource.TestCheckNoResourceAttr(projectRes, "github_repo_full_name"),
+					resource.TestCheckResourceAttr(projectRes, "network", "public_project"),
+				),
+			},
+			{
+				// Linked and made private from the web UI: both show up on refresh
+				// as computed values, with nothing to reconcile.
+				PreConfig: func() {
+					env.fake.LinkGithubRepo(mustInt(id), "example-org/app")
+					env.fake.SetNetwork(mustInt(id), "private_project")
+				},
+				Config: projectConfig(env, identifier, `  name = "Linked"`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "github_repo_full_name", "example-org/app"),
+					resource.TestCheckResourceAttr(projectRes, "network", "private_project"),
+				),
+			},
+		},
+	})
+	// The project PATCH body must never carry the read-only key, the block that
+	// lives on its own endpoint, or an unconfigured network.
+	for _, r := range env.fake.RequestsMatching("PATCH", "/api/v1/projects/") {
+		for _, k := range []string{"github_repo_full_name", "network", "self_healing"} {
+			if strings.Contains(string(r.Body), `"`+k+`"`) {
+				t.Errorf("PATCH body carried read-only key %s: %s", k, r.Body)
+			}
+		}
+	}
+}
+
+func TestProject_leadIDIsSettableAndDefaultsToTheCreator(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	other := env.fake.Members()[1].ID
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `  name = "Led"`),
+				Check:  resource.TestCheckResourceAttr(projectRes, "lead_id", "1"),
+			},
+			{
+				Config: projectConfig(env, identifier, fmt.Sprintf(`
+  name    = "Led"
+  lead_id = %d`, other)),
+				Check: resource.TestCheckResourceAttr(projectRes, "lead_id", fmt.Sprint(other)),
+			},
+			{
+				// Unset keeps the current lead.
+				Config: projectConfig(env, identifier, `  name = "Led"`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name    = "Led"
+  lead_id = 999999`),
+				ExpectError: regexMust(`HTTP 404 \(not_found\)`),
+			},
+		},
+	})
+}
+
+func TestProject_networkIsWritableAndSentOnlyWhenChanged(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// Exact enum spellings only; the API refuses anything else too.
+				Config: projectConfig(env, identifier, `
+  name    = "x"
+  network = "private"`),
+				ExpectError: regexMust(`value must be one of`),
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name    = "Private"
+  network = "private_project"`),
+				Check: resource.TestCheckResourceAttr(projectRes, "network", "private_project"),
+			},
+			{
+				// A rename with network unchanged: the PATCH must not carry network
+				// (re-sending private_project re-runs the server's membership guard).
+				Config: projectConfig(env, identifier, `
+  name    = "Private renamed"
+  network = "private_project"`),
+				Check: resource.TestCheckResourceAttr(projectRes, "network", "private_project"),
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name    = "Private renamed"
+  network = "public_project"`),
+				Check: resource.TestCheckResourceAttr(projectRes, "network", "public_project"),
+			},
+			{
+				// Unset keeps the current value.
+				Config: projectConfig(env, identifier, `  name = "Private renamed"`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+			},
+		},
+	})
+	var creates, patches []flightdecktestRequest
+	for _, r := range env.fake.Requests() {
+		switch {
+		case r.Method == "POST" && r.Path == "/api/v1/projects":
+			creates = append(creates, r)
+		case r.Method == "PATCH" && strings.HasPrefix(r.Path, "/api/v1/projects/") && !strings.HasSuffix(r.Path, "/self-healing"):
+			patches = append(patches, r)
+		}
+	}
+	if len(creates) != 1 || !strings.Contains(string(creates[0].Body), `"network":"private_project"`) {
+		t.Fatalf("create body should carry network: %v", creates)
+	}
+	if len(patches) != 2 {
+		t.Fatalf("expected 2 project PATCHes (rename, then visibility), got %d", len(patches))
+	}
+	if strings.Contains(string(patches[0].Body), `"network"`) {
+		t.Errorf("rename PATCH re-sent network: %s", patches[0].Body)
+	}
+	if !strings.Contains(string(patches[1].Body), `"network":"public_project"`) {
+		t.Errorf("visibility PATCH lacks network: %s", patches[1].Body)
+	}
+}
+
+func TestProject_idempotencyKeyReusedIsAClearConflict(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	// Two declarations that would derive the same key never happen through the
+	// provider (the key covers the payload), so drive the client directly.
+	c, err := client.New(env.fake.URL, env.fake.Token())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	fields := client.Fields{"name": "Fingerprinted", "identifier": randIdentifier()}
+	if _, err := c.CreateProject(ctx, fields, "shared-key"); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	fields["network"] = "private_project"
+	_, err = c.CreateProject(ctx, fields, "shared-key")
+	if !client.HasCode(err, client.CodeIdempotencyKeyReused) {
+		t.Fatalf("expected idempotency_key_reused, got %v", err)
+	}
+	if apiErr, _ := client.AsError(err); apiErr.Retryable() {
+		t.Error("idempotency_key_reused must not be retried")
+	}
 }

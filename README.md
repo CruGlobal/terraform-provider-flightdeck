@@ -25,7 +25,7 @@ project, not to infrastructure code.
 
 | Resource | Manages |
 | --- | --- |
-| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, feature toggles, GitHub repository mapping, self-healing thresholds. |
+| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing thresholds; reports the (read-only) GitHub repository link. |
 | `flightdeck_state` | A workflow state within a project (name, group, color, default, position). |
 | `flightdeck_label` | A label within a project. |
 | `flightdeck_project_member` | A user's role on a project. |
@@ -106,6 +106,9 @@ Full reference docs (generated from the provider schema) live in
   re-run `terraform plan` to pick up the change.
 - Rate limiting (HTTP 429) is handled with client-side backoff that
   honours `Retry-After`.
+- Deletes carry `If-Match` too. A delete is not an overwrite, so a stale
+  version there is answered by re-reading once and deleting with the
+  current version.
 - A 404 always means "gone from this token's point of view" (including
   ids in another workspace and projects mid-teardown) and removes the
   resource from state.

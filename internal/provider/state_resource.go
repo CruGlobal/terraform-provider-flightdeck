@@ -87,10 +87,11 @@ func (r *stateResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"`flightdeck_states` data source to see them, or import one to manage it. New states are appended to the " +
 			"end of their group unless `position` is set. Exactly one state per project is the default: setting " +
 			"`default = true` here clears it on whichever state had it.\n\n" +
-			"A state that still has work items cannot be deleted; the API rejects the delete and the error is " +
-			"reported. A project always has a default state, so the API also refuses to delete the current default: " +
-			"destroying a `flightdeck_state` that is the default leaves it in place on the server and removes it from " +
-			"Terraform state with a warning. Make another state the default first if it should really go.\n\n" +
+			"The API refuses three deletes, each with its own error code: a state that still has work items " +
+			"(`state_in_use`) and the project's last remaining state (`last_state`) are reported as errors; the " +
+			"current default (`state_is_default`) is left in place on the server and removed from Terraform state " +
+			"with a warning, since a project always keeps a default. Make another state the default first if it " +
+			"should really go.\n\n" +
 			"Making a state the default bumps the previous default's `lock_version` on the server. If one apply both " +
 			"moves the default to a state and edits the state that had it, the edit can fail as a stale write; change " +
 			"the default in one apply and edit the old default in the next, or add `depends_on` so the edit follows.\n\n" +
@@ -215,18 +216,37 @@ func (r *stateResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.client.DeleteState(ctx, state.ID.ValueInt64()); err != nil {
-		if state.Default.ValueBool() && client.IsValidation(err) {
-			// The project must keep a default state, so this delete can never
-			// succeed while the state holds that role. Leave it on the server
-			// and stop managing it rather than wedge every destroy.
-			resp.Diagnostics.AddWarning(
-				fmt.Sprintf("State %q left in place", state.Name.ValueString()),
-				"It is the project's default state, which the API refuses to delete. It has been removed from "+
-					"Terraform state but still exists on the server; make another state the default first if it "+
-					"should be deleted. The API said: "+apiMessage(err))
-			return
-		}
+	id := state.ID.ValueInt64()
+	err := deleteWithIfMatch(ctx, state.LockVersion.ValueInt64(),
+		func(ctx context.Context, lv int64) error { return r.client.DeleteState(ctx, id, lv) },
+		func(ctx context.Context) (int64, error) {
+			fresh, err := r.client.GetState(ctx, id)
+			if err != nil {
+				return 0, err
+			}
+			return fresh.LockVersion, nil
+		})
+	if err == nil {
+		return
+	}
+	switch {
+	case client.HasCode(err, client.CodeStateIsDefault) ||
+		(client.IsValidation(err) && !client.HasCode(err, client.CodeStateInUse) && !client.HasCode(err, client.CodeLastState) && state.Default.ValueBool()):
+		// The project must keep a default state, so this delete can never
+		// succeed while the state holds that role. Leave it on the server and
+		// stop managing it rather than wedge every destroy.
+		resp.Diagnostics.AddWarning(
+			fmt.Sprintf("State %q left in place", state.Name.ValueString()),
+			"It is the project's default state, which the API refuses to delete. It has been removed from "+
+				"Terraform state but still exists on the server; make another state the default first if it "+
+				"should be deleted. The API said: "+apiMessage(err))
+	case client.HasCode(err, client.CodeStateInUse):
+		resp.Diagnostics.AddError(fmt.Sprintf("State %q still has work items", state.Name.ValueString()), apiMessage(err))
+	case client.HasCode(err, client.CodeLastState):
+		resp.Diagnostics.AddError(fmt.Sprintf("State %q is the project's last state", state.Name.ValueString()), apiMessage(err))
+	case client.IsStale(err):
+		addStaleError(&resp.Diagnostics, fmt.Sprintf("State %q", state.Name.ValueString()), state.LockVersion.ValueInt64(), nil, err)
+	default:
 		addAPIError(&resp.Diagnostics, "Error deleting Flightdeck state", err)
 	}
 }

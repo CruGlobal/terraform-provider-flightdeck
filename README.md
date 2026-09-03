@@ -25,7 +25,7 @@ project, not to infrastructure code.
 
 | Resource | Manages |
 | --- | --- |
-| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, feature toggles, self-healing thresholds; reports the (read-only) GitHub repository link and visibility. |
+| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing thresholds; reports the (read-only) GitHub repository link. |
 | `flightdeck_state` | A workflow state within a project (name, group, color, default, position). |
 | `flightdeck_label` | A label within a project. |
 | `flightdeck_project_member` | A user's role on a project. |

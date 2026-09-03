@@ -3,6 +3,7 @@ resource "flightdeck_project" "app" {
   identifier  = "APP"
   description = "The customer-facing mobile application"
   emoji       = "📱"
+  network     = "private_project" # explicit members only; new projects are public
 
   # Only the feature keys listed here are managed; others keep their value.
   features = {

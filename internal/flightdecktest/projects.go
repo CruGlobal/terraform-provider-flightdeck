@@ -224,15 +224,20 @@ func (s *Server) showProject(w http.ResponseWriter, r *http.Request) {
 // applyProjectAttrs mirrors Api::ProjectAttributes.apply!. It returns an
 // (status, code, message) triple on rejection; status 0 means accepted.
 func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, string, string) {
-	// Api::ProjectAttributes::READ_ONLY: named in a write -> 422 invalid_attribute.
-	var readOnly []string
-	for _, k := range []string{"github_repo_full_name", "network"} {
-		if _, named := attrs[k]; named {
-			readOnly = append(readOnly, k+" is read-only over the API")
-		}
+	// Api::ProjectAttributes::READ_ONLY / ELSEWHERE: named in a write -> 422.
+	if _, named := attrs["github_repo_full_name"]; named {
+		return http.StatusUnprocessableEntity, "invalid_attribute", "github_repo_full_name is read-only over the API"
 	}
-	if len(readOnly) > 0 {
-		return http.StatusUnprocessableEntity, "invalid_attribute", strings.Join(readOnly, "; ")
+	if _, named := attrs["self_healing"]; named {
+		return http.StatusUnprocessableEntity, "invalid_attribute", "self_healing is managed at PATCH /api/v1/projects/:id/self-healing"
+	}
+	// FD-794: network is writable with the enum's exact spellings; null is "no opinion".
+	if v, ok := attrs["network"]; ok && v != nil {
+		token := strings.TrimSpace(asString(v))
+		if token != "private_project" && token != "public_project" {
+			return http.StatusUnprocessableEntity, "invalid_attribute", "network must be one of: private_project, public_project (got " + asString(v) + ")"
+		}
+		p.Network = token
 	}
 	if v, ok := attrs["lead_id"]; ok {
 		if v == nil {
@@ -319,7 +324,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.withIdempotency(w, r, "project", func() (int, any) {
+	// FD-794: the project create fingerprints its attributes, so the same key
+	// with different attributes is a 409 idempotency_key_reused, not a replay.
+	s.withIdempotencyFingerprint(w, r, "project", fingerprintOf(attrs), func() (int, any) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		now := time.Now()

@@ -37,11 +37,11 @@ type errorAlertRuleStore struct {
 func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
 		s.stores["error_alert_rules"] = &errorAlertRuleStore{byID: map[int64]*ErrorAlertRule{}, escalationPolicies: map[int64][]int64{}}
-		mux.HandleFunc("GET /api/v1/projects/{project_id}/error_alert_rules", s.listErrorAlertRules)
-		mux.HandleFunc("POST /api/v1/projects/{project_id}/error_alert_rules", s.createErrorAlertRule)
-		mux.HandleFunc("GET /api/v1/error_alert_rules/{id}", s.showErrorAlertRule)
-		mux.HandleFunc("PATCH /api/v1/error_alert_rules/{id}", s.updateErrorAlertRule)
-		mux.HandleFunc("DELETE /api/v1/error_alert_rules/{id}", s.destroyErrorAlertRule)
+		mux.HandleFunc("GET /api/v1/projects/{project_id}/error-rules", s.listErrorAlertRules)
+		mux.HandleFunc("POST /api/v1/projects/{project_id}/error-rules", s.createErrorAlertRule)
+		mux.HandleFunc("GET /api/v1/projects/{project_id}/error-rules/{id}", s.showErrorAlertRule)
+		mux.HandleFunc("PATCH /api/v1/projects/{project_id}/error-rules/{id}", s.updateErrorAlertRule)
+		mux.HandleFunc("DELETE /api/v1/projects/{project_id}/error-rules/{id}", s.destroyErrorAlertRule)
 	})
 }
 
@@ -69,9 +69,11 @@ func (s *Server) TouchErrorAlertRule(id int64, name string) {
 	}
 }
 
-func (s *Server) liveRule(id int64) *ErrorAlertRule {
+// liveRule resolves @project.error_alert_rules.find(id): the rule must belong
+// to the (live) project in the path.
+func (s *Server) liveRule(projectID, id int64) *ErrorAlertRule {
 	r := s.errorAlertRules().byID[id]
-	if r == nil || s.liveProject(r.ProjectID) == nil {
+	if r == nil || r.ProjectID != projectID || s.liveProject(projectID) == nil {
 		return nil
 	}
 	return r
@@ -119,12 +121,16 @@ func (s *Server) listErrorAlertRules(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) showErrorAlertRule(w http.ResponseWriter, r *http.Request) {
+	pid, ok := pathID(w, r, "project_id")
+	if !ok {
+		return
+	}
 	id, ok := pathID(w, r, "id")
 	if !ok {
 		return
 	}
 	s.mu.Lock()
-	rule := s.liveRule(id)
+	rule := s.liveRule(pid, id)
 	var body map[string]any
 	if rule != nil {
 		body = serializeRule(rule)
@@ -256,6 +262,10 @@ func (s *Server) createErrorAlertRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateErrorAlertRule(w http.ResponseWriter, r *http.Request) {
+	pid, ok := pathID(w, r, "project_id")
+	if !ok {
+		return
+	}
 	id, ok := pathID(w, r, "id")
 	if !ok {
 		return
@@ -266,7 +276,7 @@ func (s *Server) updateErrorAlertRule(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rule := s.liveRule(id)
+	rule := s.liveRule(pid, id)
 	if rule == nil {
 		notFound(w)
 		return
@@ -285,14 +295,22 @@ func (s *Server) updateErrorAlertRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) destroyErrorAlertRule(w http.ResponseWriter, r *http.Request) {
+	pid, ok := pathID(w, r, "project_id")
+	if !ok {
+		return
+	}
 	id, ok := pathID(w, r, "id")
 	if !ok {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.liveRule(id) == nil {
+	rule := s.liveRule(pid, id)
+	if rule == nil {
 		notFound(w)
+		return
+	}
+	if !checkIfMatch(w, r, rule.LockVersion) {
 		return
 	}
 	delete(s.errorAlertRules().byID, id)

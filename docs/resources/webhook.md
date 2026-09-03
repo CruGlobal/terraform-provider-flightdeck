@@ -5,7 +5,7 @@ subcategory: ""
 description: |-
   Manages an outbound webhook in the token's Flightdeck workspace. Subscribed events are POSTed to url with an HMAC-SHA256 signature computed from secret.
   A webhook receives events from every project unless project_id scopes it to one. Managing webhooks requires the token's user to be a workspace admin.
-  The signing secret is returned by the API once, on create, and kept in state as a sensitive attribute; it is never re-read, so an imported webhook has no secret value. Supplying your own secret is optional. Changing it replaces the webhook.
+  The signing secret is returned by the API once, on create, and kept in state as a sensitive attribute; it is never re-read, so an imported webhook has no secret value. If the API replays an earlier create (the same declaration re-created within 24 hours) the replayed row comes back without its secret; the provider deletes that row and creates the webhook afresh rather than recording a secret it cannot know. Supplying your own secret is optional. Changing it replaces the webhook.
   Import by numeric id: terraform import flightdeck_webhook.ci 9.
 ---
 
@@ -15,7 +15,7 @@ Manages an outbound webhook in the token's Flightdeck workspace. Subscribed even
 
 A webhook receives events from every project unless `project_id` scopes it to one. Managing webhooks requires the token's user to be a **workspace admin**.
 
-The signing secret is returned by the API once, on create, and kept in state as a sensitive attribute; it is never re-read, so an imported webhook has no `secret` value. Supplying your own `secret` is optional. Changing it replaces the webhook.
+The signing secret is returned by the API once, on create, and kept in state as a sensitive attribute; it is never re-read, so an imported webhook has no `secret` value. If the API replays an earlier create (the same declaration re-created within 24 hours) the replayed row comes back without its secret; the provider deletes that row and creates the webhook afresh rather than recording a secret it cannot know. Supplying your own `secret` is optional. Changing it replaces the webhook.
 
 Import by numeric id: `terraform import flightdeck_webhook.ci 9`.
 

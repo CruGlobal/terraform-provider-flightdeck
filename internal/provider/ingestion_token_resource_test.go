@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -169,26 +170,86 @@ func TestIngestionToken_tokenIsSensitiveInPlanOutput(t *testing.T) {
 	})
 }
 
-func TestIngestionToken_unverifiableCreateIsAnErrorNotASecondToken(t *testing.T) {
+func TestIngestionToken_replayedCreateIsRetiredAndMintedAfresh(t *testing.T) {
 	env := newTestEnv(t, "ingestion_token")
 	env.requireFake(t)
-	env.fake.HideIngestionTokensFromList(true)
 	identifier := randIdentifier()
+	var first, firstToken string
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
 			{
-				Config:      tokenConfig(env, identifier, `  name = "api"`),
-				ExpectError: regexMust(`(?s)follow-up read could not find it.*refusing to create another`),
+				Config: tokenConfig(env, identifier, `  name = "api"`),
+				Check:  resource.ComposeAggregateTestCheckFunc(captureAttr(tokenRes, "id", &first), captureAttr(tokenRes, "token", &firstToken)),
+			},
+			{
+				// Destroy: revokes the token; the fake still holds the redacted
+				// cached 201 for this declaration's Idempotency-Key.
+				Config: env.providerConfig() + fmt.Sprintf(`
+resource "flightdeck_project" "parent" {
+  name       = "Parent %s"
+  identifier = %q
+  features = {
+    errors = true
+  }
+}
+`, identifier, identifier),
+			},
+			{
+				// Recreate the identical declaration inside the window: the API
+				// replays the revoked row WITHOUT its secret. The provider must not
+				// record that; it revokes the replay (a no-op here) and mints a fresh
+				// token under a new key, whose secret it does know.
+				Config: tokenConfig(env, identifier, `  name = "api"`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestMatchResourceAttr(tokenRes, "token", regexMust(`^fd_post_`)),
+					func(s *terraform.State) error {
+						rs := s.RootModule().Resources[tokenRes].Primary
+						if rs.ID == first {
+							return fmt.Errorf("recreate recorded the replayed, revoked token %s", first)
+						}
+						if rs.Attributes["token"] == firstToken {
+							return fmt.Errorf("recreate recorded the old secret")
+						}
+						return nil
+					},
+				),
 			},
 		},
 	})
-	var posts int
-	for _, r := range env.fake.Requests() {
-		if r.Method == "POST" && len(r.Path) > 17 && r.Path[len(r.Path)-17:] == "/ingestion_tokens" {
-			posts++
+	var posts, keys []string
+	for _, r := range env.fake.RequestsMatching("POST", "/api/v1/projects/") {
+		if strings.HasSuffix(r.Path, "/ingestion-tokens") {
+			posts = append(posts, r.Path)
+			keys = append(keys, r.Header.Get("Idempotency-Key"))
 		}
 	}
-	if posts != 1 {
-		t.Fatalf("expected exactly one token to be minted, saw %d POSTs", posts)
+	// original, replayed, fresh-key — and the stable key is never re-sent after
+	// the replay answered.
+	if len(posts) != 3 || keys[0] != keys[1] || keys[2] == keys[0] {
+		t.Fatalf("POSTs=%d keys=%v", len(posts), keys)
+	}
+	if old := env.fake.IngestionToken(mustInt(first)); old == nil || old.RevokedAt == nil {
+		t.Fatalf("the replayed token should be revoked: %+v", old)
+	}
+}
+
+func TestIngestionToken_revokeSendsIfMatchAndAnswers200(t *testing.T) {
+	env := newTestEnv(t, "ingestion_token")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{Config: tokenConfig(env, identifier, `  name = "api"`)},
+			{Config: projectFixture(env, identifier)},
+		},
+	})
+	var deletes []flightdecktestRequest
+	for _, r := range env.fake.RequestsMatching("DELETE", "/api/v1/projects/") {
+		if strings.Contains(r.Path, "/ingestion-tokens/") {
+			deletes = append(deletes, r)
+		}
+	}
+	if len(deletes) != 1 || deletes[0].Header.Get("If-Match") == "" || deletes[0].Status != 200 {
+		t.Fatalf("revoke DELETE = %+v", deletes)
 	}
 }

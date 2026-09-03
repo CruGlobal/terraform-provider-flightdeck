@@ -21,10 +21,11 @@ name: acceptance
 #                                  Webhook and self-healing tests additionally
 #                                  need the token's user to be a workspace
 #                                  admin.
-#   FLIGHTDECK_ACC_MEMBER_EMAIL  — email of an existing member of the test
-#                                  workspace (other than the token's owner),
-#                                  used by the member data source and
-#                                  project_member tests.
+#   FLIGHTDECK_ACC_MEMBER_USER_ID — numeric user id of another member of the
+#                                   test workspace (other than the token's
+#                                   owner), used by the project_member tests.
+#                                   The API has no directory route to resolve
+#                                   an email.
 #
 # Per-resource tests are additionally gated in code (`liveReady` in
 # internal/provider/provider_test.go) until the Flightdeck API change each
@@ -79,7 +80,7 @@ jobs:
           TF_ACC: "1"
           FLIGHTDECK_ENDPOINT: ${{ secrets.FLIGHTDECK_ENDPOINT }}
           FLIGHTDECK_TOKEN: ${{ secrets.FLIGHTDECK_TOKEN }}
-          FLIGHTDECK_ACC_MEMBER_EMAIL: ${{ secrets.FLIGHTDECK_ACC_MEMBER_EMAIL }}
+          FLIGHTDECK_ACC_MEMBER_USER_ID: ${{ secrets.FLIGHTDECK_ACC_MEMBER_USER_ID }}
         run: go test -v -cover -count=1 -timeout 60m ./internal/provider/...
 
   # Aggregator job. Branch protection cannot require an individual matrix leg

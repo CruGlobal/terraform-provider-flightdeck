@@ -1,2 +1,2 @@
-# Import by the rule's numeric id.
-terraform import flightdeck_error_alert_rule.new_errors 12
+# Import with "<project_id>/<rule_id>".
+terraform import flightdeck_error_alert_rule.new_errors 42/12

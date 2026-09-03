@@ -111,7 +111,7 @@ func (r *errorAlertRuleResource) Schema(_ context.Context, _ resource.SchemaRequ
 			"At least one action must be enabled. `notify_webhook` requires `webhook_url`; `open_incident` requires " +
 			"the project's `incidents` feature to be enabled, and `escalation_policy_id` is only honoured alongside it. " +
 			"Condition and action keys are validated against the API's allowlists.\n\n" +
-			"Import by numeric id: `terraform import flightdeck_error_alert_rule.new_errors 12`.",
+			"Import with `<project_id>/<rule_id>`: `terraform import flightdeck_error_alert_rule.new_errors 42/12`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
 				MarkdownDescription: "Numeric id of the rule.",
@@ -409,7 +409,7 @@ func (r *errorAlertRuleResource) Read(ctx context.Context, req resource.ReadRequ
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	rule, err := r.client.GetErrorAlertRule(ctx, state.ID.ValueInt64())
+	rule, err := r.client.GetErrorAlertRule(ctx, state.ProjectID.ValueInt64(), state.ID.ValueInt64())
 	if err != nil {
 		if client.IsNotFound(err) {
 			resp.State.RemoveResource(ctx)
@@ -433,12 +433,12 @@ func (r *errorAlertRuleResource) Update(ctx context.Context, req resource.Update
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	id := state.ID.ValueInt64()
-	updated, err := r.client.UpdateErrorAlertRule(ctx, id, fields, state.LockVersion.ValueInt64())
+	projectID, id := state.ProjectID.ValueInt64(), state.ID.ValueInt64()
+	updated, err := r.client.UpdateErrorAlertRule(ctx, projectID, id, fields, state.LockVersion.ValueInt64())
 	if err != nil {
 		if client.IsStale(err) {
 			var current *int64
-			if fresh, rerr := r.client.GetErrorAlertRule(ctx, id); rerr == nil {
+			if fresh, rerr := r.client.GetErrorAlertRule(ctx, projectID, id); rerr == nil {
 				current = &fresh.LockVersion
 			}
 			addStaleError(&resp.Diagnostics, fmt.Sprintf("Error alert rule %q", state.Name.ValueString()), state.LockVersion.ValueInt64(), current, err)
@@ -489,17 +489,40 @@ func (r *errorAlertRuleResource) Delete(ctx context.Context, req resource.Delete
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.client.DeleteErrorAlertRule(ctx, state.ID.ValueInt64()); err != nil {
+	projectID, id := state.ProjectID.ValueInt64(), state.ID.ValueInt64()
+	err := deleteWithIfMatch(ctx, state.LockVersion.ValueInt64(),
+		func(ctx context.Context, lv int64) error {
+			return r.client.DeleteErrorAlertRule(ctx, projectID, id, lv)
+		},
+		func(ctx context.Context) (int64, error) {
+			fresh, err := r.client.GetErrorAlertRule(ctx, projectID, id)
+			if err != nil {
+				return 0, err
+			}
+			return fresh.LockVersion, nil
+		})
+	if err != nil {
 		addAPIError(&resp.Diagnostics, "Error deleting Flightdeck error alert rule", err)
 	}
 }
 
+// ImportState accepts `<project_id>/<rule_id>`: rules are addressed within
+// their project.
 func (r *errorAlertRuleResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	id, ok := parseImportID(req.ID, "error alert rule", &resp.Diagnostics)
+	parts := strings.Split(strings.TrimSpace(req.ID), "/")
+	if len(parts) != 2 {
+		resp.Diagnostics.AddError("Invalid import id", fmt.Sprintf("Expected <project_id>/<rule_id> (for example 42/12), got %q.", req.ID))
+		return
+	}
+	projectID, ok := parseImportID(parts[0], "project", &resp.Diagnostics)
 	if !ok {
 		return
 	}
-	rule, err := r.client.GetErrorAlertRule(ctx, id)
+	id, ok := parseImportID(parts[1], "error alert rule", &resp.Diagnostics)
+	if !ok {
+		return
+	}
+	rule, err := r.client.GetErrorAlertRule(ctx, projectID, id)
 	if err != nil {
 		addAPIError(&resp.Diagnostics, "Error importing Flightdeck error alert rule", err)
 		return

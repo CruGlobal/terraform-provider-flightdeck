@@ -232,3 +232,73 @@ func PatchResource[T any](ctx context.Context, c *Client, path, rootKey string, 
 	}
 	return out, nil
 }
+
+// secretBearing is implemented by resources whose create response carries a
+// secret exactly once (ingestion tokens, webhooks).
+type secretBearing interface {
+	Identified
+	secret() string
+}
+
+// CreateSecretResource is CreateResource for a resource whose create response
+// carries a secret that the API returns ONLY to the original create. A replay
+// of the same Idempotency-Key returns the row with the secret redacted, and no
+// read can ever recover it — so a create response without the secret must
+// never be recorded as a resource with an unknown credential. It is treated as
+// a replay: the replayed row (this client's own earlier, unrecorded create, or
+// the since-revoked/deleted predecessor of a recreate) is removed with
+// `discard`, and the resource is created again under a fresh key. The stable
+// key is never re-sent once any response has been received. A second response
+// without the secret is an error, never a third attempt.
+func CreateSecretResource[T secretBearing](
+	ctx context.Context, c *Client, path, rootKey string, fields Fields, key string,
+	verify Verifier[T], discard func(ctx context.Context, replayed T) error,
+) (T, error) {
+	var zero T
+	created, err := postResource[T](ctx, c, path, rootKey, fields, key)
+	if err != nil {
+		return zero, err
+	}
+	if created.secret() != "" {
+		verdict, err := verifyWithRetry(ctx, c, created, verify)
+		if err != nil {
+			return zero, err
+		}
+		if verdict == VerifiedPresent {
+			return created, nil
+		}
+		// A fresh create that cannot be read back: do not leave a live
+		// credential unrecorded, and do not mint another.
+		_ = discard(ctx, created)
+		return zero, &Error{Method: http.MethodPost, Path: path, Status: http.StatusCreated,
+			Message: fmt.Sprintf("the API reported %s %d created, but a follow-up read could not find it; "+
+				"it was revoked and nothing else was created", rootKey, created.ResourceID())}
+	}
+
+	// Replay: the secret was redacted. Retire the replayed row and mint afresh.
+	if err := discard(ctx, created); err != nil && !IsNotFound(err) {
+		return zero, &Error{Method: http.MethodPost, Path: path, Status: http.StatusCreated, Err: err,
+			Message: fmt.Sprintf("the API replayed an earlier create of %s %d without its secret, and the replayed "+
+				"row could not be retired: %s", rootKey, created.ResourceID(), err)}
+	}
+	recreated, err := postResource[T](ctx, c, path, rootKey, fields, RandomIdempotencyKey())
+	if err != nil {
+		return zero, err
+	}
+	if recreated.secret() == "" {
+		return zero, &Error{Method: http.MethodPost, Path: path, Status: http.StatusCreated,
+			Message: fmt.Sprintf("the API returned %s %d without its secret on a fresh create; refusing to record a "+
+				"credential Terraform cannot know. Check the deployed Flightdeck API version", rootKey, recreated.ResourceID())}
+	}
+	verdict, err := verifyWithRetry(ctx, c, recreated, verify)
+	if err != nil {
+		return zero, err
+	}
+	if verdict != VerifiedPresent {
+		_ = discard(ctx, recreated)
+		return zero, &Error{Method: http.MethodPost, Path: path, Status: http.StatusCreated,
+			Message: fmt.Sprintf("the API reported %s %d created (after retiring replayed %s %d), but it cannot be "+
+				"read back; it was revoked and nothing else was created", rootKey, recreated.ResourceID(), rootKey, created.ResourceID())}
+	}
+	return recreated, nil
+}

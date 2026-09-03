@@ -85,7 +85,7 @@ tasks:
   #
   #   FLIGHTDECK_ENDPOINT          — base URL, e.g. https://flightdeck.example.com
   #   FLIGHTDECK_TOKEN             — fd_pat_… token bound to the test workspace
-  #   FLIGHTDECK_ACC_MEMBER_EMAIL  — email of an existing workspace member, for
+  #   FLIGHTDECK_ACC_MEMBER_USER_ID  — email of an existing workspace member, for
   #                                  the member data source / project_member tests
   testacc:
     desc: Run acceptance tests against a live Flightdeck workspace

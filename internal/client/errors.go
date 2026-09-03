@@ -30,6 +30,10 @@ const (
 	CodeLastState      = "last_state"
 	// Self-healing: a write that would change `armed` (422).
 	CodeArmingRefused = "arming_refused"
+	// GitHub integrations: the GitHub App cannot reach the repository (no row
+	// created), and one enabled integration per repository per workspace.
+	CodeRepoUnreachable   = "repo_unreachable"
+	CodeRepoAlreadyLinked = "repo_already_linked"
 )
 
 // HasCode reports whether err is an API error carrying the given code.

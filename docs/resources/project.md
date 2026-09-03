@@ -64,13 +64,13 @@ resource "flightdeck_project" "payments" {
 - `description` (String) Free-text description. Removing it from configuration clears it.
 - `emoji` (String) Emoji shown next to the project name. Defaults to the server's default (📁).
 - `features` (Map of Boolean) Feature toggles to manage, as a map of feature key to boolean. Only the keys listed here are managed; keys you leave out keep whatever value the project has. Settable keys: `cycles`, `modules`, `milestones`, `views`, `pages`, `meeting_notes`, `decisions`, `intake`, `errors`, `incidents`, `estimates`. (`self_healing` and `slack` are reported by the `flightdeck_project` data source but cannot be set through the API.)
+- `github_repo_full_name` (String) GitHub repository this project is linked to, as `owner/repo`. **Read-only**: the API refuses writes to this field. Manage the link with a `flightdeck_github_integration` resource, which sets it on link and clears it on unlink.
 - `lead_id` (Number) User id of the project lead; must be a workspace member. Defaults to the token's user on create. When unset, the current lead is kept.
 - `network` (String) Project visibility: `public_project` (every workspace member can see it) or `private_project` (explicit members only). New projects are public. When unset, the current value is kept. Making a project private also gives the token's user and the project lead admin memberships so nobody is locked out; members who lose implicit access are not notified.
 - `self_healing` (Attributes) Self-healing (automated rollback) control-loop configuration, managed through the project's `self-healing` API resource. Reading and writing it requires the token's user to be a **workspace admin**; for other tokens, and on a Flightdeck version without the endpoint, the block is null. Thresholds you leave unset take the server's documented defaults. `armed` is read-only: arming a project is a console-only operation and the API refuses a write that would change it. `short_window_minutes` must not exceed `long_window_minutes`. A write here bumps the project's `lock_version`. (see [below for nested schema](#nestedatt--self_healing))
 
 ### Read-Only
 
-- `github_repo_full_name` (String) GitHub repository this project is linked to, as `owner/repo`. **Read-only**: linking and unlinking need the webhook-secret round-trip the project's Settings → Integrations page performs, so the API refuses writes to this field.
 - `id` (Number) Numeric id of the project.
 - `lock_version` (Number) Optimistic-locking version the API bumps on every change (including self-healing writes). Sent as `If-Match` on updates.
 

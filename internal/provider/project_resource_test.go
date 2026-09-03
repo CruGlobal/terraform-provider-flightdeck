@@ -174,11 +174,12 @@ func TestProject_validation(t *testing.T) {
 				ExpectError: regexMust(`not_a_feature`),
 			},
 			{
-				// Read-only over the API: Terraform itself refuses a configured value.
+				// Read-only over the API; the plan-time error points at the resource
+				// that manages the link.
 				Config: projectConfig(env, "OK", `
   name                  = "x"
   github_repo_full_name = "example-org/app"`),
-				ExpectError: regexMust(`Invalid Configuration for Read-Only Attribute`),
+				ExpectError: regexMust(`(?s)Read-only attribute.*flightdeck_github_integration`),
 			},
 		},
 	})

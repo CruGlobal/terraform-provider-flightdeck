@@ -145,6 +145,7 @@ func (p *flightdeckProvider) Resources(_ context.Context) []func() resource.Reso
 		NewIngestionTokenResource,
 		NewErrorAlertRuleResource,
 		NewWebhookResource,
+		NewGithubIntegrationResource,
 	}
 }
 

@@ -57,6 +57,13 @@ jobs:
       - name: Unit tests
         run: go test -count=1 -cover ./...
 
+      # Fails the build when a dependency has a known vulnerability that this
+      # module's code can reach (govulncheck's default, symbol-level scan). The
+      # module bumps Dependabot merged were once lost in a stacked-PR merge and
+      # nothing noticed; this notices.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       - name: Verify generated docs are up to date
         run: |
           go generate ./...

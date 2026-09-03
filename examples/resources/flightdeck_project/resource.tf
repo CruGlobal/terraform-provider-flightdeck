@@ -9,8 +9,6 @@ resource "flightdeck_project" "app" {
     intake = true
     errors = true
   }
-
-  github_repo_full_name = "example-org/mobile-app"
 }
 
 # Self-healing thresholds (workspace admins only). `armed` is read-only:

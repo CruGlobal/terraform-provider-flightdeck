@@ -143,7 +143,7 @@ func TestState_deleteGuards(t *testing.T) {
 				// provider reports it instead of dropping the state silently.
 				PreConfig:   func() { env.fake.MarkStateInUse(mustInt(id), true) },
 				Config:      projectFixture(env, identifier),
-				ExpectError: regexMust(`(?s)Error deleting Flightdeck state.*HTTP 422 \(validation_failed\).*dependent\s+work\s+items`),
+				ExpectError: regexMust(`(?s)still has work items.*dependent\s+work\s+items`),
 			},
 			{
 				// Once the items are gone the delete goes through.
@@ -426,4 +426,54 @@ func stateProjectID(env *testEnv, stateID int64) int64 {
 		}
 	}
 	return 0
+}
+
+func TestState_lastStateCannotBeDeleted(t *testing.T) {
+	env := newTestEnv(t, "state")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	var id, projectID string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: stateConfig(env, identifier, `
+  name  = "Only"
+  group = "started"`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					captureAttr(stateRes, "id", &id),
+					captureAttr(stateRes, "project_id", &projectID),
+				),
+			},
+			{
+				// Every other state removed out of band: the API's last_state guard
+				// fires and is reported verbatim (it takes precedence over default).
+				PreConfig:   func() { env.fake.RemoveOtherStates(mustInt(projectID), mustInt(id)) },
+				Config:      projectFixture(env, identifier),
+				ExpectError: regexMust(`(?s)is the project's last state.*at least one state`),
+			},
+			{
+				// With another state present again the delete goes through.
+				PreConfig: func() { env.fake.AddState(mustInt(projectID), "Another", "backlog") },
+				Config:    projectFixture(env, identifier),
+			},
+		},
+	})
+}
+
+func TestState_deleteSendsIfMatch(t *testing.T) {
+	env := newTestEnv(t, "state")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{Config: stateConfig(env, identifier, `
+  name  = "Gone soon"
+  group = "started"`)},
+			{Config: projectFixture(env, identifier)},
+		},
+	})
+	deletes := env.fake.RequestsMatching("DELETE", "/api/v1/states/")
+	if len(deletes) != 1 || deletes[0].Header.Get("If-Match") == "" {
+		t.Fatalf("state DELETE should carry If-Match: %+v", deletes)
+	}
 }

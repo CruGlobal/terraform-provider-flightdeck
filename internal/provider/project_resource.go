@@ -20,9 +20,10 @@ import (
 )
 
 var (
-	_ resource.Resource                = &projectResource{}
-	_ resource.ResourceWithConfigure   = &projectResource{}
-	_ resource.ResourceWithImportState = &projectResource{}
+	_ resource.Resource                   = &projectResource{}
+	_ resource.ResourceWithConfigure      = &projectResource{}
+	_ resource.ResourceWithImportState    = &projectResource{}
+	_ resource.ResourceWithValidateConfig = &projectResource{}
 )
 
 // NewProjectResource returns the flightdeck_project resource.
@@ -97,22 +98,43 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					mapvalidator.KeysAre(stringvalidator.OneOf(toggleableFeatures...)),
 				},
 			},
+			"lead_id": schema.Int64Attribute{
+				MarkdownDescription: "User id of the project lead; must be a workspace member. Defaults to the token's user " +
+					"on create. When unset, the current lead is kept.",
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
+			},
 			"github_repo_full_name": schema.StringAttribute{
-				MarkdownDescription: "GitHub repository this project maps to, as `owner/repo`. Records the mapping only; " +
-					"connecting the repository's webhook still happens in the project's integration settings. " +
-					"Removing it from configuration clears it.",
-				Optional: true,
-				Validators: []validator.String{
-					stringvalidator.RegexMatches(repoFullNamePattern, `must look like "owner/repo"`),
-				},
+				MarkdownDescription: "GitHub repository this project is linked to, as `owner/repo`. **Read-only**: linking " +
+					"and unlinking need the webhook-secret round-trip the project's Settings → Integrations page " +
+					"performs, so the API refuses writes to this field.",
+				Computed:      true,
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+			},
+			"network": schema.StringAttribute{
+				MarkdownDescription: "Project visibility, `public_project` or `private_project`. **Read-only** over the API; " +
+					"change it in the project's Settings → Members page.",
+				Computed:      true,
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"lock_version": schema.Int64Attribute{
-				MarkdownDescription: "Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates.",
-				Computed:            true,
+				MarkdownDescription: "Optimistic-locking version the API bumps on every change (including self-healing writes). " +
+					"Sent as `If-Match` on updates.",
+				Computed: true,
 			},
 			"self_healing": selfHealingSchema(),
 		},
 	}
+}
+
+func (r *projectResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var cfg projectModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	validateSelfHealingConfig(ctx, cfg.SelfHealing, &resp.Diagnostics)
 }
 
 func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -123,7 +145,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	fields := projectFields(ctx, &plan, config.SelfHealing, &resp.Diagnostics)
+	fields := projectFields(ctx, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -136,6 +158,11 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 
 	state := projectToModel(ctx, created, &plan, featuresFromPrior, &resp.Diagnostics)
 	reconcileFeatures(ctx, &state, &plan, &resp.Diagnostics)
+	block, lockVersion := writeSelfHealing(ctx, r.client, created.ID, config.SelfHealing, created.LockVersion, &resp.Diagnostics)
+	state.SelfHealing = block
+	state.LockVersion = types.Int64Value(lockVersion)
+	// The project is created even if the self-healing write failed; record it so
+	// the next apply reconciles rather than creating a duplicate.
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -159,6 +186,7 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 	}
 
 	newState := projectToModel(ctx, p, &state, featuresFromPrior, &resp.Diagnostics)
+	newState.SelfHealing = readSelfHealing(ctx, r.client, p.ID, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
 }
 
@@ -171,7 +199,7 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	fields := projectFields(ctx, &plan, config.SelfHealing, &resp.Diagnostics)
+	fields := projectFields(ctx, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -193,6 +221,11 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	newState := projectToModel(ctx, updated, &plan, featuresFromPrior, &resp.Diagnostics)
 	reconcileFeatures(ctx, &newState, &plan, &resp.Diagnostics)
+	// The self-healing write pins the lock_version the project PATCH just
+	// produced and bumps it again; the state keeps the final value.
+	block, lockVersion := writeSelfHealing(ctx, r.client, id, config.SelfHealing, updated.LockVersion, &resp.Diagnostics)
+	newState.SelfHealing = block
+	newState.LockVersion = types.Int64Value(lockVersion)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
 }
 
@@ -236,6 +269,7 @@ func (r *projectResource) ImportState(ctx context.Context, req resource.ImportSt
 	}
 
 	state := projectToModel(ctx, p, nil, featuresToggleable, &resp.Diagnostics)
+	state.SelfHealing = readSelfHealing(ctx, r.client, p.ID, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 

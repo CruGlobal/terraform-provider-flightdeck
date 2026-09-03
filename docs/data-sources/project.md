@@ -42,10 +42,12 @@ output "app_project_id" {
 - `description` (String) Free-text description.
 - `emoji` (String) Emoji shown next to the project name.
 - `features` (Map of Boolean) Effective value of every feature toggle the API reports, including read-only ones such as `self_healing` and `slack`.
-- `github_repo_full_name` (String) GitHub repository the project maps to, as `owner/repo`, if any.
+- `github_repo_full_name` (String) GitHub repository the project is linked to, as `owner/repo`, if any.
+- `lead_id` (Number) User id of the project lead.
 - `lock_version` (Number) Optimistic-locking version the API bumps on every change.
 - `name` (String) Display name.
-- `self_healing` (Attributes) Resolved self-healing control-loop configuration (armed flag and thresholds). Reported only when the token's user is a workspace admin; null otherwise. (see [below for nested schema](#nestedatt--self_healing))
+- `network` (String) Project visibility, `public_project` or `private_project`.
+- `self_healing` (Attributes) Resolved self-healing control-loop configuration (armed flag and thresholds), read from the project's `self-healing` API resource. Null unless the token's user is a workspace admin and the Flightdeck version exposes the endpoint. (see [below for nested schema](#nestedatt--self_healing))
 
 <a id="nestedatt--self_healing"></a>
 ### Nested Schema for `self_healing`

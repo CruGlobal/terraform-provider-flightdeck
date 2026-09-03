@@ -23,10 +23,7 @@ var ToggleableFeatures = []string{
 	"decisions", "intake", "errors", "incidents", "estimates",
 }
 
-var (
-	identifierFormat = regexp.MustCompile(`^[A-Z][A-Z0-9]{0,9}$`)
-	repoFullName     = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
-)
+var identifierFormat = regexp.MustCompile(`^[A-Z][A-Z0-9]{0,9}$`)
 
 // Project is the fake's stored project.
 type Project struct {
@@ -40,6 +37,7 @@ type Project struct {
 	GithubRepoFullName *string
 	LockVersion        int64
 	LeadID             int64
+	Network            string
 	// SelfHealing holds the stored jsonb overrides; reads resolve defaults.
 	SelfHealing map[string]any
 	CreatedAt   time.Time
@@ -85,6 +83,27 @@ func (s *Server) ForceFeature(key string, value bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.projects().forcedFeatures[key] = value
+}
+
+// LinkGithubRepo sets the read-only repository mapping the way Settings ->
+// Integrations would.
+func (s *Server) LinkGithubRepo(projectID int64, repo string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.projects().byID[projectID]; p != nil {
+		p.GithubRepoFullName = &repo
+		p.LockVersion++
+	}
+}
+
+// SetNetwork flips the read-only visibility the way Settings -> Members would.
+func (s *Server) SetNetwork(projectID int64, network string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.projects().byID[projectID]; p != nil {
+		p.Network = network
+		p.LockVersion++
+	}
 }
 
 // AllProjectIDs returns every stored project id, deleting ones included.
@@ -156,91 +175,14 @@ func (s *Server) serializeProject(p *Project, detail bool) map[string]any {
 		"id": p.ID, "name": p.Name, "identifier": p.Identifier,
 		"description": p.Description, "emoji": p.Emoji, "archived": p.Archived,
 		"features": features, "github_repo_full_name": p.GithubRepoFullName,
+		"lead_id": p.LeadID, "network": p.Network,
 		"lock_version": p.LockVersion,
 		"created_at":   iso(p.CreatedAt), "updated_at": iso(p.UpdatedAt),
 	}
 	if detail {
 		out["urls"] = []any{}
 	}
-	// FD-789: the resolved self-healing config is a workspace-admin read.
-	if s.workspaceAdmin {
-		out["self_healing"] = resolveSelfHealing(p.SelfHealing)
-	}
 	return out
-}
-
-// SelfHealingDefaults mirrors SelfHealing::Config::DEFAULTS.
-var SelfHealingDefaults = map[string]any{
-	"armed": false, "bake_minutes": int64(20), "baseline_multiplier": 5.0, "absolute_floor": 5.0,
-	"long_window_minutes": int64(60), "short_window_minutes": int64(5), "burn_rate": 14.4,
-	"sustain_count": int64(3), "consecutive_error_limit": int64(3), "cooldown_minutes": int64(30),
-	"max_rollbacks_per_hour": int64(1), "recovery_window_minutes": int64(15),
-}
-
-var selfHealingDecimalKeys = []string{"baseline_multiplier", "absolute_floor", "burn_rate"}
-
-func resolveSelfHealing(overrides map[string]any) map[string]any {
-	out := map[string]any{}
-	for k, v := range SelfHealingDefaults {
-		out[k] = v
-	}
-	for k, v := range overrides {
-		out[k] = v
-	}
-	return out
-}
-
-// ArmSelfHealing flips the console-only armed flag directly (no HTTP).
-func (s *Server) ArmSelfHealing(projectID int64, armed bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if p := s.projects().byID[projectID]; p != nil {
-		if p.SelfHealing == nil {
-			p.SelfHealing = map[string]any{}
-		}
-		p.SelfHealing["armed"] = armed
-	}
-}
-
-// applySelfHealing mirrors the FD-789 write rules: workspace-admin only,
-// thresholds writable, `armed` refused, unknown keys refused, values coerced
-// like SelfHealing::Config (integer/decimal per key).
-func (s *Server) applySelfHealing(p *Project, raw any) (int, string, string) {
-	if !s.workspaceAdmin {
-		return http.StatusForbidden, "forbidden", "Workspace admin role required to change self-healing configuration."
-	}
-	submitted, isMap := raw.(map[string]any)
-	if !isMap {
-		return http.StatusUnprocessableEntity, "invalid_attribute", "self_healing must be an object of threshold => number"
-	}
-	if _, has := submitted["armed"]; has {
-		return http.StatusUnprocessableEntity, "invalid_attribute",
-			"self_healing.armed cannot be set through the API; arming is console-only"
-	}
-	next := map[string]any{}
-	for k, v := range p.SelfHealing {
-		next[k] = v
-	}
-	for k, v := range submitted {
-		if _, known := SelfHealingDefaults[k]; !known {
-			return http.StatusUnprocessableEntity, "invalid_attribute", "unknown self_healing key: " + k
-		}
-		if contains(selfHealingDecimalKeys, k) {
-			f, ok := asFloat64(v)
-			if !ok {
-				return http.StatusUnprocessableEntity, "invalid_attribute", "self_healing." + k + " must be a number"
-			}
-			next[k] = f
-		} else {
-			i, ok := asInt64(v)
-			if !ok {
-				return http.StatusUnprocessableEntity, "invalid_attribute", "self_healing." + k + " must be an integer"
-			}
-			next[k] = i
-		}
-	}
-	p.SelfHealing = next
-	return 0, "", ""
 }
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
@@ -282,6 +224,25 @@ func (s *Server) showProject(w http.ResponseWriter, r *http.Request) {
 // applyProjectAttrs mirrors Api::ProjectAttributes.apply!. It returns an
 // (status, code, message) triple on rejection; status 0 means accepted.
 func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, string, string) {
+	// Api::ProjectAttributes::READ_ONLY: named in a write -> 422 invalid_attribute.
+	var readOnly []string
+	for _, k := range []string{"github_repo_full_name", "network"} {
+		if _, named := attrs[k]; named {
+			readOnly = append(readOnly, k+" is read-only over the API")
+		}
+	}
+	if len(readOnly) > 0 {
+		return http.StatusUnprocessableEntity, "invalid_attribute", strings.Join(readOnly, "; ")
+	}
+	if v, ok := attrs["lead_id"]; ok {
+		if v == nil {
+			p.LeadID = 0
+		} else if id, isNum := asInt64(v); isNum && s.workspaceUser(id) != nil {
+			p.LeadID = id
+		} else {
+			return http.StatusNotFound, "not_found", "Not found"
+		}
+	}
 	if v, ok := attrs["name"]; ok {
 		p.Name = asString(v)
 	}
@@ -325,22 +286,6 @@ func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, strin
 			p.Features[k] = truthy(val)
 		}
 	}
-	if v, ok := attrs["self_healing"]; ok {
-		if status, code, msg := s.applySelfHealing(p, v); status != 0 {
-			return status, code, msg
-		}
-	}
-	if v, ok := attrs["github_repo_full_name"]; ok {
-		str := strings.TrimSpace(asString(v))
-		switch {
-		case str == "":
-			p.GithubRepoFullName = nil
-		case repoFullName.MatchString(str):
-			p.GithubRepoFullName = &str
-		default:
-			return http.StatusUnprocessableEntity, "invalid_attribute", `github_repo_full_name must look like "owner/repo"`
-		}
-	}
 	// Model validations.
 	if strings.TrimSpace(p.Name) == "" {
 		return http.StatusUnprocessableEntity, "validation_failed", "Name can't be blank"
@@ -358,7 +303,7 @@ func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, strin
 
 func (s *Server) addProjectLocked(attrs map[string]any) *Project {
 	now := time.Now()
-	p := &Project{ID: s.id(), Emoji: "📁", Features: map[string]bool{}, LeadID: 1, CreatedAt: now, UpdatedAt: now}
+	p := &Project{ID: s.id(), Emoji: "📁", Features: map[string]bool{}, LeadID: 1, Network: "public_project", CreatedAt: now, UpdatedAt: now}
 	if status, _, _ := s.applyProjectAttrs(p, attrs); status != 0 {
 		return nil
 	}
@@ -378,7 +323,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		now := time.Now()
-		p := &Project{ID: s.id(), Emoji: "📁", Features: map[string]bool{}, LeadID: 1, CreatedAt: now, UpdatedAt: now}
+		p := &Project{ID: s.id(), Emoji: "📁", Features: map[string]bool{}, LeadID: 1, Network: "public_project", CreatedAt: now, UpdatedAt: now}
 		if status, code, msg := s.applyProjectAttrs(p, attrs); status != 0 {
 			return status, map[string]any{"error": msg, "code": code}
 		}

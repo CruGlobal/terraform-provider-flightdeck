@@ -80,7 +80,7 @@ resource "flightdeck_error_alert_rule" "error_storm" {
 ### Read-Only
 
 - `id` (Number) Numeric id of the rule.
-- `lock_version` (Number) Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates.
+- `lock_version` (Number) Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates and deletes.
 
 <a id="nestedatt--action"></a>
 ### Nested Schema for `action`
@@ -103,7 +103,7 @@ Optional:
 Optional:
 
 - `count` (Number) Occurrence count for the `occurrence_threshold` trigger.
-- `environment` (String) Only errors reported from this environment (for example `production`).
+- `environment` (String) Only errors reported from this environment (for example `production`). Omit it rather than setting it empty; the API strips blank conditions.
 - `min_level` (String) Minimum error level: one of `debug`, `info`, `warning`, `error`, `critical`.
 - `window_minutes` (Number) Window in minutes for the `occurrence_threshold` trigger.
 

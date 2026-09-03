@@ -31,7 +31,7 @@ func (s *Server) SetSelfHealingEndpoint(on bool) {
 	s.selfHealingStore().enabled = on
 }
 
-// SelfHealingDefaults mirrors SelfHealing::Config::DEFAULTS.
+// SelfHealingDefaults are the API's documented threshold defaults.
 var SelfHealingDefaults = map[string]any{
 	"armed": false, "bake_minutes": int64(20), "baseline_multiplier": 5.0, "absolute_floor": 5.0,
 	"long_window_minutes": int64(60), "short_window_minutes": int64(5), "burn_rate": 14.4,
@@ -62,7 +62,7 @@ func (s *Server) ArmSelfHealing(projectID int64, armed bool) {
 	}
 }
 
-// selfHealingLimits mirrors Api::SelfHealingAttributes::LIMITS.
+// selfHealingLimits are the API's per-setting ranges.
 type selfHealingLimit struct {
 	decimal  bool
 	min, max float64 // min is inclusive for integers, exclusive (`above`) for decimals
@@ -82,7 +82,7 @@ var selfHealingLimits = map[string]selfHealingLimit{
 	"recovery_window_minutes": {min: 1, max: 1440},
 }
 
-// applySelfHealing mirrors Api::SelfHealingAttributes.apply!: only submitted
+// applySelfHealing mirrors the API's write rules: only submitted
 // keys change, a nil clears an override, `armed` may be re-sent unchanged (or
 // sent null) but a change is refused with arming_refused, unknown keys are
 // refused, values are coerced per key and range-checked (non-positive values

@@ -71,7 +71,8 @@ func (r *githubIntegrationResource) Schema(_ context.Context, _ resource.SchemaR
 			"Two modes follow from `secret`:\n\n" +
 			"- **Flightdeck-managed** (`secret` omitted): Flightdeck generates the signing secret and registers the " +
 			"repository webhook through its GitHub App. The App must be installed on the repository, or the create fails " +
-			"with `repo_unreachable`. `webhook_registered` is `true`.\n" +
+			"with `repo_unreachable`. `webhook_registered` is `true` when Flightdeck registered the hook itself; if a " +
+			"webhook targeting Flightdeck already exists on the repository it is left in place and not claimed.\n" +
 			"- **Caller-managed** (`secret` supplied): Flightdeck stores the secret and touches nothing on GitHub; you " +
 			"declare the matching repository webhook yourself (for example a `github_repository_webhook` pointing at " +
 			"Flightdeck's GitHub webhook endpoint with the same secret). `webhook_registered` is `false`.\n\n" +
@@ -104,8 +105,9 @@ func (r *githubIntegrationResource) Schema(_ context.Context, _ resource.SchemaR
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"enabled": schema.BoolAttribute{
-				MarkdownDescription: "Whether deliveries from the repository are processed. A new integration is enabled; " +
-					"when unset, the current value is kept.",
+				MarkdownDescription: "Whether deliveries from the repository are processed. The API always creates an " +
+					"integration enabled; `enabled = false` on a new resource is applied by an immediate follow-up " +
+					"update. When unset, the current value is kept.",
 				Optional:      true,
 				Computed:      true,
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
@@ -120,8 +122,9 @@ func (r *githubIntegrationResource) Schema(_ context.Context, _ resource.SchemaR
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"webhook_registered": schema.BoolAttribute{
-				MarkdownDescription: "Whether Flightdeck registered the repository webhook through its GitHub App " +
-					"(`true` in the Flightdeck-managed mode, `false` when you supplied `secret`).",
+				MarkdownDescription: "`true` when Flightdeck registered the repository webhook itself and will remove it on " +
+					"unlink. `false` when you supplied `secret`, and also in the managed mode when a webhook targeting " +
+					"Flightdeck already existed on the repository (Flightdeck leaves it alone and does not claim it).",
 				Computed:      true,
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
@@ -140,10 +143,9 @@ func (r *githubIntegrationResource) Create(ctx context.Context, req resource.Cre
 		return
 	}
 	projectID := plan.ProjectID.ValueInt64()
+	// The API ignores `enabled` on create (a new integration is always
+	// enabled); a planned false is applied with a follow-up update below.
 	fields := client.Fields{"repo_full_name": plan.RepoFullName.ValueString()}
-	if !plan.Enabled.IsNull() && !plan.Enabled.IsUnknown() {
-		fields["enabled"] = plan.Enabled.ValueBool()
-	}
 	// A blank secret is "omitted" (managed mode), as the API reads it.
 	if !plan.Secret.IsNull() && !plan.Secret.IsUnknown() && strings.TrimSpace(plan.Secret.ValueString()) != "" {
 		fields["secret"] = plan.Secret.ValueString()
@@ -163,6 +165,18 @@ func (r *githubIntegrationResource) Create(ctx context.Context, req resource.Cre
 			addAPIError(&resp.Diagnostics, "Error linking GitHub repository", err)
 		}
 		return
+	}
+	if !plan.Enabled.IsNull() && !plan.Enabled.IsUnknown() && !plan.Enabled.ValueBool() {
+		disabled, err := r.client.UpdateGithubIntegration(ctx, created.ID, client.Fields{"enabled": false}, created.LockVersion)
+		if err != nil {
+			// The link exists; record it so the next apply reconciles rather
+			// than linking twice, and report why it is still enabled.
+			state := githubIntegrationToModel(created, plan.Secret)
+			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+			addAPIError(&resp.Diagnostics, "Error disabling the new Flightdeck GitHub integration", err)
+			return
+		}
+		created = disabled
 	}
 	state := githubIntegrationToModel(created, plan.Secret)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)

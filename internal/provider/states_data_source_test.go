@@ -8,8 +8,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
-type terraformState = terraform.State
-
 func TestStatesDataSource_listsSeededStatesInWorkflowOrder(t *testing.T) {
 	env := newTestEnv(t, "state")
 	identifier := randIdentifier()
@@ -34,7 +32,7 @@ data "flightdeck_states" "all" {
 					resource.TestCheckResourceAttr("data.flightdeck_states.all", "states.4.group", "cancelled"),
 					resource.TestCheckResourceAttrSet("data.flightdeck_states.all", "states.0.id"),
 					resource.TestCheckResourceAttrSet("data.flightdeck_states.all", "states.0.color"),
-					checkSingleDefault("data.flightdeck_states.all", "Backlog"),
+					checkSingleDefault("Backlog"),
 				),
 			},
 		},
@@ -57,13 +55,16 @@ data "flightdeck_states" "x" {
 	})
 }
 
-// checkSingleDefault asserts exactly one state in the data source is the
-// default, and that it is the named one.
-func checkSingleDefault(ds, wantName string) resource.TestCheckFunc {
+// statesDS is the data source the state tests read the project's states through.
+const statesDS = "data.flightdeck_states.all"
+
+// checkSingleDefault asserts exactly one state in statesDS is the default, and
+// that it is the named one.
+func checkSingleDefault(wantName string) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
-		rs, ok := s.RootModule().Resources[ds]
+		rs, ok := s.RootModule().Resources[statesDS]
 		if !ok {
-			return fmt.Errorf("%s not in state", ds)
+			return fmt.Errorf("%s not in state", statesDS)
 		}
 		var defaults []string
 		for i := 0; ; i++ {

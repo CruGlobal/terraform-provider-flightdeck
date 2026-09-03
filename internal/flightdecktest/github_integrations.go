@@ -28,11 +28,14 @@ type githubIntegrationStore struct {
 	byID map[int64]*GithubIntegration
 	// unreachable repositories: the GitHub App cannot see them.
 	unreachable map[string]bool
+	// hookPresent repositories already have a webhook targeting the receiver;
+	// Flightdeck leaves it alone and does not claim it (webhook_registered false).
+	hookPresent map[string]bool
 }
 
 func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
-		s.stores["github_integrations"] = &githubIntegrationStore{byID: map[int64]*GithubIntegration{}, unreachable: map[string]bool{}}
+		s.stores["github_integrations"] = &githubIntegrationStore{byID: map[int64]*GithubIntegration{}, unreachable: map[string]bool{}, hookPresent: map[string]bool{}}
 		mux.HandleFunc("GET /api/v1/projects/{project_id}/github-integrations", s.listGithubIntegrations)
 		mux.HandleFunc("POST /api/v1/projects/{project_id}/github-integrations", s.createGithubIntegration)
 		mux.HandleFunc("GET /api/v1/github-integrations/{id}", s.showGithubIntegration)
@@ -52,6 +55,15 @@ func (s *Server) MarkRepoUnreachable(repo string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.githubIntegrations().unreachable[strings.ToLower(repo)] = true
+}
+
+// MarkHookAlreadyPresent makes a repository already carry a webhook aimed at
+// the receiver, so a managed create succeeds without registering (and without
+// claiming) one: webhook_registered is false.
+func (s *Server) MarkHookAlreadyPresent(repo string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.githubIntegrations().hookPresent[strings.ToLower(repo)] = true
 }
 
 // GithubIntegration returns a stored integration or nil.
@@ -177,19 +189,17 @@ func (s *Server) createGithubIntegration(w http.ResponseWriter, r *http.Request)
 		defer s.mu.Unlock()
 		project := s.liveProject(pid)
 		if project == nil {
-			return http.StatusNotFound, map[string]any{"error": "Not found", "code": "not_found"}
+			return http.StatusNotFound, errorBody("Not found", "not_found")
 		}
 		if !s.workspaceAdmin {
-			return http.StatusForbidden, map[string]any{"error": "This action requires workspace owner or admin rights.", "code": "forbidden"}
+			return http.StatusForbidden, errorBody("This action requires workspace owner or admin rights.", "forbidden")
 		}
 		repo := strings.TrimSpace(asString(attrs["repo_full_name"]))
 		if !repoFullNameForm.MatchString(repo) {
-			return http.StatusUnprocessableEntity, map[string]any{"error": "repo_full_name is required, in owner/repo form", "code": "invalid_attribute"}
+			return http.StatusUnprocessableEntity, errorBody("repo_full_name is required, in owner/repo form", "invalid_attribute")
 		}
+		// `enabled` is not read on create: a new integration is always enabled.
 		g := &GithubIntegration{ID: s.id(), ProjectID: pid, RepoFullName: repo, Enabled: true, CreatedAt: time.Now()}
-		if v, has := attrs["enabled"]; has && v != nil {
-			g.Enabled = truthy(v)
-		}
 		// A blank secret counts as absent (managed mode); a short one is refused.
 		secret := asString(attrs["secret"])
 		if strings.TrimSpace(secret) != "" {
@@ -206,7 +216,7 @@ func (s *Server) createGithubIntegration(w http.ResponseWriter, r *http.Request)
 				"error": repo + " is already linked to a Flightdeck project. Delete that integration first, or link a different repository.",
 				"code":  "repo_already_linked"}
 		}
-		if g.Enabled && s.otherEnabledOnProject(pid, g.ID) {
+		if s.otherEnabledOnProject(pid, g.ID) {
 			return http.StatusUnprocessableEntity, map[string]any{
 				"error": "Project this project already has an enabled GitHub integration — disable or remove it first", "code": "validation_failed"}
 		}
@@ -218,7 +228,8 @@ func (s *Server) createGithubIntegration(w http.ResponseWriter, r *http.Request)
 					"error": "Flightdeck's GitHub App cannot reach " + repo + ". Install the GitHub App in workspace settings, or supply your own `secret` and register the webhook on GitHub yourself.",
 					"code":  "repo_unreachable"}
 			}
-			g.WebhookRegistered = true
+			// A hook already aimed at the receiver is skipped and not claimed.
+			g.WebhookRegistered = !s.githubIntegrations().hookPresent[strings.ToLower(repo)]
 		}
 		s.githubIntegrations().byID[g.ID] = g
 		// The column side effect: the project records the mapping.

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Error codes published by the API alongside the prose message. The prose is
@@ -182,7 +183,11 @@ func newError(method, path string, resp *http.Response, body []byte) *Error {
 		e.Code = env.Code
 	} else if msg := strings.TrimSpace(string(body)); msg != "" {
 		if len(msg) > maxErrorBody {
-			msg = msg[:maxErrorBody] + "… (truncated)"
+			cut := maxErrorBody
+			for cut > 0 && !utf8.RuneStart(msg[cut]) {
+				cut--
+			}
+			msg = msg[:cut] + "… (truncated)"
 		}
 		e.Message = msg
 	} else {

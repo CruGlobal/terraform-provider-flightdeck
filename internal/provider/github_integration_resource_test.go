@@ -288,10 +288,15 @@ func TestGithubIntegration_reEnablingMirrorsTheProjectColumn(t *testing.T) {
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
 			{
+				// The API creates every integration enabled; a planned false is
+				// applied by an immediate follow-up update.
 				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`
   repo_full_name = %q
   enabled        = false`, repo)),
-				Check: resource.TestCheckResourceAttr(ghRes, "enabled", "false"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(ghRes, "enabled", "false"),
+					resource.TestCheckResourceAttr(ghRes, "lock_version", "1"),
+				),
 			},
 			{
 				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`
@@ -299,6 +304,63 @@ func TestGithubIntegration_reEnablingMirrorsTheProjectColumn(t *testing.T) {
   enabled        = true`, repo)),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(ghRes, "enabled", "true"),
+					resource.TestCheckResourceAttr("data.flightdeck_project.linked", "github_repo_full_name", repo),
+				),
+			},
+		},
+	})
+}
+
+func TestGithubIntegration_createNeverSendsEnabled(t *testing.T) {
+	env := newTestEnv(t, "github_integration")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	repo := "example-org/" + strings.ToLower(identifier)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`
+  repo_full_name = %q
+  enabled        = false`, repo)),
+				Check: resource.TestCheckResourceAttr(ghRes, "enabled", "false"),
+			},
+		},
+	})
+	var creates, patches int
+	for _, r := range env.fake.Requests() {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.Path, "/github-integrations"):
+			creates++
+			if strings.Contains(string(r.Body), `"enabled"`) {
+				t.Errorf("create body must not carry enabled (the API ignores it): %s", r.Body)
+			}
+		case r.Method == "PATCH" && strings.Contains(r.Path, "/github-integrations/"):
+			patches++
+			if !strings.Contains(string(r.Body), `"enabled":false`) {
+				t.Errorf("follow-up PATCH should disable: %s", r.Body)
+			}
+		}
+	}
+	if creates != 1 || patches != 1 {
+		t.Fatalf("expected 1 create + 1 disabling PATCH, got %d/%d", creates, patches)
+	}
+}
+
+func TestGithubIntegration_existingHookIsNotClaimed(t *testing.T) {
+	env := newTestEnv(t, "github_integration")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	repo := "example-org/" + strings.ToLower(identifier)
+	env.fake.MarkHookAlreadyPresent(repo)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// Managed mode, but a hook already targets Flightdeck: the link is
+				// made, nothing is registered or claimed, webhook_registered=false.
+				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`  repo_full_name = %q`, repo)),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(ghRes, "enabled", "true"),
+					resource.TestCheckResourceAttr(ghRes, "webhook_registered", "false"),
 					resource.TestCheckResourceAttr("data.flightdeck_project.linked", "github_repo_full_name", repo),
 				),
 			},

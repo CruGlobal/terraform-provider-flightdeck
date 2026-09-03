@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// WebhookEvents mirrors Webhook::EVENTS.
+// WebhookEvents are the events a webhook may subscribe to.
 var WebhookEvents = []string{
 	"work_item.created", "work_item.updated", "work_item.deleted",
 	"work_item.state_changed", "work_item.assigned", "work_item.unassigned",
@@ -146,9 +146,6 @@ func (s *Server) applyWebhookAttrs(h *Webhook, attrs map[string]any) (int, strin
 	if v, has := attrs["active"]; has {
 		h.Active = truthy(v)
 	}
-	if v, has := attrs["secret"]; has && asString(v) != "" {
-		h.Secret = asString(v)
-	}
 	if v, has := attrs["project_id"]; has {
 		if v == nil {
 			h.ProjectID = nil
@@ -194,13 +191,13 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 		defer s.mu.Unlock()
 		h := &Webhook{ID: s.id(), Active: true}
 		if status, code, msg := s.applyWebhookAttrs(h, attrs); status != 0 {
-			return status, map[string]any{"error": msg, "code": code}, nil
+			return status, errorBody(msg, code), nil
 		}
-		if h.Secret == "" {
-			raw := make([]byte, 24)
-			_, _ = rand.Read(raw)
-			h.Secret = hex.EncodeToString(raw)
-		}
+		// The signing secret is always generated server-side; a submitted
+		// `secret` is ignored, as the real API ignores it.
+		raw := make([]byte, 24)
+		_, _ = rand.Read(raw)
+		h.Secret = hex.EncodeToString(raw)
 		s.webhooks().byID[h.ID] = h
 		redacted := serializeWebhook(h, false)
 		redacted["secret"] = nil

@@ -9,23 +9,9 @@ import (
 
 var hexColor = regexp.MustCompile(`^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
 
-// canonicalColor stores colours the way a normalising model would: lower-case,
-// six digits. Deliberately stricter than the current model (which stores what
-// it is given) so the provider is proven tolerant of either behaviour.
-func canonicalColor(c string) string {
-	if !hexColor.MatchString(c) {
-		return c
-	}
-	c = strings.ToLower(c)
-	if len(c) == 4 {
-		return "#" + strings.Repeat(string(c[1]), 2) + strings.Repeat(string(c[2]), 2) + strings.Repeat(string(c[3]), 2)
-	}
-	return c
-}
-
 var stateGroups = []string{"backlog", "unstarted", "started", "completed", "cancelled"}
 
-// defaultStates mirrors Project::DEFAULT_STATES, seeded on every project create.
+// defaultStates are the five states a new project is seeded with.
 var defaultStates = []struct {
 	name, group, color string
 	def                bool
@@ -215,7 +201,7 @@ func (s *Server) showState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-// applyStateAttrs mirrors the model: name required + unique per project, group
+// applyStateAttrs mirrors the API: name required + unique per project, group
 // a fixed enum, color a hex value. Returns (status, code, message); 0 = ok.
 func (s *Server) applyStateAttrs(st *State, attrs map[string]any) (int, string, string) {
 	if v, ok := attrs["name"]; ok {
@@ -230,7 +216,7 @@ func (s *Server) applyStateAttrs(st *State, attrs map[string]any) (int, string, 
 		st.Group = g
 	}
 	if v, ok := attrs["color"]; ok && v != nil {
-		st.Color = canonicalColor(asString(v))
+		st.Color = asString(v)
 	}
 	if v, ok := attrs["default"]; ok {
 		st.Default = truthy(v)
@@ -254,7 +240,7 @@ func (s *Server) applyStateAttrs(st *State, attrs map[string]any) (int, string, 
 	return 0, "", ""
 }
 
-// ensureSingleDefault mirrors State#ensure_single_default.
+// ensureSingleDefault keeps one default state per project, as the API does.
 func (s *Server) ensureSingleDefault(st *State) {
 	if !st.Default {
 		return
@@ -280,12 +266,12 @@ func (s *Server) createState(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.liveProject(pid) == nil {
-			return http.StatusNotFound, map[string]any{"error": "Not found", "code": "not_found"}
+			return http.StatusNotFound, errorBody("Not found", "not_found")
 		}
 		st := &State{ID: s.id(), ProjectID: pid, Color: "#9ca3af", Group: "backlog"}
-		// Append to the end of the group, as StatesController#create does.
+		// Append to the end of the group, as the API does.
 		if status, code, msg := s.applyStateAttrs(st, attrs); status != 0 {
-			return status, map[string]any{"error": msg, "code": code}
+			return status, errorBody(msg, code)
 		}
 		if _, explicit := attrs["position"]; !explicit {
 			st.Position = 0

@@ -81,7 +81,10 @@ func TestConfigure_ConfigWinsOverEnvironment(t *testing.T) {
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics)
 	}
-	c := resp.ResourceData.(*client.Client)
+	c, ok := resp.ResourceData.(*client.Client)
+	if !ok {
+		t.Fatalf("ResourceData = %T, want *client.Client", resp.ResourceData)
+	}
 	if got := c.BaseURL(); got != "https://config.example.com/api/v1" {
 		t.Errorf("BaseURL = %q, want the configured endpoint", got)
 	}

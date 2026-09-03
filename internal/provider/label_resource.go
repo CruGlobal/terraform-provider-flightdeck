@@ -96,7 +96,7 @@ func (r *labelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				},
 			},
 			"lock_version": schema.Int64Attribute{
-				MarkdownDescription: "Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates.",
+				MarkdownDescription: "Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates and deletes.",
 				Computed:            true,
 			},
 		},

@@ -24,7 +24,7 @@ type Project struct {
 	Features           map[string]bool `json:"features"`
 	GithubRepoFullName *string         `json:"github_repo_full_name"`
 	// LeadID is the project lead (defaults to the creator). Network is the
-	// visibility (private_project / public_project); read-only over the API.
+	// visibility (private_project / public_project).
 	LeadID      *int64 `json:"lead_id"`
 	Network     string `json:"network"`
 	LockVersion int64  `json:"lock_version"`

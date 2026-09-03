@@ -12,7 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 )
 
-// hexColorPattern mirrors State::HEX_COLOR / Label::HEX_COLOR.
+// hexColorPattern is the API's hex-colour rule for states and labels.
 var hexColorPattern = regexp.MustCompile(`^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
 
 // hexColorType is a string type whose values compare by colour rather than by

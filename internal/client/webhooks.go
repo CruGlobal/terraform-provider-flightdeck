@@ -5,7 +5,7 @@ import (
 	"strconv"
 )
 
-// WebhookEvents mirrors Webhook::EVENTS — everything a webhook may subscribe to.
+// WebhookEvents is everything a webhook may subscribe to.
 var WebhookEvents = []string{
 	"work_item.created", "work_item.updated", "work_item.deleted",
 	"work_item.state_changed", "work_item.assigned", "work_item.unassigned",

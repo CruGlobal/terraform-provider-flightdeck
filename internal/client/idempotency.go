@@ -75,7 +75,7 @@ const (
 	// VerifiedGone: the resource the 201 named definitely does not exist — the
 	// 201 was the server replaying an earlier create (same Idempotency-Key)
 	// for a resource that has since been deleted. Only an authoritative signal
-	// (a 404 for the id, or the row present but marked revoked) may say this.
+	// (a 404 for the id) may say this; see VerifyByGet.
 	VerifiedGone
 	// VerifiedUnknown: the read neither confirmed nor refuted the resource —
 	// typically a list that does not contain it, which could be a filtering or

@@ -44,7 +44,7 @@ func (s *Server) projectMembers() *memberStore {
 	return store
 }
 
-// AddRoleKey makes a custom role key assignable (FD-230 permission schemes).
+// AddRoleKey makes a custom permission-scheme role key assignable.
 func (s *Server) AddRoleKey(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -111,7 +111,7 @@ func (s *Server) workspaceUser(userID int64) *User {
 	return nil
 }
 
-// applyRole mirrors Api::ProjectMemberAttributes.apply_role!.
+// applyRole resolves a role the way the API does: a built-in, else a custom key.
 func (s *Server) applyRole(m *ProjectMember, role string) bool {
 	if contains(builtinProjectRoles, role) {
 		m.Role, m.BuiltinRole = role, role
@@ -194,12 +194,12 @@ func (s *Server) createMember(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.liveProject(pid) == nil {
-			return http.StatusNotFound, map[string]any{"error": "Not found", "code": "not_found"}
+			return http.StatusNotFound, errorBody("Not found", "not_found")
 		}
 		userID, isNum := asInt64(attrs["user_id"])
 		if !isNum || s.workspaceUser(userID) == nil {
 			// A user outside the workspace is indistinguishable from a bad id.
-			return http.StatusNotFound, map[string]any{"error": "Not found", "code": "not_found"}
+			return http.StatusNotFound, errorBody("Not found", "not_found")
 		}
 		m := &ProjectMember{ID: s.id(), ProjectID: pid, UserID: userID, Role: "member", BuiltinRole: "member"}
 		if v, has := attrs["role"]; has {

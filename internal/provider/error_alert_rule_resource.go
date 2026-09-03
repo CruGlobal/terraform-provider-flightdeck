@@ -153,8 +153,10 @@ func (r *errorAlertRuleResource) Schema(_ context.Context, _ resource.SchemaRequ
 						Validators:          []validator.String{stringvalidator.OneOf(client.ErrorLevels...)},
 					},
 					"environment": schema.StringAttribute{
-						MarkdownDescription: "Only errors reported from this environment (for example `production`).",
-						Optional:            true,
+						MarkdownDescription: "Only errors reported from this environment (for example `production`). " +
+							"Omit it rather than setting it empty; the API strips blank conditions.",
+						Optional:   true,
+						Validators: []validator.String{stringvalidator.LengthAtLeast(1)},
 					},
 					"count": schema.Int64Attribute{
 						MarkdownDescription: "Occurrence count for the `occurrence_threshold` trigger.",
@@ -190,7 +192,7 @@ func (r *errorAlertRuleResource) Schema(_ context.Context, _ resource.SchemaRequ
 				},
 			},
 			"lock_version": schema.Int64Attribute{
-				MarkdownDescription: "Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates.",
+				MarkdownDescription: "Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates and deletes.",
 				Computed:            true,
 			},
 		},

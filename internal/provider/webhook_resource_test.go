@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -91,44 +92,35 @@ resource "flightdeck_webhook" "test" {
 	})
 }
 
-func TestWebhook_userSuppliedSecretReplacesOnChange(t *testing.T) {
+func TestWebhook_secretIsGeneratedByTheServerAndReadOnly(t *testing.T) {
 	env := newTestEnv(t, "webhook")
-	var id string
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
 			{
+				// The API generates the signing secret and ignores a caller-chosen
+				// one, so the attribute is read-only here.
 				Config: webhookConfig(env, `
   url    = "https://ci.example.com/hooks/a"
   events = ["project.updated"]
-  secret = "shhh-one"`),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr(webhookRes, "secret", "shhh-one"),
-					captureAttr(webhookRes, "id", &id),
-				),
+  secret = "my-own"`),
+				ExpectError: regexMust(`Invalid Configuration for Read-Only Attribute`),
 			},
 			{
 				Config: webhookConfig(env, `
   url    = "https://ci.example.com/hooks/a"
-  events = ["project.updated"]
-  secret = "shhh-two"`),
-				ConfigPlanChecks: resource.ConfigPlanChecks{
-					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(webhookRes, plancheck.ResourceActionDestroyBeforeCreate)},
-				},
+  events = ["project.updated"]`),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr(webhookRes, "secret", "shhh-two"),
-					func(s *terraform.State) error {
-						if s.RootModule().Resources[webhookRes].Primary.ID == id {
-							return fmt.Errorf("secret change should have replaced the webhook")
-						}
-						return nil
-					},
+					resource.TestCheckResourceAttrSet(webhookRes, "secret"),
+					resource.TestMatchResourceAttr(webhookRes, "secret", regexMust(`^[0-9a-f]{16,}$`)),
 				),
 			},
 		},
 	})
 	if !env.live() {
-		if w := env.fake.Webhook(mustInt(id)); w != nil {
-			t.Fatalf("original webhook %s should have been deleted on replace", id)
+		for _, r := range env.fake.RequestsMatching("POST", "/api/v1/webhooks") {
+			if strings.Contains(string(r.Body), `"secret"`) {
+				t.Errorf("create body must not carry a secret: %s", r.Body)
+			}
 		}
 	}
 }

@@ -13,7 +13,7 @@ import (
 )
 
 // toggleableFeatures are the project feature keys the API accepts on write —
-// Project::TOGGLEABLE_FEATURES, the same allowlist the settings UI uses.
+// the same allowlist the settings UI uses.
 // self_healing and slack are reported on read but are not settable here.
 var toggleableFeatures = []string{
 	"cycles", "modules", "milestones", "views", "pages", "meeting_notes",

@@ -17,7 +17,7 @@ type SelfHealing struct {
 	LockVersion      int64             `json:"lock_version"`
 }
 
-// SelfHealingConfig mirrors SelfHealing::Config#to_h, the resolved values
+// SelfHealingConfig is the API's resolved self-healing config, the values
 // (defaults applied). Armed is read-only over the API: a write that would
 // change it is refused with code arming_refused.
 type SelfHealingConfig struct {
@@ -36,7 +36,7 @@ type SelfHealingConfig struct {
 }
 
 // SelfHealingThresholdKeys are the writable self_healing settings, in the order
-// SelfHealing::Config::DEFAULTS declares them. "armed" is deliberately absent.
+// the API documents them. "armed" is deliberately absent.
 var SelfHealingThresholdKeys = []string{
 	"bake_minutes", "baseline_multiplier", "absolute_floor", "long_window_minutes",
 	"short_window_minutes", "burn_rate", "sustain_count", "consecutive_error_limit",

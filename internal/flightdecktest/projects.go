@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// DefaultFeatures mirrors Project::DEFAULT_FEATURES — what a read reports for
+// DefaultFeatures are the API's feature defaults — what a read reports for
 // a key the project has never stored.
 var DefaultFeatures = map[string]bool{
 	"cycles": true, "modules": true, "milestones": true, "views": true, "pages": true,
@@ -16,7 +16,7 @@ var DefaultFeatures = map[string]bool{
 	"errors": false, "incidents": false, "self_healing": false, "slack": true,
 }
 
-// ToggleableFeatures mirrors Project::TOGGLEABLE_FEATURES — the keys the API
+// ToggleableFeatures are the feature keys the API
 // accepts on write. self_healing and slack are deliberately absent.
 var ToggleableFeatures = []string{
 	"cycles", "modules", "milestones", "views", "pages", "meeting_notes",
@@ -96,7 +96,7 @@ func (s *Server) LinkGithubRepo(projectID int64, repo string) {
 	}
 }
 
-// SetNetwork flips the read-only visibility the way Settings -> Members would.
+// SetNetwork flips the visibility out of band, the way the settings UI would.
 func (s *Server) SetNetwork(projectID int64, network string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -221,17 +221,17 @@ func (s *Server) showProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-// applyProjectAttrs mirrors Api::ProjectAttributes.apply!. It returns an
+// applyProjectAttrs mirrors the API's project write rules. It returns an
 // (status, code, message) triple on rejection; status 0 means accepted.
 func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, string, string) {
-	// Api::ProjectAttributes::READ_ONLY / ELSEWHERE: named in a write -> 422.
+	// Read-only fields, or ones managed on another endpoint, named in a write -> 422.
 	if _, named := attrs["github_repo_full_name"]; named {
 		return http.StatusUnprocessableEntity, "invalid_attribute", "github_repo_full_name is read-only over the API"
 	}
 	if _, named := attrs["self_healing"]; named {
 		return http.StatusUnprocessableEntity, "invalid_attribute", "self_healing is managed at PATCH /api/v1/projects/:id/self-healing"
 	}
-	// FD-794: network is writable with the enum's exact spellings; null is "no opinion".
+	// network is writable with the enum's exact spellings; null is "no opinion".
 	if v, ok := attrs["network"]; ok && v != nil {
 		token := strings.TrimSpace(asString(v))
 		if token != "private_project" && token != "public_project" {
@@ -324,7 +324,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// FD-794: the project create fingerprints its attributes, so the same key
+	// The project create fingerprints its attributes, so the same key
 	// with different attributes is a 409 idempotency_key_reused, not a replay.
 	s.withIdempotencyFingerprint(w, r, "project", fingerprintOf(attrs), func() (int, any) {
 		s.mu.Lock()
@@ -332,7 +332,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 		p := &Project{ID: s.id(), Emoji: "📁", Features: map[string]bool{}, LeadID: 1, Network: "public_project", CreatedAt: now, UpdatedAt: now}
 		if status, code, msg := s.applyProjectAttrs(p, attrs); status != 0 {
-			return status, map[string]any{"error": msg, "code": code}
+			return status, errorBody(msg, code)
 		}
 		s.projects().byID[p.ID] = p
 		for _, hook := range s.projectHooks {

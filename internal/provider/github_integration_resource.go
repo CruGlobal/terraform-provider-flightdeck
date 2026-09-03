@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -74,11 +75,14 @@ func (r *githubIntegrationResource) Schema(_ context.Context, _ resource.SchemaR
 			"- **Caller-managed** (`secret` supplied): Flightdeck stores the secret and touches nothing on GitHub; you " +
 			"declare the matching repository webhook yourself (for example a `github_repository_webhook` pointing at " +
 			"Flightdeck's GitHub webhook endpoint with the same secret). `webhook_registered` is `false`.\n\n" +
-			"A repository can be linked to one enabled integration per workspace (`repo_already_linked`). The secret " +
-			"is write-only: it is sent on create only, never read back, and state holds only the value you configured. " +
-			"Changing `repo_full_name` or `secret` replaces the integration (unlink, then link again).\n\n" +
-			"Requires project-admin rights on the project; check your Flightdeck version's API documentation for the " +
-			"exact role, which may be workspace admin. Import by numeric id: " +
+			"A repository can be linked once across the workspace, enabled or not (`repo_already_linked`), and a " +
+			"project can have one enabled integration at a time. The secret is write-only: sent on create only, " +
+			"never read back, and state holds only the value you configured; it must be at least 16 characters " +
+			"(a blank value counts as omitted). Changing `repo_full_name` or `secret` replaces the integration " +
+			"(unlink, then link again), since a webhook has to be torn down and another registered.\n\n" +
+			"Reading and writing this resource requires the token's user to be a **workspace admin** — stricter " +
+			"than the other project-scoped resources, because linking spends the workspace's GitHub App credential " +
+			"and aims the self-healing rollback loop. Import by numeric id: " +
 			"`terraform import flightdeck_github_integration.app 17`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
@@ -107,12 +111,12 @@ func (r *githubIntegrationResource) Schema(_ context.Context, _ resource.SchemaR
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"secret": schema.StringAttribute{
-				MarkdownDescription: "Webhook signing secret for the caller-managed mode. Omit to let Flightdeck generate " +
-					"one and register the webhook itself. Write-only: sent on create, never read back. Changing it " +
-					"replaces the integration.",
+				MarkdownDescription: "Webhook signing secret for the caller-managed mode; at least 16 characters. Omit it " +
+					"(or pass an empty string) to let Flightdeck generate one and register the webhook itself. " +
+					"Write-only: sent on create, never read back. Changing it replaces the integration.",
 				Optional:      true,
 				Sensitive:     true,
-				Validators:    []validator.String{stringvalidator.LengthAtLeast(1)},
+				Validators:    []validator.String{blankOrMinLength(16)},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"webhook_registered": schema.BoolAttribute{
@@ -140,7 +144,8 @@ func (r *githubIntegrationResource) Create(ctx context.Context, req resource.Cre
 	if !plan.Enabled.IsNull() && !plan.Enabled.IsUnknown() {
 		fields["enabled"] = plan.Enabled.ValueBool()
 	}
-	if !plan.Secret.IsNull() && !plan.Secret.IsUnknown() {
+	// A blank secret is "omitted" (managed mode), as the API reads it.
+	if !plan.Secret.IsNull() && !plan.Secret.IsUnknown() && strings.TrimSpace(plan.Secret.ValueString()) != "" {
 		fields["secret"] = plan.Secret.ValueString()
 	}
 	created, err := r.client.CreateGithubIntegration(ctx, projectID, fields, client.PayloadKey("github_integration", strconv.FormatInt(projectID, 10), fields))
@@ -151,6 +156,9 @@ func (r *githubIntegrationResource) Create(ctx context.Context, req resource.Cre
 				apiMessage(err)+"\n\nInstall the App on the repository, or supply `secret` and register the webhook yourself.")
 		case client.HasCode(err, client.CodeRepoAlreadyLinked):
 			resp.Diagnostics.AddAttributeError(pathRoot("repo_full_name"), "Repository already linked", apiMessage(err))
+		case client.IsForbidden(err):
+			resp.Diagnostics.AddError("Linking a GitHub repository requires a workspace admin",
+				"Only a workspace owner or admin may manage a project's GitHub integration. "+apiMessage(err))
 		default:
 			addAPIError(&resp.Diagnostics, "Error linking GitHub repository", err)
 		}
@@ -200,8 +208,8 @@ func (r *githubIntegrationResource) Update(ctx context.Context, req resource.Upd
 				current = &fresh.LockVersion
 			}
 			addStaleError(&resp.Diagnostics, fmt.Sprintf("GitHub integration for %s", state.RepoFullName.ValueString()), state.LockVersion.ValueInt64(), current, err)
-		case client.HasCode(err, client.CodeRepoAlreadyLinked):
-			resp.Diagnostics.AddAttributeError(pathRoot("enabled"), "Repository already linked", apiMessage(err))
+		case client.IsValidation(err):
+			resp.Diagnostics.AddAttributeError(pathRoot("enabled"), "Cannot enable this integration", apiMessage(err))
 		default:
 			addAPIError(&resp.Diagnostics, "Error updating Flightdeck GitHub integration", err)
 		}
@@ -247,4 +255,26 @@ func (r *githubIntegrationResource) ImportState(ctx context.Context, req resourc
 	}
 	state := githubIntegrationToModel(g, types.StringNull())
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+// blankOrMinLength accepts null or an empty string (which the API treats as
+// "omitted") and otherwise requires at least n characters.
+type blankOrMinLength int
+
+func (v blankOrMinLength) Description(context.Context) string {
+	return fmt.Sprintf("must be empty or at least %d characters", int(v))
+}
+
+func (v blankOrMinLength) MarkdownDescription(ctx context.Context) string { return v.Description(ctx) }
+
+func (v blankOrMinLength) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	s := req.ConfigValue.ValueString()
+	if strings.TrimSpace(s) == "" || len(s) >= int(v) {
+		return
+	}
+	resp.Diagnostics.AddAttributeError(req.Path, "Secret too short",
+		fmt.Sprintf("must be at least %d characters (omit it, or pass an empty string, to have Flightdeck generate one and register the webhook itself); got %d.", int(v), len(s)))
 }

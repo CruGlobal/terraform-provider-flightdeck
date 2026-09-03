@@ -6,8 +6,8 @@ description: |-
   Links a Flightdeck project to a GitHub repository so the repository's webhook deliveries drive work-item transitions. Linking also records the repository on the project (flightdeck_project.github_repo_full_name, which is read-only there); unlinking clears it.
   Two modes follow from secret:
   Flightdeck-managed (secret omitted): Flightdeck generates the signing secret and registers the repository webhook through its GitHub App. The App must be installed on the repository, or the create fails with repo_unreachable. webhook_registered is true.Caller-managed (secret supplied): Flightdeck stores the secret and touches nothing on GitHub; you declare the matching repository webhook yourself (for example a github_repository_webhook pointing at Flightdeck's GitHub webhook endpoint with the same secret). webhook_registered is false.
-  A repository can be linked to one enabled integration per workspace (repo_already_linked). The secret is write-only: it is sent on create only, never read back, and state holds only the value you configured. Changing repo_full_name or secret replaces the integration (unlink, then link again).
-  Requires project-admin rights on the project; check your Flightdeck version's API documentation for the exact role, which may be workspace admin. Import by numeric id: terraform import flightdeck_github_integration.app 17.
+  A repository can be linked once across the workspace, enabled or not (repo_already_linked), and a project can have one enabled integration at a time. The secret is write-only: sent on create only, never read back, and state holds only the value you configured; it must be at least 16 characters (a blank value counts as omitted). Changing repo_full_name or secret replaces the integration (unlink, then link again), since a webhook has to be torn down and another registered.
+  Reading and writing this resource requires the token's user to be a workspace admin — stricter than the other project-scoped resources, because linking spends the workspace's GitHub App credential and aims the self-healing rollback loop. Import by numeric id: terraform import flightdeck_github_integration.app 17.
 ---
 
 # flightdeck_github_integration (Resource)
@@ -19,9 +19,9 @@ Two modes follow from `secret`:
 - **Flightdeck-managed** (`secret` omitted): Flightdeck generates the signing secret and registers the repository webhook through its GitHub App. The App must be installed on the repository, or the create fails with `repo_unreachable`. `webhook_registered` is `true`.
 - **Caller-managed** (`secret` supplied): Flightdeck stores the secret and touches nothing on GitHub; you declare the matching repository webhook yourself (for example a `github_repository_webhook` pointing at Flightdeck's GitHub webhook endpoint with the same secret). `webhook_registered` is `false`.
 
-A repository can be linked to one enabled integration per workspace (`repo_already_linked`). The secret is write-only: it is sent on create only, never read back, and state holds only the value you configured. Changing `repo_full_name` or `secret` replaces the integration (unlink, then link again).
+A repository can be linked once across the workspace, enabled or not (`repo_already_linked`), and a project can have one enabled integration at a time. The secret is write-only: sent on create only, never read back, and state holds only the value you configured; it must be at least 16 characters (a blank value counts as omitted). Changing `repo_full_name` or `secret` replaces the integration (unlink, then link again), since a webhook has to be torn down and another registered.
 
-Requires project-admin rights on the project; check your Flightdeck version's API documentation for the exact role, which may be workspace admin. Import by numeric id: `terraform import flightdeck_github_integration.app 17`.
+Reading and writing this resource requires the token's user to be a **workspace admin** — stricter than the other project-scoped resources, because linking spends the workspace's GitHub App credential and aims the self-healing rollback loop. Import by numeric id: `terraform import flightdeck_github_integration.app 17`.
 
 ## Example Usage
 
@@ -75,7 +75,7 @@ resource "github_repository_webhook" "flightdeck" {
 ### Optional
 
 - `enabled` (Boolean) Whether deliveries from the repository are processed. A new integration is enabled; when unset, the current value is kept.
-- `secret` (String, Sensitive) Webhook signing secret for the caller-managed mode. Omit to let Flightdeck generate one and register the webhook itself. Write-only: sent on create, never read back. Changing it replaces the integration.
+- `secret` (String, Sensitive) Webhook signing secret for the caller-managed mode; at least 16 characters. Omit it (or pass an empty string) to let Flightdeck generate one and register the webhook itself. Write-only: sent on create, never read back. Changing it replaces the integration.
 
 ### Read-Only
 

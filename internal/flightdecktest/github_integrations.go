@@ -92,17 +92,29 @@ func serializeGithubIntegration(g *GithubIntegration) map[string]any {
 	}
 }
 
-// enabledLinkExists mirrors GithubIntegration.for_repo: one ENABLED
-// integration per repository (case-insensitive) in the workspace.
-func (s *Server) enabledLinkExists(repo string, exceptID int64) bool {
+// repoLinked mirrors the controller's guard_already_linked!: ANY row for the
+// repository (case-insensitive), enabled or not, blocks a new link.
+func (s *Server) repoLinked(repo string) bool {
 	for _, other := range s.githubIntegrations().byID {
-		if other.ID != exceptID && other.Enabled && strings.EqualFold(other.RepoFullName, repo) && s.liveProject(other.ProjectID) != nil {
+		if strings.EqualFold(other.RepoFullName, repo) {
 			return true
 		}
 	}
 	return false
 }
 
+// otherEnabledOnProject mirrors GithubIntegration#only_one_enabled_per_project.
+func (s *Server) otherEnabledOnProject(projectID, exceptID int64) bool {
+	for _, other := range s.githubIntegrations().byID {
+		if other.ID != exceptID && other.ProjectID == projectID && other.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+// Workspace admin for every verb (existence is checked first so a non-admin
+// cannot tell project ids apart by 403 vs 404).
 func (s *Server) listGithubIntegrations(w http.ResponseWriter, r *http.Request) {
 	pid, ok := pathID(w, r, "project_id")
 	if !ok {
@@ -112,6 +124,10 @@ func (s *Server) listGithubIntegrations(w http.ResponseWriter, r *http.Request) 
 	if s.liveProject(pid) == nil {
 		s.mu.Unlock()
 		notFound(w)
+		return
+	}
+	if !s.requireWorkspaceAdmin(w) {
+		s.mu.Unlock()
 		return
 	}
 	var rows []*GithubIntegration
@@ -141,6 +157,9 @@ func (s *Server) showGithubIntegration(w http.ResponseWriter, r *http.Request) {
 		notFound(w)
 		return
 	}
+	if !s.requireWorkspaceAdmin(w) {
+		return
+	}
 	writeJSON(w, http.StatusOK, serializeGithubIntegration(g))
 }
 
@@ -160,30 +179,46 @@ func (s *Server) createGithubIntegration(w http.ResponseWriter, r *http.Request)
 		if project == nil {
 			return http.StatusNotFound, map[string]any{"error": "Not found", "code": "not_found"}
 		}
+		if !s.workspaceAdmin {
+			return http.StatusForbidden, map[string]any{"error": "This action requires workspace owner or admin rights.", "code": "forbidden"}
+		}
 		repo := strings.TrimSpace(asString(attrs["repo_full_name"]))
 		if !repoFullNameForm.MatchString(repo) {
-			return http.StatusUnprocessableEntity, map[string]any{"error": "repo_full_name must be in owner/repo form", "code": "invalid_attribute"}
+			return http.StatusUnprocessableEntity, map[string]any{"error": "repo_full_name is required, in owner/repo form", "code": "invalid_attribute"}
 		}
 		g := &GithubIntegration{ID: s.id(), ProjectID: pid, RepoFullName: repo, Enabled: true, CreatedAt: time.Now()}
 		if v, has := attrs["enabled"]; has && v != nil {
 			g.Enabled = truthy(v)
 		}
-		if v, has := attrs["secret"]; has && strings.TrimSpace(asString(v)) != "" {
-			// Caller-managed: the secret is stored, nothing happens on GitHub.
+		// A blank secret counts as absent (managed mode); a short one is refused.
+		secret := asString(attrs["secret"])
+		if strings.TrimSpace(secret) != "" {
+			if len(secret) < 16 {
+				return http.StatusUnprocessableEntity, map[string]any{
+					"error": "secret must be at least 16 characters (omit it entirely to have Flightdeck generate one and register the webhook for you)",
+					"code":  "invalid_attribute"}
+			}
+			// Caller-managed: the secret is stored, GitHub is never called.
 			g.SecretSet = true
-		} else {
-			// Flightdeck-managed: generate the secret and register the webhook
-			// through the GitHub App, which must be able to reach the repo.
+		}
+		if s.repoLinked(repo) {
+			return http.StatusUnprocessableEntity, map[string]any{
+				"error": repo + " is already linked to a Flightdeck project. Delete that integration first, or link a different repository.",
+				"code":  "repo_already_linked"}
+		}
+		if g.Enabled && s.otherEnabledOnProject(pid, g.ID) {
+			return http.StatusUnprocessableEntity, map[string]any{
+				"error": "Project this project already has an enabled GitHub integration — disable or remove it first", "code": "validation_failed"}
+		}
+		if !g.SecretSet {
+			// Flightdeck-managed: register the webhook through the GitHub App,
+			// inside the same transaction as the insert: unreachable = no row.
 			if s.githubIntegrations().unreachable[strings.ToLower(repo)] {
 				return http.StatusUnprocessableEntity, map[string]any{
-					"error": "The GitHub App cannot reach " + repo + "; install it on the repository (or supply a secret and register the webhook yourself)",
+					"error": "Flightdeck's GitHub App cannot reach " + repo + ". Install the GitHub App in workspace settings, or supply your own `secret` and register the webhook on GitHub yourself.",
 					"code":  "repo_unreachable"}
 			}
 			g.WebhookRegistered = true
-		}
-		if g.Enabled && s.enabledLinkExists(repo, g.ID) {
-			return http.StatusConflict, map[string]any{
-				"error": repo + " is already linked to an enabled integration in this workspace", "code": "repo_already_linked"}
 		}
 		s.githubIntegrations().byID[g.ID] = g
 		// The column side effect: the project records the mapping.
@@ -210,29 +245,42 @@ func (s *Server) updateGithubIntegration(w http.ResponseWriter, r *http.Request)
 		notFound(w)
 		return
 	}
+	if !s.requireWorkspaceAdmin(w) {
+		return
+	}
 	if !checkIfMatch(w, r, g.LockVersion) {
 		return
 	}
-	if _, has := attrs["repo_full_name"]; has {
+	// PATCH accepts only `enabled`; repo_full_name may be re-sent unchanged.
+	if v, has := attrs["repo_full_name"]; has && !strings.EqualFold(strings.TrimSpace(asString(v)), g.RepoFullName) {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_attribute",
-			"repo_full_name cannot be changed on an existing integration — unlink it and link the new repository")
+			"repo_full_name cannot be changed on an existing integration — DELETE it and POST a new one")
 		return
 	}
 	if _, has := attrs["secret"]; has {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_attribute",
-			"secret cannot be changed on an existing integration — unlink it and link again")
+			"secret cannot be changed over the API — rotate it in Settings -> Integrations, or DELETE this integration and POST a new one")
 		return
 	}
+	wasEnabled := g.Enabled
 	if v, has := attrs["enabled"]; has && v != nil {
 		enabled := truthy(v)
-		if enabled && !g.Enabled && s.enabledLinkExists(g.RepoFullName, g.ID) {
-			writeError(w, http.StatusConflict, "repo_already_linked",
-				g.RepoFullName+" is already linked to an enabled integration in this workspace")
+		if enabled && s.otherEnabledOnProject(g.ProjectID, g.ID) {
+			writeError(w, http.StatusUnprocessableEntity, "validation_failed",
+				"Project this project already has an enabled GitHub integration — disable or remove it first")
 			return
 		}
 		g.Enabled = enabled
 	}
 	g.LockVersion++
+	if g.Enabled && !wasEnabled {
+		// Re-enabling mirrors the column again.
+		if p := s.projects().byID[g.ProjectID]; p != nil {
+			linked := g.RepoFullName
+			p.GithubRepoFullName = &linked
+			p.LockVersion++
+		}
+	}
 	writeJSON(w, http.StatusOK, serializeGithubIntegration(g))
 }
 
@@ -246,6 +294,9 @@ func (s *Server) destroyGithubIntegration(w http.ResponseWriter, r *http.Request
 	g := s.liveGithubIntegration(id)
 	if g == nil {
 		notFound(w)
+		return
+	}
+	if !s.requireWorkspaceAdmin(w) {
 		return
 	}
 	if !checkIfMatch(w, r, g.LockVersion) {

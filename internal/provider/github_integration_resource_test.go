@@ -106,17 +106,17 @@ func TestGithubIntegration_callerManagedSecretIsWriteOnly(t *testing.T) {
 			{
 				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`
   repo_full_name = %q
-  secret         = "caller-managed-secret"`, repo)),
+  secret         = "caller-managed-secret-0123456789"`, repo)),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(ghRes, "webhook_registered", "false"),
-					resource.TestCheckResourceAttr(ghRes, "secret", "caller-managed-secret"),
+					resource.TestCheckResourceAttr(ghRes, "secret", "caller-managed-secret-0123456789"),
 					captureAttr(ghRes, "id", &id),
 				),
 			},
 			{
 				// The secret is never read back: state keeps the configured value.
 				RefreshState: true,
-				Check:        resource.TestCheckResourceAttr(ghRes, "secret", "caller-managed-secret"),
+				Check:        resource.TestCheckResourceAttr(ghRes, "secret", "caller-managed-secret-0123456789"),
 			},
 			{
 				// Import cannot recover it.
@@ -129,7 +129,7 @@ func TestGithubIntegration_callerManagedSecretIsWriteOnly(t *testing.T) {
 				// A new secret replaces the integration.
 				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`
   repo_full_name = %q
-  secret         = "rotated"`, repo)),
+  secret         = "rotated-secret-0123456789abcdef"`, repo)),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(ghRes, plancheck.ResourceActionDestroyBeforeCreate)},
 				},
@@ -183,14 +183,29 @@ func TestGithubIntegration_apiRefusals(t *testing.T) {
 				ExpectError: regexMust(`(?s)GitHub App cannot reach the repository.*supply.*secret`),
 			},
 			{
+				// A caller-managed secret must be at least 16 characters.
+				Config: githubIntegrationConfig(env, identifier, `
+  repo_full_name = "example-org/unreachable"
+  secret         = "short"`),
+				ExpectError: regexMust(`Secret too short`),
+			},
+			{
 				// Caller-managed mode does not need the App to reach the repo.
 				Config: githubIntegrationConfig(env, identifier, `
   repo_full_name = "example-org/unreachable"
-  secret         = "mine"`),
+  secret         = "mine-is-long-enough-0123456789"`),
 				Check: resource.TestCheckResourceAttr(ghRes, "webhook_registered", "false"),
 			},
 			{
-				// One enabled integration per repository per workspace.
+				// A blank secret selects the managed mode (an unset variable arrives
+				// as ""); replacing the caller-managed link above.
+				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`
+  repo_full_name = %q
+  secret         = ""`, repo)),
+				Check: resource.TestCheckResourceAttr(ghRes, "webhook_registered", "true"),
+			},
+			{
+				// A repository is linked once across the workspace, enabled or not.
 				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`  repo_full_name = %q`, repo)) + fmt.Sprintf(`
 resource "flightdeck_project" "other" {
   name       = "Other"
@@ -203,7 +218,18 @@ resource "flightdeck_github_integration" "dupe" {
   depends_on     = [flightdeck_github_integration.test]
 }
 `, randIdentifier(), repo),
-				ExpectError: regexMust(`(?s)Repository already linked.*already linked to an enabled\s+integration`),
+				ExpectError: regexMust(`(?s)Repository already linked.*already linked to a\s+Flightdeck project`),
+			},
+			{
+				// One enabled integration per project.
+				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`  repo_full_name = %q`, repo)) + fmt.Sprintf(`
+resource "flightdeck_github_integration" "second" {
+  project_id     = flightdeck_project.parent.id
+  repo_full_name = %q
+  depends_on     = [flightdeck_github_integration.test]
+}
+`, repo+"-second"),
+				ExpectError: regexMust(`(?s)HTTP 422 \(validation_failed\).*already has an enabled GitHub\s+integration`),
 			},
 		},
 	})
@@ -234,6 +260,47 @@ func TestGithubIntegration_staleWriteIsReported(t *testing.T) {
   repo_full_name = %q
   enabled        = false`, repo)),
 				ExpectError: regexMust(`(?s)GitHub integration for .* modified outside of Terraform`),
+			},
+		},
+	})
+}
+
+func TestGithubIntegration_requiresWorkspaceAdmin(t *testing.T) {
+	env := newTestEnv(t, "github_integration")
+	env.requireFake(t)
+	env.fake.SetWorkspaceAdmin(false)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config:      githubIntegrationConfig(env, identifier, `  repo_full_name = "example-org/app"`),
+				ExpectError: regexMust(`Linking a GitHub repository requires a workspace admin`),
+			},
+		},
+	})
+}
+
+func TestGithubIntegration_reEnablingMirrorsTheProjectColumn(t *testing.T) {
+	env := newTestEnv(t, "github_integration")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	repo := "example-org/" + strings.ToLower(identifier)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`
+  repo_full_name = %q
+  enabled        = false`, repo)),
+				Check: resource.TestCheckResourceAttr(ghRes, "enabled", "false"),
+			},
+			{
+				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`
+  repo_full_name = %q
+  enabled        = true`, repo)),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(ghRes, "enabled", "true"),
+					resource.TestCheckResourceAttr("data.flightdeck_project.linked", "github_repo_full_name", repo),
+				),
 			},
 		},
 	})

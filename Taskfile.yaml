@@ -73,6 +73,11 @@ tasks:
     cmds:
       - go test -count=1 -cover ./...
 
+  vulncheck:
+    desc: Report known vulnerabilities reachable from this module (what CI gates on)
+    cmds:
+      - go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
   generate:
     desc: Regenerate provider docs from schema (requires terraform on PATH)
     cmds:

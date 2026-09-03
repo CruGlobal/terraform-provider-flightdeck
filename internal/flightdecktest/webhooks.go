@@ -83,7 +83,7 @@ func serializeWebhook(h *Webhook, withSecret bool) map[string]any {
 	events := append([]string(nil), h.Events...)
 	sort.Strings(events)
 	out := map[string]any{
-		"id": h.ID, "project_id": h.ProjectID, "url": h.URL, "events": events,
+		"id": h.ID, "workspace_id": 1, "project_id": h.ProjectID, "url": h.URL, "events": events,
 		"active": h.Active, "lock_version": h.LockVersion,
 	}
 	if withSecret {
@@ -189,12 +189,12 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Unlock()
-	s.withIdempotency(w, r, "webhook", func() (int, any) {
+	s.withIdempotencyRedacted(w, r, "webhook", func() (int, any, any) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		h := &Webhook{ID: s.id(), Active: true}
 		if status, code, msg := s.applyWebhookAttrs(h, attrs); status != 0 {
-			return status, map[string]any{"error": msg, "code": code}
+			return status, map[string]any{"error": msg, "code": code}, nil
 		}
 		if h.Secret == "" {
 			raw := make([]byte, 24)
@@ -202,7 +202,11 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 			h.Secret = hex.EncodeToString(raw)
 		}
 		s.webhooks().byID[h.ID] = h
-		return http.StatusCreated, serializeWebhook(h, true)
+		redacted := serializeWebhook(h, false)
+		redacted["secret"] = nil
+		redacted["secret_available"] = false
+		redacted["message"] = "Replay of a previously-used Idempotency-Key. The signing secret is returned only by the original create."
+		return http.StatusCreated, serializeWebhook(h, true), redacted
 	})
 }
 
@@ -249,8 +253,12 @@ func (s *Server) destroyWebhook(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWorkspaceAdmin(w) {
 		return
 	}
-	if s.webhooks().byID[id] == nil {
+	h := s.webhooks().byID[id]
+	if h == nil {
 		notFound(w)
+		return
+	}
+	if !checkIfMatch(w, r, h.LockVersion) {
 		return
 	}
 	delete(s.webhooks().byID, id)

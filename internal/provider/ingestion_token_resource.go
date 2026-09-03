@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -38,6 +39,7 @@ type ingestionTokenModel struct {
 	Scope       types.String `tfsdk:"scope"`
 	Token       types.String `tfsdk:"token"`
 	LastFour    types.String `tfsdk:"last_four"`
+	LockVersion types.Int64  `tfsdk:"lock_version"`
 }
 
 // ingestionTokenToModel maps an API token. The plaintext comes from the create
@@ -54,6 +56,7 @@ func ingestionTokenToModel(t *client.IngestionToken, token types.String) ingesti
 		Scope:       types.StringValue(t.Scope),
 		Token:       token,
 		LastFour:    types.StringValue(t.LastFour),
+		LockVersion: types.Int64Value(t.LockVersion),
 	}
 }
 
@@ -71,9 +74,12 @@ func (r *ingestionTokenResource) Schema(_ context.Context, _ resource.SchemaRequ
 			"to report exceptions to the project's error tracking.\n\n" +
 			"The token value is returned by the API **once, on create**, and stored in Terraform state as a sensitive " +
 			"attribute so it can be handed to the application (for example through a secret manager). It is never " +
-			"re-read; an imported token has no `token` value. Tokens cannot be edited: changing any attribute " +
-			"replaces the token (the old one is revoked). Deleting the resource revokes the token.\n\n" +
-			"Import by numeric id: `terraform import flightdeck_ingestion_token.prod 31`.",
+			"re-read; an imported token has no `token` value. If the API replays an earlier create (the same " +
+			"declaration re-created within 24 hours) the replayed row comes back without its secret; the provider " +
+			"revokes that row and mints a fresh token rather than recording a credential it cannot know. Tokens " +
+			"cannot be edited: changing any attribute replaces the token (the old one is revoked). Deleting the " +
+			"resource revokes the token; the row stays listed as history.\n\n" +
+			"Import with `<project_id>/<token_id>`: `terraform import flightdeck_ingestion_token.prod 42/31`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
 				MarkdownDescription: "Numeric id of the token.",
@@ -119,6 +125,10 @@ func (r *ingestionTokenResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Computed:            true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
+			"lock_version": schema.Int64Attribute{
+				MarkdownDescription: "Optimistic-locking version the API bumps on every change. Sent as `If-Match` when revoking.",
+				Computed:            true,
+			},
 		},
 	}
 }
@@ -140,12 +150,8 @@ func (r *ingestionTokenResource) Create(ctx context.Context, req resource.Create
 		addAPIError(&resp.Diagnostics, "Error creating Flightdeck ingestion token", err)
 		return
 	}
+	// The client guarantees the token carries its secret or fails.
 	state := ingestionTokenToModel(created, types.StringNull())
-	if state.Token.IsNull() {
-		resp.Diagnostics.AddWarning("Ingestion token value not returned",
-			"The API did not include the token value in the create response, so `token` is null in state. "+
-				"Check the Flightdeck API version; the value is only ever available at creation.")
-	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -155,14 +161,19 @@ func (r *ingestionTokenResource) Read(ctx context.Context, req resource.ReadRequ
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	t, err := r.client.FindIngestionToken(ctx, state.ProjectID.ValueInt64(), state.ID.ValueInt64())
+	t, err := r.client.GetIngestionToken(ctx, state.ProjectID.ValueInt64(), state.ID.ValueInt64())
 	if err != nil {
 		if client.IsNotFound(err) {
-			// Revoked (or the project is gone): recreate on next apply.
 			resp.State.RemoveResource(ctx)
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error reading Flightdeck ingestion token", err)
+		return
+	}
+	if t.IsRevoked() {
+		// Revoked (from the UI, or by a replaced resource): the row stays as
+		// history, but the credential is gone; recreate on the next apply.
+		resp.State.RemoveResource(ctx)
 		return
 	}
 	newState := ingestionTokenToModel(t, state.Token)
@@ -186,13 +197,26 @@ func (r *ingestionTokenResource) Delete(ctx context.Context, req resource.Delete
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.client.RevokeIngestionToken(ctx, state.ID.ValueInt64()); err != nil {
+	projectID, id := state.ProjectID.ValueInt64(), state.ID.ValueInt64()
+	err := deleteWithIfMatch(ctx, state.LockVersion.ValueInt64(),
+		func(ctx context.Context, lv int64) error {
+			return r.client.RevokeIngestionToken(ctx, projectID, id, lv)
+		},
+		func(ctx context.Context) (int64, error) {
+			fresh, err := r.client.GetIngestionToken(ctx, projectID, id)
+			if err != nil {
+				return 0, err
+			}
+			return fresh.LockVersion, nil
+		})
+	if err != nil {
 		addAPIError(&resp.Diagnostics, "Error revoking Flightdeck ingestion token", err)
 	}
 }
 
-// ImportState accepts `<project_id>/<token_id>` (the token list is per project)
-// or a bare token id, in which case every readable project is searched.
+// ImportState accepts `<project_id>/<token_id>` (tokens are addressed within
+// their project) or a bare token id, in which case every readable project is
+// searched. A revoked token cannot be imported.
 func (r *ingestionTokenResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	raw := strings.TrimSpace(req.ID)
 	var (
@@ -208,7 +232,7 @@ func (r *ingestionTokenResource) ImportState(ctx context.Context, req resource.I
 		if !ok {
 			return
 		}
-		t, err = r.client.FindIngestionToken(ctx, projectID, tokenID)
+		t, err = r.client.GetIngestionToken(ctx, projectID, tokenID)
 	} else {
 		tokenID, ok := parseImportID(raw, "ingestion token", &resp.Diagnostics)
 		if !ok {
@@ -218,6 +242,11 @@ func (r *ingestionTokenResource) ImportState(ctx context.Context, req resource.I
 	}
 	if err != nil {
 		addAPIError(&resp.Diagnostics, "Error importing Flightdeck ingestion token", err)
+		return
+	}
+	if t.IsRevoked() {
+		resp.Diagnostics.AddError("Ingestion token is revoked",
+			fmt.Sprintf("Token %d was revoked on %s and cannot be imported; create a new one.", t.ID, valueOr(t.RevokedAt, "an unknown date")))
 		return
 	}
 	state := ingestionTokenToModel(t, types.StringNull())
@@ -233,14 +262,21 @@ func (r *ingestionTokenResource) findIngestionTokenAcrossProjects(ctx context.Co
 		return nil, err
 	}
 	for _, p := range projects {
-		t, ferr := r.client.FindIngestionToken(ctx, p.ID, tokenID)
+		t, ferr := r.client.GetIngestionToken(ctx, p.ID, tokenID)
 		if ferr == nil {
 			return t, nil
 		}
-		if !client.IsNotFound(ferr) {
+		if !client.IsNotFound(ferr) && !client.IsForbidden(ferr) {
 			return nil, ferr
 		}
 	}
-	return nil, &client.Error{Status: 404, Code: client.CodeNotFound, Method: "GET", Path: "/projects/*/ingestion_tokens",
-		Message: "No active ingestion token " + strconv.FormatInt(tokenID, 10) + " in any readable project"}
+	return nil, &client.Error{Status: 404, Code: client.CodeNotFound, Method: "GET", Path: "/projects/*/ingestion-tokens",
+		Message: "No ingestion token " + strconv.FormatInt(tokenID, 10) + " in any readable project"}
+}
+
+func valueOr(s *string, fallback string) string {
+	if s == nil || *s == "" {
+		return fallback
+	}
+	return *s
 }

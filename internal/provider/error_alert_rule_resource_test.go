@@ -6,6 +6,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 const ruleRes = "flightdeck_error_alert_rule.test"
@@ -67,6 +68,10 @@ func TestErrorAlertRule_basicLifecycle(t *testing.T) {
 				ResourceName:      ruleRes,
 				ImportState:       true,
 				ImportStateVerify: true,
+				ImportStateIdFunc: func(s *terraform.State) (string, error) {
+					rs := s.RootModule().Resources[ruleRes].Primary
+					return rs.Attributes["project_id"] + "/" + rs.ID, nil
+				},
 			},
 			{
 				// Switch trigger, drop the condition, swap actions, disable.
@@ -250,7 +255,8 @@ func TestErrorAlertRule_staleWriteIsReported(t *testing.T) {
 			{Config: ruleConfig(env, identifier, base), Check: captureAttr(ruleRes, "id", &id)},
 			{
 				PreConfig: func() {
-					env.fake.OnNextRequest("PATCH", "/api/v1/error_alert_rules/"+id, func() { env.fake.TouchErrorAlertRule(mustInt(id), "Someone else") })
+					env.fake.OnNextRequest("PATCH", fmt.Sprintf("/api/v1/projects/%d/error-rules/%s", projectIDOf(env, identifier), id),
+						func() { env.fake.TouchErrorAlertRule(mustInt(id), "Someone else") })
 				},
 				Config: ruleConfig(env, identifier, `
   name    = "Racy v2"
@@ -283,7 +289,13 @@ func TestErrorAlertRule_disabledSurvivesImportWithoutADefault(t *testing.T) {
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
 			{Config: disabled, Check: resource.TestCheckResourceAttr(ruleRes, "enabled", "false")},
-			{ResourceName: ruleRes, ImportState: true, ImportStateVerify: true},
+			{
+				ResourceName: ruleRes, ImportState: true, ImportStateVerify: true,
+				ImportStateIdFunc: func(s *terraform.State) (string, error) {
+					rs := s.RootModule().Resources[ruleRes].Primary
+					return rs.Attributes["project_id"] + "/" + rs.ID, nil
+				},
+			},
 			{
 				Config: unspecified,
 				ConfigPlanChecks: resource.ConfigPlanChecks{

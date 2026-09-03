@@ -4,17 +4,17 @@ page_title: "flightdeck_ingestion_token Resource - flightdeck"
 subcategory: ""
 description: |-
   Manages an error-ingestion token for a Flightdeck project — the credential an application uses to report exceptions to the project's error tracking.
-  The token value is returned by the API once, on create, and stored in Terraform state as a sensitive attribute so it can be handed to the application (for example through a secret manager). It is never re-read; an imported token has no token value. Tokens cannot be edited: changing any attribute replaces the token (the old one is revoked). Deleting the resource revokes the token.
-  Import by numeric id: terraform import flightdeck_ingestion_token.prod 31.
+  The token value is returned by the API once, on create, and stored in Terraform state as a sensitive attribute so it can be handed to the application (for example through a secret manager). It is never re-read; an imported token has no token value. If the API replays an earlier create (the same declaration re-created within 24 hours) the replayed row comes back without its secret; the provider revokes that row and mints a fresh token rather than recording a credential it cannot know. Tokens cannot be edited: changing any attribute replaces the token (the old one is revoked). Deleting the resource revokes the token; the row stays listed as history.
+  Import with <project_id>/<token_id>: terraform import flightdeck_ingestion_token.prod 42/31.
 ---
 
 # flightdeck_ingestion_token (Resource)
 
 Manages an error-ingestion token for a Flightdeck project — the credential an application uses to report exceptions to the project's error tracking.
 
-The token value is returned by the API **once, on create**, and stored in Terraform state as a sensitive attribute so it can be handed to the application (for example through a secret manager). It is never re-read; an imported token has no `token` value. Tokens cannot be edited: changing any attribute replaces the token (the old one is revoked). Deleting the resource revokes the token.
+The token value is returned by the API **once, on create**, and stored in Terraform state as a sensitive attribute so it can be handed to the application (for example through a secret manager). It is never re-read; an imported token has no `token` value. If the API replays an earlier create (the same declaration re-created within 24 hours) the replayed row comes back without its secret; the provider revokes that row and mints a fresh token rather than recording a credential it cannot know. Tokens cannot be edited: changing any attribute replaces the token (the old one is revoked). Deleting the resource revokes the token; the row stays listed as history.
 
-Import by numeric id: `terraform import flightdeck_ingestion_token.prod 31`.
+Import with `<project_id>/<token_id>`: `terraform import flightdeck_ingestion_token.prod 42/31`.
 
 ## Example Usage
 
@@ -59,6 +59,7 @@ resource "flightdeck_ingestion_token" "api_production" {
 
 - `id` (Number) Numeric id of the token.
 - `last_four` (String) Last four characters of the token, as shown in the UI's token list.
+- `lock_version` (Number) Optimistic-locking version the API bumps on every change. Sent as `If-Match` when revoking.
 - `token` (String, Sensitive) The token value (`fd_post_…`). Available only when the resource created the token.
 
 ## Import
@@ -69,6 +70,7 @@ The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/c
 
 ```shell
 # Import with "<project_id>/<token_id>" (or a bare token id, which searches
-# every readable project). An imported token has no `token` value.
+# every readable project). An imported token has no `token` value, and a
+# revoked token cannot be imported.
 terraform import flightdeck_ingestion_token.api_production 42/31
 ```

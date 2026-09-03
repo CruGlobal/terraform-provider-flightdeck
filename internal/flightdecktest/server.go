@@ -272,24 +272,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]any{"id": me.ID, "name": me.Name, "email": me.Email, "workspace_id": 1})
 	})
-	mux.HandleFunc("GET /api/v1/workspace_members", s.listWorkspaceMembers)
 	for _, hook := range resourceHooks {
 		hook(s, mux)
 	}
 	mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "Not found")
 	})
-}
-
-func (s *Server) listWorkspaceMembers(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	members := append([]User(nil), s.members...)
-	s.mu.Unlock()
-	items := make([]any, 0, len(members))
-	for _, m := range members {
-		items = append(items, map[string]any{"id": m.ID, "name": m.Name, "email": m.Email, "role": m.Role})
-	}
-	writeCollection(w, r, items)
 }
 
 // --- envelope helpers -------------------------------------------------------

@@ -22,7 +22,10 @@ var protoV6ProviderFactories = map[string]func() (tfprotov6.ProviderServer, erro
 // that live Flightdeck (a dedicated test workspace — they create and delete
 // projects). Otherwise they run against the in-process fake.
 const (
-	envAccMemberEmail = "FLIGHTDECK_ACC_MEMBER_EMAIL"
+	// The numeric user id of another workspace member, for the project_member
+	// tests. A user id rather than an email: the API has no member directory
+	// route to resolve one.
+	envAccMemberUserID = "FLIGHTDECK_ACC_MEMBER_USER_ID"
 )
 
 // liveReady records which resources' acceptance tests may run against a live
@@ -35,7 +38,6 @@ var liveReady = map[string]bool{
 	"state":            false, // FD-787
 	"label":            false, // FD-787
 	"project_member":   false, // FD-788
-	"workspace_member": false, // FD-788
 	"ingestion_token":  false, // FD-788
 	"error_alert_rule": false, // FD-788
 	"webhook":          false, // FD-788

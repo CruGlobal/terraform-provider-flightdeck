@@ -114,8 +114,10 @@ func (r *webhookResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"A webhook receives events from every project unless `project_id` scopes it to one. Managing webhooks " +
 			"requires the token's user to be a **workspace admin**.\n\n" +
 			"The signing secret is returned by the API once, on create, and kept in state as a sensitive attribute; it " +
-			"is never re-read, so an imported webhook has no `secret` value. Supplying your own `secret` is optional. " +
-			"Changing it replaces the webhook.\n\n" +
+			"is never re-read, so an imported webhook has no `secret` value. If the API replays an earlier create " +
+			"(the same declaration re-created within 24 hours) the replayed row comes back without its secret; the " +
+			"provider deletes that row and creates the webhook afresh rather than recording a secret it cannot know. " +
+			"Supplying your own `secret` is optional. Changing it replaces the webhook.\n\n" +
 			"Import by numeric id: `terraform import flightdeck_webhook.ci 9`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
@@ -183,13 +185,8 @@ func (r *webhookResource) Create(ctx context.Context, req resource.CreateRequest
 		addAPIError(&resp.Diagnostics, "Error creating Flightdeck webhook", err)
 		return
 	}
+	// The client guarantees the webhook carries its secret or fails.
 	state := webhookToModel(created, plan.Secret, &resp.Diagnostics)
-	if state.Secret.IsUnknown() {
-		state.Secret = types.StringNull()
-		resp.Diagnostics.AddWarning("Webhook secret not returned",
-			"The API did not include the signing secret in the create response, so `secret` is null in state. "+
-				"Check the Flightdeck API version; the value is only ever available at creation.")
-	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -247,7 +244,17 @@ func (r *webhookResource) Delete(ctx context.Context, req resource.DeleteRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.client.DeleteWebhook(ctx, state.ID.ValueInt64()); err != nil {
+	id := state.ID.ValueInt64()
+	err := deleteWithIfMatch(ctx, state.LockVersion.ValueInt64(),
+		func(ctx context.Context, lv int64) error { return r.client.DeleteWebhook(ctx, id, lv) },
+		func(ctx context.Context) (int64, error) {
+			fresh, err := r.client.GetWebhook(ctx, id)
+			if err != nil {
+				return 0, err
+			}
+			return fresh.LockVersion, nil
+		})
+	if err != nil {
 		addAPIError(&resp.Diagnostics, "Error deleting Flightdeck webhook", err)
 	}
 }

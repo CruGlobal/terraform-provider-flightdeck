@@ -29,11 +29,14 @@ type projectMemberResource struct {
 	client *client.Client
 }
 
+// projectMemberModel: id is the MEMBERSHIP row id (what the API's by-id routes
+// take); user_id is the member.
 type projectMemberModel struct {
 	ID          types.Int64  `tfsdk:"id"`
 	ProjectID   types.Int64  `tfsdk:"project_id"`
 	UserID      types.Int64  `tfsdk:"user_id"`
 	Role        types.String `tfsdk:"role"`
+	BuiltinRole types.String `tfsdk:"builtin_role"`
 	LockVersion types.Int64  `tfsdk:"lock_version"`
 }
 
@@ -43,10 +46,11 @@ func projectMemberToModel(m *client.ProjectMember) projectMemberModel {
 		ProjectID:   types.Int64Value(m.ProjectID),
 		UserID:      types.Int64Value(m.UserID),
 		Role:        types.StringValue(m.Role),
-		LockVersion: types.Int64Null(),
+		BuiltinRole: types.StringNull(),
+		LockVersion: types.Int64Value(m.LockVersion),
 	}
-	if m.LockVersion != nil {
-		out.LockVersion = types.Int64Value(*m.LockVersion)
+	if m.BuiltinRole != "" {
+		out.BuiltinRole = types.StringValue(m.BuiltinRole)
 	}
 	return out
 }
@@ -61,17 +65,19 @@ func (r *projectMemberResource) Configure(_ context.Context, req resource.Config
 
 func (r *projectMemberResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a user's role on a Flightdeck project. Use the `flightdeck_workspace_member` data source " +
-			"to resolve a `user_id` from an email address.\n\n" +
-			"The user must already be a member of the workspace. The role is one of the built-in roles (`" +
-			strings.Join(client.ProjectMemberRoles, "`, `") + "`) or a custom role key defined by the workspace's " +
-			"permission scheme; the API rejects anything else.\n\n" +
-			"Note that the user who created a project is written in as its admin automatically; managing that " +
-			"membership here requires importing it first.\n\n" +
-			"Import with `<project_id>/<user_id>`: `terraform import flightdeck_project_member.deploy_bot 42/7`.",
+		MarkdownDescription: "Manages a user's membership of a Flightdeck project — one membership row, addressed by its own " +
+			"id. The user must already be a member of the workspace; the API has no route to look a user up by email, " +
+			"so `user_id` is the numeric user id (visible in the workspace's member list).\n\n" +
+			"The role is one of the built-in roles (`" + strings.Join(client.ProjectMemberRoles, "`, `") + "`) or a " +
+			"custom role key defined by the workspace's permission scheme; the API rejects anything else. Changing " +
+			"`user_id` replaces the membership (the API refuses to move a row to another user).\n\n" +
+			"Reads and writes require `administer_project` on the project. The user who created a project is written " +
+			"in as its admin automatically; managing that membership here requires importing it first.\n\n" +
+			"Import with `<project_id>/<membership_id>`, or `<project_id>/user:<user_id>` to look the membership up " +
+			"by user: `terraform import flightdeck_project_member.deploy_bot 42/user:7`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
-				MarkdownDescription: "Numeric id of the membership row.",
+				MarkdownDescription: "Numeric id of the membership row (not the user).",
 				Computed:            true,
 				PlanModifiers:       []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
@@ -91,8 +97,12 @@ func (r *projectMemberResource) Schema(_ context.Context, _ resource.SchemaReque
 				Required:   true,
 				Validators: []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
+			"builtin_role": schema.StringAttribute{
+				MarkdownDescription: "The built-in role the membership rests on, which equals `role` unless a custom role key is assigned.",
+				Computed:            true,
+			},
 			"lock_version": schema.Int64Attribute{
-				MarkdownDescription: "Optimistic-locking version, when the API versions membership rows. Sent as `If-Match` on updates when known.",
+				MarkdownDescription: "Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates and deletes.",
 				Computed:            true,
 			},
 		},
@@ -122,7 +132,7 @@ func (r *projectMemberResource) Read(ctx context.Context, req resource.ReadReque
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	m, err := r.client.FindProjectMember(ctx, state.ProjectID.ValueInt64(), state.UserID.ValueInt64())
+	m, err := r.client.GetProjectMember(ctx, state.ProjectID.ValueInt64(), state.ID.ValueInt64())
 	if err != nil {
 		if client.IsNotFound(err) {
 			resp.State.RemoveResource(ctx)
@@ -142,35 +152,16 @@ func (r *projectMemberResource) Update(ctx context.Context, req resource.UpdateR
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	projectID, userID := state.ProjectID.ValueInt64(), state.UserID.ValueInt64()
-	var lockVersion *int64
-	if !state.LockVersion.IsNull() && !state.LockVersion.IsUnknown() {
-		v := state.LockVersion.ValueInt64()
-		lockVersion = &v
-	}
-	updated, err := r.client.UpdateProjectMember(ctx, projectID, userID, client.Fields{"role": plan.Role.ValueString()}, lockVersion)
+	projectID, id := state.ProjectID.ValueInt64(), state.ID.ValueInt64()
+	updated, err := r.client.UpdateProjectMember(ctx, projectID, id, client.Fields{"role": plan.Role.ValueString()}, state.LockVersion.ValueInt64())
 	if err != nil {
-		if lockVersion == nil && (client.IsPreconditionRequired(err) || client.IsStale(err)) {
-			// The API insists on an If-Match the provider could not send because
-			// no lock_version was ever returned for the row: an API/provider
-			// mismatch, not something re-planning can fix.
-			resp.Diagnostics.AddError("Flightdeck requires a precondition on member updates",
-				fmt.Sprintf("Updating the membership of user %d on project %d was refused (%s), but the API did not "+
-					"return a lock_version for the row, so the provider had no If-Match to send. Every membership "+
-					"update will fail until the provider is updated for this API version; please report it.",
-					userID, projectID, apiMessage(err)))
-			return
-		}
 		if client.IsStale(err) {
 			var current *int64
-			if fresh, rerr := r.client.FindProjectMember(ctx, projectID, userID); rerr == nil {
-				current = fresh.LockVersion
+			if fresh, rerr := r.client.GetProjectMember(ctx, projectID, id); rerr == nil {
+				current = &fresh.LockVersion
 			}
-			var stateVersion int64
-			if lockVersion != nil {
-				stateVersion = *lockVersion
-			}
-			addStaleError(&resp.Diagnostics, fmt.Sprintf("Membership of user %d on project %d", userID, projectID), stateVersion, current, err)
+			addStaleError(&resp.Diagnostics, fmt.Sprintf("Membership %d (user %d on project %d)", id, state.UserID.ValueInt64(), projectID),
+				state.LockVersion.ValueInt64(), current, err)
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error updating Flightdeck project member", err)
@@ -186,26 +177,52 @@ func (r *projectMemberResource) Delete(ctx context.Context, req resource.DeleteR
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.client.RemoveProjectMember(ctx, state.ProjectID.ValueInt64(), state.UserID.ValueInt64()); err != nil {
+	projectID, id := state.ProjectID.ValueInt64(), state.ID.ValueInt64()
+	err := deleteWithIfMatch(ctx, state.LockVersion.ValueInt64(),
+		func(ctx context.Context, lv int64) error { return r.client.RemoveProjectMember(ctx, projectID, id, lv) },
+		func(ctx context.Context) (int64, error) {
+			fresh, err := r.client.GetProjectMember(ctx, projectID, id)
+			if err != nil {
+				return 0, err
+			}
+			return fresh.LockVersion, nil
+		})
+	if err != nil {
 		addAPIError(&resp.Diagnostics, "Error removing Flightdeck project member", err)
 	}
 }
 
+// ImportState accepts `<project_id>/<membership_id>` or
+// `<project_id>/user:<user_id>` (the latter looks the membership up in the
+// project's member list).
 func (r *projectMemberResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	parts := strings.Split(strings.TrimSpace(req.ID), "/")
 	if len(parts) != 2 {
-		resp.Diagnostics.AddError("Invalid import id", fmt.Sprintf("Expected <project_id>/<user_id> (for example 42/7), got %q.", req.ID))
+		resp.Diagnostics.AddError("Invalid import id",
+			fmt.Sprintf("Expected <project_id>/<membership_id> or <project_id>/user:<user_id> (for example 42/7 or 42/user:7), got %q.", req.ID))
 		return
 	}
 	projectID, ok := parseImportID(parts[0], "project", &resp.Diagnostics)
 	if !ok {
 		return
 	}
-	userID, ok := parseImportID(parts[1], "user", &resp.Diagnostics)
-	if !ok {
-		return
+	var (
+		m   *client.ProjectMember
+		err error
+	)
+	if userPart, byUser := strings.CutPrefix(parts[1], "user:"); byUser {
+		userID, ok := parseImportID(userPart, "user", &resp.Diagnostics)
+		if !ok {
+			return
+		}
+		m, err = r.client.FindProjectMemberByUser(ctx, projectID, userID)
+	} else {
+		membershipID, ok := parseImportID(parts[1], "membership", &resp.Diagnostics)
+		if !ok {
+			return
+		}
+		m, err = r.client.GetProjectMember(ctx, projectID, membershipID)
 	}
-	m, err := r.client.FindProjectMember(ctx, projectID, userID)
 	if err != nil {
 		addAPIError(&resp.Diagnostics, "Error importing Flightdeck project member", err)
 		return

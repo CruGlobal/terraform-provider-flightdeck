@@ -5,52 +5,22 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 )
 
-// WorkspaceMember is a user of the token's workspace (the workspace member
-// directory used to map people by email).
-type WorkspaceMember struct {
-	ID    int64  `json:"id"`
-	Name  string `json:"name"`
-	Email string `json:"email"`
-	Role  string `json:"role"`
-}
-
-// ListWorkspaceMembers returns the workspace's member directory.
-func (c *Client) ListWorkspaceMembers(ctx context.Context) ([]WorkspaceMember, error) {
-	return ListResources[WorkspaceMember](ctx, c, "/workspace_members", "workspace_member")
-}
-
-// FindWorkspaceMemberByEmail resolves a member by email (case-insensitive).
-// Absence is a *Error with Status 404.
-func (c *Client) FindWorkspaceMemberByEmail(ctx context.Context, email string) (*WorkspaceMember, error) {
-	members, err := c.ListWorkspaceMembers(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for i := range members {
-		if strings.EqualFold(members[i].Email, email) {
-			return &members[i], nil
-		}
-	}
-	return nil, &Error{
-		Method: http.MethodGet, Path: "/workspace_members", Status: http.StatusNotFound, Code: CodeNotFound,
-		Message: fmt.Sprintf("No workspace member with email %q", email),
-	}
-}
-
-// ProjectMember is a user's role on a project. Role is the effective role key:
-// a built-in (guest, member, admin, commenter) or a custom role key defined by
-// the workspace's permission scheme.
+// ProjectMember is a user's role on a project — one membership row. ID is the
+// MEMBERSHIP id, which is what every by-id route takes; UserID is the user.
+// Role is the effective role key: a built-in (guest, member, admin, commenter)
+// or a custom role key defined by the workspace's permission scheme.
+// BuiltinRole is the built-in the row rests on even when a custom key applies.
 type ProjectMember struct {
 	ID          int64  `json:"id"`
 	ProjectID   int64  `json:"project_id"`
 	UserID      int64  `json:"user_id"`
 	Role        string `json:"role"`
-	Name        string `json:"name"`
-	Email       string `json:"email"`
-	LockVersion *int64 `json:"lock_version"`
+	BuiltinRole string `json:"builtin_role"`
+	LockVersion int64  `json:"lock_version"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 // ResourceID implements Identified.
@@ -65,13 +35,23 @@ func membersPath(projectID int64) string {
 	return "/projects/" + strconv.FormatInt(projectID, 10) + "/members"
 }
 
-// ListProjectMembers returns a project's explicit member rows.
+func memberPath(projectID, membershipID int64) string {
+	return membersPath(projectID) + "/" + strconv.FormatInt(membershipID, 10)
+}
+
+// ListProjectMembers returns a project's membership rows.
 func (c *Client) ListProjectMembers(ctx context.Context, projectID int64) ([]ProjectMember, error) {
 	return ListResources[ProjectMember](ctx, c, membersPath(projectID), memberRoot)
 }
 
-// FindProjectMember returns the member row for userID, or a 404 *Error.
-func (c *Client) FindProjectMember(ctx context.Context, projectID, userID int64) (*ProjectMember, error) {
+// GetProjectMember fetches one membership row by its id.
+func (c *Client) GetProjectMember(ctx context.Context, projectID, membershipID int64) (*ProjectMember, error) {
+	return GetResource[*ProjectMember](ctx, c, memberPath(projectID, membershipID), memberRoot)
+}
+
+// FindProjectMemberByUser returns the membership row for userID, or a 404
+// *Error. An import convenience; the resource itself is keyed by membership id.
+func (c *Client) FindProjectMemberByUser(ctx context.Context, projectID, userID int64) (*ProjectMember, error) {
 	members, err := c.ListProjectMembers(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -87,36 +67,24 @@ func (c *Client) FindProjectMember(ctx context.Context, projectID, userID int64)
 	}
 }
 
-// AddProjectMember adds a user to a project with a role. Membership rows have
-// no show route, so the create is verified against the member list by row id.
-// A row missing from the list is inconclusive (VerifiedUnknown) rather than
-// proof of a replayed create: the provider reports it instead of adding the
-// user twice.
+// AddProjectMember adds a user to a project with a role, verified through the
+// membership's show route.
 func (c *Client) AddProjectMember(ctx context.Context, projectID int64, fields Fields, idempotencyKey string) (*ProjectMember, error) {
-	verify := func(ctx context.Context, created *ProjectMember) (Verdict, error) {
-		members, err := c.ListProjectMembers(ctx, projectID)
-		if err != nil {
-			return VerifiedUnknown, err
-		}
-		for i := range members {
-			if members[i].ID == created.ID {
-				return VerifiedPresent, nil
-			}
-		}
-		return VerifiedUnknown, nil
-	}
-	return CreateResource(ctx, c, membersPath(projectID), memberRoot, fields, idempotencyKey, verify)
+	return CreateResource(ctx, c, membersPath(projectID), memberRoot, fields, idempotencyKey,
+		VerifyByGet(func(ctx context.Context, id int64) (*ProjectMember, error) {
+			return c.GetProjectMember(ctx, projectID, id)
+		}))
 }
 
-// UpdateProjectMember changes a member's role. lockVersion is sent as If-Match
-// when non-nil (the API may or may not version membership rows).
-func (c *Client) UpdateProjectMember(ctx context.Context, projectID, userID int64, fields Fields, lockVersion *int64) (*ProjectMember, error) {
-	return PatchResource[*ProjectMember](ctx, c, membersPath(projectID)+"/"+strconv.FormatInt(userID, 10), memberRoot, fields, lockVersion)
+// UpdateProjectMember changes a membership's role under an If-Match precondition.
+func (c *Client) UpdateProjectMember(ctx context.Context, projectID, membershipID int64, fields Fields, lockVersion int64) (*ProjectMember, error) {
+	return PatchResource[*ProjectMember](ctx, c, memberPath(projectID, membershipID), memberRoot, fields, &lockVersion)
 }
 
-// RemoveProjectMember removes a user from a project; 404 is success.
-func (c *Client) RemoveProjectMember(ctx context.Context, projectID, userID int64) error {
-	err := c.Delete(ctx, membersPath(projectID)+"/"+strconv.FormatInt(userID, 10), nil)
+// RemoveProjectMember deletes a membership under an If-Match precondition; 404
+// is success.
+func (c *Client) RemoveProjectMember(ctx context.Context, projectID, membershipID, lockVersion int64) error {
+	err := c.Delete(ctx, memberPath(projectID, membershipID), nil, WithIfMatch(lockVersion))
 	if err != nil && !IsNotFound(err) {
 		return err
 	}

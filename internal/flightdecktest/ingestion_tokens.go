@@ -12,7 +12,7 @@ import (
 var ingestionScopes = []string{"post_server_item", "post_client_item"}
 
 // IngestionToken is the fake's stored token; Plaintext is kept only so the
-// create response can return it once.
+// original create response can return it once.
 type IngestionToken struct {
 	ID          int64
 	ProjectID   int64
@@ -22,35 +22,25 @@ type IngestionToken struct {
 	Plaintext   string
 	LastFour    string
 	RevokedAt   *time.Time
+	LockVersion int64
 	CreatedAt   time.Time
 }
 
-type ingestionTokenStore struct {
-	byID map[int64]*IngestionToken
-	// hideFromList simulates a list that filters out (or mis-serialises) a
-	// just-created token, so its create can never be verified.
-	hideFromList bool
-}
+type ingestionTokenStore struct{ byID map[int64]*IngestionToken }
 
 func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
 		s.stores["ingestion_tokens"] = &ingestionTokenStore{byID: map[int64]*IngestionToken{}}
-		mux.HandleFunc("GET /api/v1/projects/{project_id}/ingestion_tokens", s.listIngestionTokens)
-		mux.HandleFunc("POST /api/v1/projects/{project_id}/ingestion_tokens", s.createIngestionToken)
-		mux.HandleFunc("DELETE /api/v1/ingestion_tokens/{id}", s.revokeIngestionToken)
+		mux.HandleFunc("GET /api/v1/projects/{project_id}/ingestion-tokens", s.listIngestionTokens)
+		mux.HandleFunc("POST /api/v1/projects/{project_id}/ingestion-tokens", s.createIngestionToken)
+		mux.HandleFunc("GET /api/v1/projects/{project_id}/ingestion-tokens/{id}", s.showIngestionToken)
+		mux.HandleFunc("DELETE /api/v1/projects/{project_id}/ingestion-tokens/{id}", s.revokeIngestionToken)
 	})
 }
 
 func (s *Server) ingestionTokens() *ingestionTokenStore {
 	store, _ := s.stores["ingestion_tokens"].(*ingestionTokenStore)
 	return store
-}
-
-// HideIngestionTokensFromList makes the list endpoint omit every token.
-func (s *Server) HideIngestionTokensFromList(on bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ingestionTokens().hideFromList = on
 }
 
 // IngestionToken returns a stored token (revoked or not), or nil.
@@ -72,19 +62,30 @@ func (s *Server) RevokeIngestionTokenOutOfBand(id int64) {
 	if t := s.ingestionTokens().byID[id]; t != nil {
 		now := time.Now()
 		t.RevokedAt = &now
+		t.LockVersion++
 	}
 }
 
-func serializeIngestionToken(t *IngestionToken, withPlaintext bool) map[string]any {
+func (s *Server) liveIngestionToken(projectID, id int64) *IngestionToken {
+	t := s.ingestionTokens().byID[id]
+	if t == nil || t.ProjectID != projectID || s.liveProject(projectID) == nil {
+		return nil
+	}
+	return t
+}
+
+// serializeIngestionToken mirrors Serializers.ingestion_token(token, reveal:).
+func serializeIngestionToken(t *IngestionToken, reveal bool) map[string]any {
 	out := map[string]any{
 		"id": t.ID, "project_id": t.ProjectID, "name": t.Name, "environment": t.Environment,
-		"scope": t.Scope, "last_four": t.LastFour, "masked": "fd_post_…" + t.LastFour,
-		"revoked_at": nil, "last_used_at": nil, "created_at": iso(t.CreatedAt),
+		"scope": t.Scope, "masked": "fd_post_…" + t.LastFour, "last_four": t.LastFour,
+		"revoked": t.RevokedAt != nil, "revoked_at": nil, "last_used_at": nil,
+		"lock_version": t.LockVersion, "created_at": iso(t.CreatedAt),
 	}
 	if t.RevokedAt != nil {
 		out["revoked_at"] = iso(*t.RevokedAt)
 	}
-	if withPlaintext {
+	if reveal {
 		out["token"] = t.Plaintext
 	}
 	return out
@@ -103,7 +104,7 @@ func (s *Server) listIngestionTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	var rows []*IngestionToken
 	for _, t := range s.ingestionTokens().byID {
-		if t.ProjectID == pid && !s.ingestionTokens().hideFromList {
+		if t.ProjectID == pid {
 			rows = append(rows, t)
 		}
 	}
@@ -117,6 +118,27 @@ func (s *Server) listIngestionTokens(w http.ResponseWriter, r *http.Request) {
 	writeCollection(w, r, items)
 }
 
+func (s *Server) showIngestionToken(w http.ResponseWriter, r *http.Request) {
+	pid, ok := pathID(w, r, "project_id")
+	if !ok {
+		return
+	}
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := s.liveIngestionToken(pid, id)
+	if t == nil {
+		notFound(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, serializeIngestionToken(t, false))
+}
+
+// Create renders the secret once; the idempotency cache holds a REDACTED body,
+// so a replay returns the row with `token: null, secret_available: false`.
 func (s *Server) createIngestionToken(w http.ResponseWriter, r *http.Request) {
 	pid, ok := pathID(w, r, "project_id")
 	if !ok {
@@ -126,52 +148,63 @@ func (s *Server) createIngestionToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.withIdempotency(w, r, "ingestion_token", func() (int, any) {
+	s.withIdempotencyRedacted(w, r, "ingestion_token", func() (int, any, any) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.liveProject(pid) == nil {
-			return http.StatusNotFound, map[string]any{"error": "Not found", "code": "not_found"}
+			return http.StatusNotFound, map[string]any{"error": "Not found", "code": "not_found"}, nil
 		}
-		t := &IngestionToken{ID: s.id(), ProjectID: pid, Environment: "production", Scope: "post_server_item", CreatedAt: time.Now()}
-		t.Name = asString(attrs["name"])
-		if v, has := attrs["environment"]; has && v != nil {
-			t.Environment = asString(v)
+		t := &IngestionToken{ID: s.id(), ProjectID: pid, Name: "Ingestion token", Environment: "production", Scope: "post_server_item", CreatedAt: time.Now()}
+		if v := strings.TrimSpace(asString(attrs["name"])); v != "" {
+			t.Name = v
 		}
-		if v, has := attrs["scope"]; has && v != nil {
-			t.Scope = asString(v)
+		if v := strings.TrimSpace(asString(attrs["environment"])); v != "" {
+			t.Environment = v
 		}
-		if strings.TrimSpace(t.Name) == "" {
-			return http.StatusUnprocessableEntity, map[string]any{"error": "Name can't be blank", "code": "validation_failed"}
-		}
-		if strings.TrimSpace(t.Environment) == "" {
-			return http.StatusUnprocessableEntity, map[string]any{"error": "Environment can't be blank", "code": "validation_failed"}
-		}
-		if !contains(ingestionScopes, t.Scope) {
-			return http.StatusUnprocessableEntity, map[string]any{
-				"error": "'" + t.Scope + "' is not a valid scope", "code": "invalid_attribute"}
+		if v := strings.TrimSpace(asString(attrs["scope"])); v != "" {
+			if !contains(ingestionScopes, v) {
+				return http.StatusUnprocessableEntity, map[string]any{"error": "unknown scope: " + v, "code": "invalid_attribute"}, nil
+			}
+			t.Scope = v
 		}
 		raw := make([]byte, 32)
 		_, _ = rand.Read(raw)
 		t.Plaintext = "fd_post_" + base64.RawURLEncoding.EncodeToString(raw)
 		t.LastFour = t.Plaintext[len(t.Plaintext)-4:]
 		s.ingestionTokens().byID[t.ID] = t
-		return http.StatusCreated, serializeIngestionToken(t, true)
+		redacted := serializeIngestionToken(t, false)
+		redacted["token"] = nil
+		redacted["secret_available"] = false
+		redacted["message"] = "Replay of a previously-used Idempotency-Key. The token is returned only by the original create and is never stored, so it cannot be replayed."
+		return http.StatusCreated, serializeIngestionToken(t, true), redacted
 	})
 }
 
+// Revoke, not delete: the row stays; answered 200 with the revoked row, and a
+// second revoke is idempotent. If-Match is honoured.
 func (s *Server) revokeIngestionToken(w http.ResponseWriter, r *http.Request) {
+	pid, ok := pathID(w, r, "project_id")
+	if !ok {
+		return
+	}
 	id, ok := pathID(w, r, "id")
 	if !ok {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.ingestionTokens().byID[id]
-	if t == nil || s.liveProject(t.ProjectID) == nil || t.RevokedAt != nil {
+	t := s.liveIngestionToken(pid, id)
+	if t == nil {
 		notFound(w)
 		return
 	}
-	now := time.Now()
-	t.RevokedAt = &now
-	w.WriteHeader(http.StatusNoContent)
+	if !checkIfMatch(w, r, t.LockVersion) {
+		return
+	}
+	if t.RevokedAt == nil {
+		now := time.Now()
+		t.RevokedAt = &now
+		t.LockVersion++
+	}
+	writeJSON(w, http.StatusOK, serializeIngestionToken(t, false))
 }

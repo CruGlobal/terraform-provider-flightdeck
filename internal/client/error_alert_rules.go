@@ -32,11 +32,14 @@ func (r *ErrorAlertRule) ResourceID() int64 { return r.ID }
 
 const errorAlertRuleRoot = "error_alert_rule"
 
+// Rules are nested under the project all the way: …/projects/:project_id/error-rules/:id.
 func errorAlertRulesPath(projectID int64) string {
-	return "/projects/" + strconv.FormatInt(projectID, 10) + "/error_alert_rules"
+	return "/projects/" + strconv.FormatInt(projectID, 10) + "/error-rules"
 }
 
-func errorAlertRulePath(id int64) string { return "/error_alert_rules/" + strconv.FormatInt(id, 10) }
+func errorAlertRulePath(projectID, id int64) string {
+	return errorAlertRulesPath(projectID) + "/" + strconv.FormatInt(id, 10)
+}
 
 // ListErrorAlertRules returns a project's rules.
 func (c *Client) ListErrorAlertRules(ctx context.Context, projectID int64) ([]ErrorAlertRule, error) {
@@ -44,23 +47,26 @@ func (c *Client) ListErrorAlertRules(ctx context.Context, projectID int64) ([]Er
 }
 
 // GetErrorAlertRule fetches one rule.
-func (c *Client) GetErrorAlertRule(ctx context.Context, id int64) (*ErrorAlertRule, error) {
-	return GetResource[*ErrorAlertRule](ctx, c, errorAlertRulePath(id), errorAlertRuleRoot)
+func (c *Client) GetErrorAlertRule(ctx context.Context, projectID, id int64) (*ErrorAlertRule, error) {
+	return GetResource[*ErrorAlertRule](ctx, c, errorAlertRulePath(projectID, id), errorAlertRuleRoot)
 }
 
 // CreateErrorAlertRule creates a rule through the verified create path.
 func (c *Client) CreateErrorAlertRule(ctx context.Context, projectID int64, fields Fields, idempotencyKey string) (*ErrorAlertRule, error) {
-	return CreateResource(ctx, c, errorAlertRulesPath(projectID), errorAlertRuleRoot, fields, idempotencyKey, VerifyByGet(c.GetErrorAlertRule))
+	return CreateResource(ctx, c, errorAlertRulesPath(projectID), errorAlertRuleRoot, fields, idempotencyKey,
+		VerifyByGet(func(ctx context.Context, id int64) (*ErrorAlertRule, error) {
+			return c.GetErrorAlertRule(ctx, projectID, id)
+		}))
 }
 
 // UpdateErrorAlertRule PATCHes a rule with an If-Match precondition.
-func (c *Client) UpdateErrorAlertRule(ctx context.Context, id int64, fields Fields, lockVersion int64) (*ErrorAlertRule, error) {
-	return PatchResource[*ErrorAlertRule](ctx, c, errorAlertRulePath(id), errorAlertRuleRoot, fields, &lockVersion)
+func (c *Client) UpdateErrorAlertRule(ctx context.Context, projectID, id int64, fields Fields, lockVersion int64) (*ErrorAlertRule, error) {
+	return PatchResource[*ErrorAlertRule](ctx, c, errorAlertRulePath(projectID, id), errorAlertRuleRoot, fields, &lockVersion)
 }
 
-// DeleteErrorAlertRule deletes a rule; 404 is success.
-func (c *Client) DeleteErrorAlertRule(ctx context.Context, id int64) error {
-	err := c.Delete(ctx, errorAlertRulePath(id), nil)
+// DeleteErrorAlertRule deletes a rule under an If-Match precondition; 404 is success.
+func (c *Client) DeleteErrorAlertRule(ctx context.Context, projectID, id, lockVersion int64) error {
+	err := c.Delete(ctx, errorAlertRulePath(projectID, id), nil, WithIfMatch(lockVersion))
 	if err != nil && !IsNotFound(err) {
 		return err
 	}

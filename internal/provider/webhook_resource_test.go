@@ -238,3 +238,41 @@ func TestWebhook_inactiveSurvivesImportWithoutADefault(t *testing.T) {
 		},
 	})
 }
+
+func TestWebhook_replayedCreateIsRetiredAndCreatedAfresh(t *testing.T) {
+	env := newTestEnv(t, "webhook")
+	env.requireFake(t)
+	cfg := webhookConfig(env, `
+  url    = "https://ci.example.com/hooks/replay"
+  events = ["project.updated"]`)
+	var first, firstSecret string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{Config: cfg, Check: resource.ComposeAggregateTestCheckFunc(captureAttr(webhookRes, "id", &first), captureAttr(webhookRes, "secret", &firstSecret))},
+			{Config: env.providerConfig()},
+			{
+				// The replay returns the deleted webhook's row without its secret;
+				// the provider must end up with a live webhook whose secret it holds.
+				Config: cfg,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrSet(webhookRes, "secret"),
+					func(s *terraform.State) error {
+						rs := s.RootModule().Resources[webhookRes].Primary
+						if rs.ID == first {
+							return fmt.Errorf("recreate recorded the replayed, deleted webhook %s", first)
+						}
+						if rs.Attributes["secret"] == firstSecret {
+							return fmt.Errorf("recreate recorded the old secret")
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+	posts := env.fake.RequestsMatching("POST", "/api/v1/webhooks")
+	if len(posts) != 3 || posts[0].Header.Get("Idempotency-Key") != posts[1].Header.Get("Idempotency-Key") ||
+		posts[2].Header.Get("Idempotency-Key") == posts[0].Header.Get("Idempotency-Key") {
+		t.Fatalf("expected original + replay + fresh-key POSTs, got %d", len(posts))
+	}
+}

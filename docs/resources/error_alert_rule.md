@@ -5,7 +5,7 @@ subcategory: ""
 description: |-
   Manages an error alert rule in a Flightdeck project: when a trigger fires for an error group that satisfies the conditions, run the enabled actions.
   At least one action must be enabled. notify_webhook requires webhook_url; open_incident requires the project's incidents feature to be enabled, and escalation_policy_id is only honoured alongside it. Condition and action keys are validated against the API's allowlists.
-  Import by numeric id: terraform import flightdeck_error_alert_rule.new_errors 12.
+  Import with <project_id>/<rule_id>: terraform import flightdeck_error_alert_rule.new_errors 42/12.
 ---
 
 # flightdeck_error_alert_rule (Resource)
@@ -14,7 +14,7 @@ Manages an error alert rule in a Flightdeck project: when a *trigger* fires for 
 
 At least one action must be enabled. `notify_webhook` requires `webhook_url`; `open_incident` requires the project's `incidents` feature to be enabled, and `escalation_policy_id` is only honoured alongside it. Condition and action keys are validated against the API's allowlists.
 
-Import by numeric id: `terraform import flightdeck_error_alert_rule.new_errors 12`.
+Import with `<project_id>/<rule_id>`: `terraform import flightdeck_error_alert_rule.new_errors 42/12`.
 
 ## Example Usage
 
@@ -114,6 +114,6 @@ Import is supported using the following syntax:
 The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
 
 ```shell
-# Import by the rule's numeric id.
-terraform import flightdeck_error_alert_rule.new_errors 12
+# Import with "<project_id>/<rule_id>".
+terraform import flightdeck_error_alert_rule.new_errors 42/12
 ```

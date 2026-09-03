@@ -28,7 +28,7 @@ project, not to infrastructure code.
 | `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing thresholds; reports the (read-only) GitHub repository link. |
 | `flightdeck_state` | A workflow state within a project (name, group, color, default, position). |
 | `flightdeck_label` | A label within a project. |
-| `flightdeck_project_member` | A user's role on a project. |
+| `flightdeck_project_member` | A user's membership of a project (by membership id) and their role. |
 | `flightdeck_ingestion_token` | An error-ingestion token for a project (the secret is returned once, on create). |
 | `flightdeck_error_alert_rule` | A trigger → conditions → action error alert rule. |
 | `flightdeck_webhook` | An outbound webhook, workspace-wide or scoped to one project. |
@@ -36,8 +36,11 @@ project, not to infrastructure code.
 | Data source | Resolves |
 | --- | --- |
 | `flightdeck_project` | A project by id or identifier. |
-| `flightdeck_workspace_member` | A workspace member by email, so configuration can name people rather than ids. |
 | `flightdeck_states` | All workflow states of a project. |
+
+There is no data source to resolve a workspace member by email: the API
+has no member-directory route yet, so `flightdeck_project_member` takes
+the numeric `user_id`.
 
 Resources are added in the order the corresponding Flightdeck API
 endpoints ship; see [`CHANGELOG.md`](./CHANGELOG.md) for what a given
@@ -160,15 +163,15 @@ without a deployment. The terraform CLI must be on `PATH`.
 
 The same tests run against a live Flightdeck when `TF_ACC=1` and
 `FLIGHTDECK_ENDPOINT` / `FLIGHTDECK_TOKEN` point at a **dedicated test
-workspace** (they create and delete projects). Some tests also need
-`FLIGHTDECK_ACC_MEMBER_EMAIL`, the email of another member of that
-workspace.
+workspace** (they create and delete projects). The member tests also need
+`FLIGHTDECK_ACC_MEMBER_USER_ID`, the numeric user id of another member of
+that workspace (the API has no route to resolve an email).
 
 ```sh
 export TF_ACC=1
 export FLIGHTDECK_ENDPOINT=https://flightdeck.example.com
 export FLIGHTDECK_TOKEN=fd_pat_...
-export FLIGHTDECK_ACC_MEMBER_EMAIL=someone@example.com
+export FLIGHTDECK_ACC_MEMBER_USER_ID=7
 task testacc
 ```
 

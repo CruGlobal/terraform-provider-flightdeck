@@ -111,16 +111,36 @@ func fingerprintOf(attrs map[string]any) string {
 // 2xx verbatim; only successful responses are remembered. Keys are scoped per
 // endpoint, as IdempotentRequests does.
 func (s *Server) withIdempotency(w http.ResponseWriter, r *http.Request, scope string, create func() (int, any)) {
-	s.withIdempotencyFingerprint(w, r, scope, "", create)
+	s.idempotently(w, r, scope, "", func() (int, any, any) {
+		status, body := create()
+		return status, body, nil
+	})
 }
 
 // withIdempotencyFingerprint is withIdempotency for a create that opts into
 // body fingerprinting (FD-794): the same key with different attributes is a
-// 409 idempotency_key_reused instead of a replay. An empty fingerprint opts out.
+// 409 idempotency_key_reused instead of a replay.
 func (s *Server) withIdempotencyFingerprint(w http.ResponseWriter, r *http.Request, scope, fingerprint string, create func() (int, any)) {
+	s.idempotently(w, r, scope, fingerprint, func() (int, any, any) {
+		status, body := create()
+		return status, body, nil
+	})
+}
+
+// withIdempotencyRedacted is withIdempotency for creates whose response carries
+// a secret: create returns the body to render AND the body to cache for
+// replays (nil caches the rendered body). Mirrors cache_idempotent_response_as.
+func (s *Server) withIdempotencyRedacted(w http.ResponseWriter, r *http.Request, scope string, create func() (int, any, any)) {
+	s.idempotently(w, r, scope, "", create)
+}
+
+// idempotently is the shared implementation: an optional attribute fingerprint
+// (empty opts out) and an optional redacted body to cache (nil caches the
+// rendered body).
+func (s *Server) idempotently(w http.ResponseWriter, r *http.Request, scope, fingerprint string, create func() (int, any, any)) {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" || len(key) > 255 {
-		status, body := create()
+		status, body, _ := create()
 		writeJSON(w, status, body)
 		return
 	}
@@ -148,11 +168,15 @@ func (s *Server) withIdempotencyFingerprint(w http.ResponseWriter, r *http.Reque
 	}
 	s.mu.Unlock()
 
-	status, body := create()
+	status, body, cached := create()
 	encoded, _ := json.Marshal(body)
 	if status >= 200 && status < 300 {
+		toCache := encoded
+		if cached != nil {
+			toCache, _ = json.Marshal(cached)
+		}
 		s.mu.Lock()
-		s.idempotent[cacheKey] = idempotentResponse{status: status, body: encoded, fingerprint: fingerprint}
+		s.idempotent[cacheKey] = idempotentResponse{status: status, body: toCache, fingerprint: fingerprint}
 		s.mu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")

@@ -34,14 +34,15 @@ const (
 // its tests run only against the fake. The unit-test run (no TF_ACC) is
 // unaffected by this table.
 var liveReady = map[string]bool{
-	"project":          false, // FD-786: POST/DELETE /api/v1/projects, lock_version
-	"state":            false, // FD-787
-	"label":            false, // FD-787
-	"project_member":   false, // FD-788
-	"ingestion_token":  false, // FD-788
-	"error_alert_rule": false, // FD-788
-	"webhook":          false, // FD-788
-	"self_healing":     false, // FD-789
+	"project":            false, // FD-786: POST/DELETE /api/v1/projects, lock_version
+	"state":              false, // FD-787
+	"label":              false, // FD-787
+	"project_member":     false, // FD-788
+	"ingestion_token":    false, // FD-788
+	"error_alert_rule":   false, // FD-788
+	"webhook":            false, // FD-788
+	"self_healing":       false, // FD-789
+	"github_integration": false, // Flightdeck API work pending; built to the agreed contract
 }
 
 // testEnv is what a test needs to point the provider at a backend.

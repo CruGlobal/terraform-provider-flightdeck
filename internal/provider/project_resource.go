@@ -106,10 +106,12 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
 			"github_repo_full_name": schema.StringAttribute{
-				MarkdownDescription: "GitHub repository this project is linked to, as `owner/repo`. **Read-only**: linking " +
-					"and unlinking need the webhook-secret round-trip the project's Settings → Integrations page " +
-					"performs, so the API refuses writes to this field.",
+				MarkdownDescription: "GitHub repository this project is linked to, as `owner/repo`. **Read-only**: the API " +
+					"refuses writes to this field. Manage the link with a `flightdeck_github_integration` resource, which " +
+					"sets it on link and clears it on unlink.",
+				Optional:      true,
 				Computed:      true,
+				Validators:    []validator.String{readOnlyAttribute("manage the repository link with a flightdeck_github_integration resource instead")},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"network": schema.StringAttribute{

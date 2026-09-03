@@ -6,7 +6,11 @@ import (
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 )
+
+// pathRoot is path.Root, for attribute-scoped diagnostics.
+func pathRoot(name string) path.Path { return path.Root(name) }
 
 // addAPIError turns a client error into a diagnostic. The summary names the
 // operation; the detail carries the HTTP status, the machine-readable code

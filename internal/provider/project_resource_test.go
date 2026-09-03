@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
+
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
@@ -520,7 +522,8 @@ func TestProject_readOnlyFieldsReflectTheServer(t *testing.T) {
 			},
 		},
 	})
-	// The project PATCH body must never carry the read-only keys.
+	// The project PATCH body must never carry the read-only key, the block that
+	// lives on its own endpoint, or an unconfigured network.
 	for _, r := range env.fake.RequestsMatching("PATCH", "/api/v1/projects/") {
 		for _, k := range []string{"github_repo_full_name", "network", "self_healing"} {
 			if strings.Contains(string(r.Body), `"`+k+`"`) {
@@ -562,4 +565,93 @@ func TestProject_leadIDIsSettableAndDefaultsToTheCreator(t *testing.T) {
 			},
 		},
 	})
+}
+
+func TestProject_networkIsWritableAndSentOnlyWhenChanged(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// Exact enum spellings only; the API refuses anything else too.
+				Config: projectConfig(env, identifier, `
+  name    = "x"
+  network = "private"`),
+				ExpectError: regexMust(`value must be one of`),
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name    = "Private"
+  network = "private_project"`),
+				Check: resource.TestCheckResourceAttr(projectRes, "network", "private_project"),
+			},
+			{
+				// A rename with network unchanged: the PATCH must not carry network
+				// (re-sending private_project re-runs the server's membership guard).
+				Config: projectConfig(env, identifier, `
+  name    = "Private renamed"
+  network = "private_project"`),
+				Check: resource.TestCheckResourceAttr(projectRes, "network", "private_project"),
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name    = "Private renamed"
+  network = "public_project"`),
+				Check: resource.TestCheckResourceAttr(projectRes, "network", "public_project"),
+			},
+			{
+				// Unset keeps the current value.
+				Config: projectConfig(env, identifier, `  name = "Private renamed"`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+			},
+		},
+	})
+	var creates, patches []flightdecktestRequest
+	for _, r := range env.fake.Requests() {
+		switch {
+		case r.Method == "POST" && r.Path == "/api/v1/projects":
+			creates = append(creates, r)
+		case r.Method == "PATCH" && strings.HasPrefix(r.Path, "/api/v1/projects/") && !strings.HasSuffix(r.Path, "/self-healing"):
+			patches = append(patches, r)
+		}
+	}
+	if len(creates) != 1 || !strings.Contains(string(creates[0].Body), `"network":"private_project"`) {
+		t.Fatalf("create body should carry network: %v", creates)
+	}
+	if len(patches) != 2 {
+		t.Fatalf("expected 2 project PATCHes (rename, then visibility), got %d", len(patches))
+	}
+	if strings.Contains(string(patches[0].Body), `"network"`) {
+		t.Errorf("rename PATCH re-sent network: %s", patches[0].Body)
+	}
+	if !strings.Contains(string(patches[1].Body), `"network":"public_project"`) {
+		t.Errorf("visibility PATCH lacks network: %s", patches[1].Body)
+	}
+}
+
+func TestProject_idempotencyKeyReusedIsAClearConflict(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	// Two declarations that would derive the same key never happen through the
+	// provider (the key covers the payload), so drive the client directly.
+	c, err := client.New(env.fake.URL, env.fake.Token())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	fields := client.Fields{"name": "Fingerprinted", "identifier": randIdentifier()}
+	if _, err := c.CreateProject(ctx, fields, "shared-key"); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	fields["network"] = "private_project"
+	_, err = c.CreateProject(ctx, fields, "shared-key")
+	if !client.HasCode(err, client.CodeIdempotencyKeyReused) {
+		t.Fatalf("expected idempotency_key_reused, got %v", err)
+	}
+	if apiErr, _ := client.AsError(err); apiErr.Retryable() {
+		t.Error("idempotency_key_reused must not be retried")
+	}
 }

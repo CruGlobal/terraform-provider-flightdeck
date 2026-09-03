@@ -113,9 +113,13 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"network": schema.StringAttribute{
-				MarkdownDescription: "Project visibility, `public_project` or `private_project`. **Read-only** over the API; " +
-					"change it in the project's Settings → Members page.",
+				MarkdownDescription: "Project visibility: `public_project` (every workspace member can see it) or " +
+					"`private_project` (explicit members only). New projects are public. When unset, the current " +
+					"value is kept. Making a project private also gives the token's user and the project lead admin " +
+					"memberships so nobody is locked out; members who lose implicit access are not notified.",
+				Optional:      true,
 				Computed:      true,
+				Validators:    []validator.String{stringvalidator.OneOf(client.ProjectNetworks...)},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"lock_version": schema.Int64Attribute{
@@ -145,7 +149,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	fields := projectFields(ctx, &plan, &resp.Diagnostics)
+	fields := projectFields(ctx, &plan, nil, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -199,7 +203,7 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	fields := projectFields(ctx, &plan, &resp.Diagnostics)
+	fields := projectFields(ctx, &plan, &state, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}

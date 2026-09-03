@@ -35,6 +35,10 @@ type Project struct {
 // ResourceID implements Identified.
 func (p *Project) ResourceID() int64 { return p.ID }
 
+// ProjectNetworks are the visibility values (Project.networks), which the API
+// accepts in exactly these spellings.
+var ProjectNetworks = []string{"public_project", "private_project"}
+
 func projectPath(id int64) string { return "/projects/" + strconv.FormatInt(id, 10) }
 
 // ListProjects returns every project the token may read.

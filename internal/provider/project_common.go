@@ -126,9 +126,14 @@ func stringPointerValue(s *string) types.String {
 // writable attribute is sent; description is sent as null when unset so
 // removing it from configuration clears it server-side. features is sent only
 // when configured: an absent block means "not managed here". lead_id is sent
-// only when configured. github_repo_full_name and network are read-only over
-// the API and never sent; the self_healing block travels on its own endpoint.
-func projectFields(ctx context.Context, plan *projectModel, diags *diag.Diagnostics) client.Fields {
+// only when configured. github_repo_full_name is read-only over the API and
+// never sent; the self_healing block travels on its own endpoint.
+//
+// network is sent when configured and, on an update (prior != nil), only when
+// it differs from the prior state: re-sending private_project re-runs the
+// server's lock-out guard (it re-creates the actor's and lead's admin
+// membership rows if missing), a side effect an unchanged apply should not have.
+func projectFields(ctx context.Context, plan, prior *projectModel, diags *diag.Diagnostics) client.Fields {
 	fields := client.Fields{
 		"name":       plan.Name.ValueString(),
 		"identifier": plan.Identifier.ValueString(),
@@ -144,6 +149,11 @@ func projectFields(ctx context.Context, plan *projectModel, diags *diag.Diagnost
 	}
 	if !plan.LeadID.IsNull() && !plan.LeadID.IsUnknown() {
 		fields["lead_id"] = plan.LeadID.ValueInt64()
+	}
+	if !plan.Network.IsNull() && !plan.Network.IsUnknown() {
+		if prior == nil || !plan.Network.Equal(prior.Network) {
+			fields["network"] = plan.Network.ValueString()
+		}
 	}
 	if !plan.Features.IsNull() && !plan.Features.IsUnknown() {
 		var features map[string]bool

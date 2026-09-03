@@ -20,7 +20,10 @@ const (
 	CodeInvalidAttribute       = "invalid_attribute"
 	CodeStaleObject            = "stale_object"
 	CodeIdempotencyKeyInFlight = "idempotency_key_in_flight"
-	CodeRateLimited            = "rate_limited"
+	// 409: the same Idempotency-Key was already used for a create with different
+	// attributes; retrying does not help.
+	CodeIdempotencyKeyReused = "idempotency_key_reused"
+	CodeRateLimited          = "rate_limited"
 	// State delete guards (422), each needing different handling.
 	CodeStateInUse     = "state_in_use"
 	CodeStateIsDefault = "state_is_default"

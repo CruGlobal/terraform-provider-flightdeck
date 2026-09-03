@@ -2,10 +2,13 @@ package flightdecktest
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -80,15 +83,45 @@ func checkIfMatch(w http.ResponseWriter, r *http.Request, current int64) bool {
 }
 
 type idempotentResponse struct {
-	status int
-	body   []byte
+	status      int
+	body        []byte
+	fingerprint string
+}
+
+// fingerprintOf mirrors IdempotentRequests#idempotency_fingerprint: a hash of
+// the submitted attributes, stringified and sorted.
+func fingerprintOf(attrs map[string]any) string {
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(asString(attrs[k]))
+		b.WriteByte('\n')
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
 }
 
 // withIdempotency wraps a create. The same Idempotency-Key replays the stored
 // 2xx verbatim; only successful responses are remembered. Keys are scoped per
 // endpoint, as IdempotentRequests does.
 func (s *Server) withIdempotency(w http.ResponseWriter, r *http.Request, scope string, create func() (int, any)) {
-	s.withIdempotencyRedacted(w, r, scope, func() (int, any, any) {
+	s.idempotently(w, r, scope, "", func() (int, any, any) {
+		status, body := create()
+		return status, body, nil
+	})
+}
+
+// withIdempotencyFingerprint is withIdempotency for a create that opts into
+// body fingerprinting (FD-794): the same key with different attributes is a
+// 409 idempotency_key_reused instead of a replay.
+func (s *Server) withIdempotencyFingerprint(w http.ResponseWriter, r *http.Request, scope, fingerprint string, create func() (int, any)) {
+	s.idempotently(w, r, scope, fingerprint, func() (int, any, any) {
 		status, body := create()
 		return status, body, nil
 	})
@@ -98,6 +131,13 @@ func (s *Server) withIdempotency(w http.ResponseWriter, r *http.Request, scope s
 // a secret: create returns the body to render AND the body to cache for
 // replays (nil caches the rendered body). Mirrors cache_idempotent_response_as.
 func (s *Server) withIdempotencyRedacted(w http.ResponseWriter, r *http.Request, scope string, create func() (int, any, any)) {
+	s.idempotently(w, r, scope, "", create)
+}
+
+// idempotently is the shared implementation: an optional attribute fingerprint
+// (empty opts out) and an optional redacted body to cache (nil caches the
+// rendered body).
+func (s *Server) idempotently(w http.ResponseWriter, r *http.Request, scope, fingerprint string, create func() (int, any, any)) {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" || len(key) > 255 {
 		status, body, _ := create()
@@ -108,6 +148,11 @@ func (s *Server) withIdempotencyRedacted(w http.ResponseWriter, r *http.Request,
 	s.mu.Lock()
 	if stored, ok := s.idempotent[cacheKey]; ok {
 		s.mu.Unlock()
+		if fingerprint != "" && stored.fingerprint != "" && stored.fingerprint != fingerprint {
+			writeError(w, http.StatusConflict, "idempotency_key_reused",
+				"This Idempotency-Key was already used for a create with different attributes. Send the original attributes to replay it, or a new key to create a separate resource.")
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Idempotent-Replayed", "true")
 		w.WriteHeader(stored.status)
@@ -131,7 +176,7 @@ func (s *Server) withIdempotencyRedacted(w http.ResponseWriter, r *http.Request,
 			toCache, _ = json.Marshal(cached)
 		}
 		s.mu.Lock()
-		s.idempotent[cacheKey] = idempotentResponse{status: status, body: toCache}
+		s.idempotent[cacheKey] = idempotentResponse{status: status, body: toCache, fingerprint: fingerprint}
 		s.mu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")

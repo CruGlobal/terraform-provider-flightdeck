@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.2.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.1.0...v0.2.0) (2026-09-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* the `flightdeck_workspace_member` data source is removed, with no replacement: the API has no route to resolve a workspace member by email. `flightdeck_project_member.user_id` takes the member's numeric user id, visible in the workspace's member list. `flightdeck_project_member` is keyed by membership id. Import as `<project_id>/<membership_id>`, or `<project_id>/user:<user_id>` to look the membership up by user; existing state for this resource must be re-imported. `flightdeck_error_alert_rule` imports as `<project_id>/<rule_id>`. `flightdeck_project.github_repo_full_name` is read-only and cannot be set; manage the repository link with a `flightdeck_github_integration` resource, which sets it on link and clears it on unlink. `flightdeck_webhook.secret` cannot be set; Flightdeck generates the signing secret and returns it once on create.
+* reconcile members, ingestion tokens, alert rules and webhooks to the merged Flightdeck API ([#11](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/11))
+* reconcile projects, states, labels and self-healing to the merged Flightdeck API ([#10](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/10))
+
+### Added
+
+* add flightdeck_github_integration ([#12](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/12)) ([4209e21](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/4209e21db3cc592b9ff5750563c25cb8b835988c))
+
+
+### Fixed
+
+* reconcile members, ingestion tokens, alert rules and webhooks to the merged Flightdeck API ([#11](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/11)) ([377b4a2](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/377b4a21401e73e4fb4d4fb7158ca92b87523f27))
+* reconcile projects, states, labels and self-healing to the merged Flightdeck API ([#10](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/10)) ([9706651](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/9706651d82d092a1b1feedfc4a90ee880958a9d3))
+* server-generated webhook secrets, enabled on new GitHub links, live gates open, pre-release review fixes ([#15](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/15)) ([fd3cec1](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/fd3cec193121d4218010d24f99ae255804fa2cf0))
+
+
+### Changed
+
+* bump golang.org/x/crypto, golang.org/x/net and google.golang.org/grpc past their advisories ([#14](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/14)) ([6a390c4](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/6a390c465a5e28cb818b349c4334b220a331e939))
+
 ## [0.1.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.0.0...v0.1.0) (2026-09-02)
 
 

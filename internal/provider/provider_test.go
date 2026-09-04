@@ -26,23 +26,26 @@ const (
 	// tests. A user id rather than an email: the API has no member directory
 	// route to resolve one.
 	envAccMemberUserID = "FLIGHTDECK_ACC_MEMBER_USER_ID"
+	// Optional: an owner/repo the workspace's GitHub App can reach, for the
+	// managed-mode flightdeck_github_integration tests. Unset, those tests skip
+	// live (the caller-managed mode needs no GitHub access and always runs).
+	envAccGithubRepo = "FLIGHTDECK_ACC_GITHUB_REPO"
 )
 
 // liveReady records which resources' acceptance tests may run against a live
-// Flightdeck. A resource is flipped to true once the Flightdeck API change it
-// depends on has merged and been deployed to the target instance; until then
-// its tests run only against the fake. The unit-test run (no TF_ACC) is
-// unaffected by this table.
+// Flightdeck. Every API these depend on has shipped; set an entry to false to
+// gate a resource again while its API is being changed. The unit-test run (no
+// TF_ACC) is unaffected by this table.
 var liveReady = map[string]bool{
-	"project":            false, // FD-786: POST/DELETE /api/v1/projects, lock_version
-	"state":              false, // FD-787
-	"label":              false, // FD-787
-	"project_member":     false, // FD-788
-	"ingestion_token":    false, // FD-788
-	"error_alert_rule":   false, // FD-788
-	"webhook":            false, // FD-788
-	"self_healing":       false, // FD-789
-	"github_integration": false, // Flightdeck API work pending; built to the agreed contract
+	"project":            true,
+	"state":              true,
+	"label":              true,
+	"project_member":     true,
+	"ingestion_token":    true,
+	"error_alert_rule":   true,
+	"webhook":            true,
+	"self_healing":       true,
+	"github_integration": true,
 }
 
 // testEnv is what a test needs to point the provider at a backend.

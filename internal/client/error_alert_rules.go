@@ -6,7 +6,7 @@ import (
 	"strconv"
 )
 
-// Enumerations from ErrorAlertRule and ErrorGroup.
+// Enumerations the API accepts for rules and error levels.
 var (
 	ErrorAlertTriggers      = []string{"new_group", "regression", "occurrence_threshold"}
 	ErrorAlertConditionKeys = []string{"min_level", "environment", "count", "window_minutes"}

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -26,10 +27,26 @@ data "flightdeck_project" "linked" {
 `, body)
 }
 
+// managedRepo returns a repository the managed mode can register a webhook on:
+// any name against the fake; against a live instance the one named by
+// FLIGHTDECK_ACC_GITHUB_REPO, or the test skips (the workspace's GitHub App
+// must be able to reach it).
+func managedRepo(t *testing.T, env *testEnv, fallback string) string {
+	t.Helper()
+	if !env.live() {
+		return fallback
+	}
+	repo := os.Getenv(envAccGithubRepo)
+	if repo == "" {
+		t.Skipf("%s not set: the workspace needs a GitHub App credential and a reachable repository for the managed mode", envAccGithubRepo)
+	}
+	return repo
+}
+
 func TestGithubIntegration_flightdeckManaged(t *testing.T) {
 	env := newTestEnv(t, "github_integration")
 	identifier := randIdentifier()
-	repo := "example-org/" + strings.ToLower(identifier)
+	repo := managedRepo(t, env, "example-org/"+strings.ToLower(identifier))
 	var id string
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
@@ -68,17 +85,6 @@ func TestGithubIntegration_flightdeckManaged(t *testing.T) {
 				),
 			},
 			{
-				// A new repository replaces the integration.
-				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`  repo_full_name = %q`, repo+"-v2")),
-				ConfigPlanChecks: resource.ConfigPlanChecks{
-					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(ghRes, plancheck.ResourceActionDestroyBeforeCreate)},
-				},
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr(ghRes, "repo_full_name", repo+"-v2"),
-					resource.TestCheckResourceAttr("data.flightdeck_project.linked", "github_repo_full_name", repo+"-v2"),
-				),
-			},
-			{
 				// Unlink.
 				Config: projectFixture(env, identifier),
 			},
@@ -91,6 +97,39 @@ data "flightdeck_project" "linked" {
 }
 `,
 				Check: resource.TestCheckNoResourceAttr("data.flightdeck_project.linked", "github_repo_full_name"),
+			},
+		},
+	})
+}
+
+func TestGithubIntegration_repoChangeReplaces(t *testing.T) {
+	env := newTestEnv(t, "github_integration")
+	env.requireFake(t) // a second reachable repository is not assumed live
+	identifier := randIdentifier()
+	repo := "example-org/" + strings.ToLower(identifier)
+	var id string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`  repo_full_name = %q`, repo)),
+				Check:  captureAttr(ghRes, "id", &id),
+			},
+			{
+				// A new repository replaces the integration and re-points the project.
+				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`  repo_full_name = %q`, repo+"-v2")),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(ghRes, plancheck.ResourceActionDestroyBeforeCreate)},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(ghRes, "repo_full_name", repo+"-v2"),
+					resource.TestCheckResourceAttr("data.flightdeck_project.linked", "github_repo_full_name", repo+"-v2"),
+					func(s *terraform.State) error {
+						if s.RootModule().Resources[ghRes].Primary.ID == id {
+							return fmt.Errorf("repository change should have replaced the integration")
+						}
+						return nil
+					},
+				),
 			},
 		},
 	})
@@ -288,10 +327,15 @@ func TestGithubIntegration_reEnablingMirrorsTheProjectColumn(t *testing.T) {
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
 			{
+				// The API creates every integration enabled; a planned false is
+				// applied by an immediate follow-up update.
 				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`
   repo_full_name = %q
   enabled        = false`, repo)),
-				Check: resource.TestCheckResourceAttr(ghRes, "enabled", "false"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(ghRes, "enabled", "false"),
+					resource.TestCheckResourceAttr(ghRes, "lock_version", "1"),
+				),
 			},
 			{
 				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`
@@ -299,6 +343,63 @@ func TestGithubIntegration_reEnablingMirrorsTheProjectColumn(t *testing.T) {
   enabled        = true`, repo)),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(ghRes, "enabled", "true"),
+					resource.TestCheckResourceAttr("data.flightdeck_project.linked", "github_repo_full_name", repo),
+				),
+			},
+		},
+	})
+}
+
+func TestGithubIntegration_createNeverSendsEnabled(t *testing.T) {
+	env := newTestEnv(t, "github_integration")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	repo := "example-org/" + strings.ToLower(identifier)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`
+  repo_full_name = %q
+  enabled        = false`, repo)),
+				Check: resource.TestCheckResourceAttr(ghRes, "enabled", "false"),
+			},
+		},
+	})
+	var creates, patches int
+	for _, r := range env.fake.Requests() {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.Path, "/github-integrations"):
+			creates++
+			if strings.Contains(string(r.Body), `"enabled"`) {
+				t.Errorf("create body must not carry enabled (the API ignores it): %s", r.Body)
+			}
+		case r.Method == "PATCH" && strings.Contains(r.Path, "/github-integrations/"):
+			patches++
+			if !strings.Contains(string(r.Body), `"enabled":false`) {
+				t.Errorf("follow-up PATCH should disable: %s", r.Body)
+			}
+		}
+	}
+	if creates != 1 || patches != 1 {
+		t.Fatalf("expected 1 create + 1 disabling PATCH, got %d/%d", creates, patches)
+	}
+}
+
+func TestGithubIntegration_existingHookIsNotClaimed(t *testing.T) {
+	env := newTestEnv(t, "github_integration")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	repo := "example-org/" + strings.ToLower(identifier)
+	env.fake.MarkHookAlreadyPresent(repo)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// Managed mode, but a hook already targets Flightdeck: the link is
+				// made, nothing is registered or claimed, webhook_registered=false.
+				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`  repo_full_name = %q`, repo)),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(ghRes, "enabled", "true"),
+					resource.TestCheckResourceAttr(ghRes, "webhook_registered", "false"),
 					resource.TestCheckResourceAttr("data.flightdeck_project.linked", "github_repo_full_name", repo),
 				),
 			},

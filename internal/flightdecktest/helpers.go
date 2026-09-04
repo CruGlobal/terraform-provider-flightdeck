@@ -23,6 +23,15 @@ func (s *Server) id() int64 {
 
 // --- error envelopes ---------------------------------------------------------
 
+// errorBody is the {error, code} envelope as a value, for handlers that return
+// bodies instead of writing them; it honours OmitErrorCodes like writeError.
+func errorBody(message, code string) map[string]any {
+	if currentServer != nil && currentServer.codesOmitted() {
+		return map[string]any{"error": message}
+	}
+	return map[string]any{"error": message, "code": code}
+}
+
 func notFound(w http.ResponseWriter) { writeError(w, http.StatusNotFound, "not_found", "Not found") }
 
 func staleObject(w http.ResponseWriter) {
@@ -32,8 +41,8 @@ func staleObject(w http.ResponseWriter) {
 
 // --- request helpers ---------------------------------------------------------
 
-// decodeBody reads the JSON body and returns the object under root (Rails
-// wraps params under the resource name). A missing root is a 400 ParameterMissing.
+// decodeBody reads the JSON body and returns the object under root (the API
+// wraps request attributes under the resource name). A missing root is a 400.
 func decodeBody(w http.ResponseWriter, r *http.Request, root string) (map[string]any, bool) {
 	var envelope map[string]any
 	body, _ := io.ReadAll(r.Body)
@@ -53,7 +62,7 @@ func decodeBody(w http.ResponseWriter, r *http.Request, root string) (map[string
 	return inner, true
 }
 
-// pathID parses a numeric path segment; a non-numeric id is a 404 like Rails' find.
+// pathID parses a numeric path segment; a non-numeric id is a 404, as in the API.
 func pathID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
 	id, err := strconv.ParseInt(r.PathValue(name), 10, 64)
 	if err != nil {
@@ -88,7 +97,7 @@ type idempotentResponse struct {
 	fingerprint string
 }
 
-// fingerprintOf mirrors IdempotentRequests#idempotency_fingerprint: a hash of
+// fingerprintOf mirrors the API's create fingerprint: a hash of
 // the submitted attributes, stringified and sorted.
 func fingerprintOf(attrs map[string]any) string {
 	keys := make([]string, 0, len(attrs))
@@ -109,7 +118,7 @@ func fingerprintOf(attrs map[string]any) string {
 
 // withIdempotency wraps a create. The same Idempotency-Key replays the stored
 // 2xx verbatim; only successful responses are remembered. Keys are scoped per
-// endpoint, as IdempotentRequests does.
+// endpoint, as the API does.
 func (s *Server) withIdempotency(w http.ResponseWriter, r *http.Request, scope string, create func() (int, any)) {
 	s.idempotently(w, r, scope, "", func() (int, any, any) {
 		status, body := create()
@@ -118,7 +127,7 @@ func (s *Server) withIdempotency(w http.ResponseWriter, r *http.Request, scope s
 }
 
 // withIdempotencyFingerprint is withIdempotency for a create that opts into
-// body fingerprinting (FD-794): the same key with different attributes is a
+// body fingerprinting: the same key with different attributes is a
 // 409 idempotency_key_reused instead of a replay.
 func (s *Server) withIdempotencyFingerprint(w http.ResponseWriter, r *http.Request, scope, fingerprint string, create func() (int, any)) {
 	s.idempotently(w, r, scope, fingerprint, func() (int, any, any) {
@@ -129,7 +138,7 @@ func (s *Server) withIdempotencyFingerprint(w http.ResponseWriter, r *http.Reque
 
 // withIdempotencyRedacted is withIdempotency for creates whose response carries
 // a secret: create returns the body to render AND the body to cache for
-// replays (nil caches the rendered body). Mirrors cache_idempotent_response_as.
+// replays (nil caches the rendered body), as the API redacts secrets from its cache.
 func (s *Server) withIdempotencyRedacted(w http.ResponseWriter, r *http.Request, scope string, create func() (int, any, any)) {
 	s.idempotently(w, r, scope, "", create)
 }
@@ -184,7 +193,7 @@ func (s *Server) idempotently(w http.ResponseWriter, r *http.Request, scope, fin
 	_, _ = w.Write(encoded)
 }
 
-// --- value coercion (Rails-style permissive params) ---------------------------
+// --- value coercion (permissive request params, as the API accepts them) -----
 
 func truthy(v any) bool {
 	switch t := v.(type) {

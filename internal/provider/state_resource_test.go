@@ -109,7 +109,7 @@ data "flightdeck_states" "all" {
 					resource.TestCheckResourceAttr(stateRes, "default", "true"),
 					// Exactly one default across the project: the seeded Backlog lost it.
 					resource.TestCheckResourceAttr("data.flightdeck_states.all", "states.#", "6"),
-					checkSingleDefault("data.flightdeck_states.all", "Triage"),
+					checkSingleDefault("Triage"),
 				),
 			},
 			{
@@ -289,7 +289,7 @@ data "flightdeck_states" "all" {
   project_id = flightdeck_project.parent.id
 }
 `,
-				Check: checkSingleDefault("data.flightdeck_states.all", "Backlog"),
+				Check: checkSingleDefault("Backlog"),
 			},
 			{
 				// Import the seeded default state under a configuration that says
@@ -319,7 +319,7 @@ data "flightdeck_states" "all" {
 				},
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(stateRes, "default", "true"),
-					checkSingleDefault("data.flightdeck_states.all", "Backlog"),
+					checkSingleDefault("Backlog"),
 				),
 			},
 		},

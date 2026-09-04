@@ -119,15 +119,19 @@ Full reference docs (generated from the provider schema) live in
 
 ### Importing existing resources
 
-Every resource can be imported by its numeric id; projects can also be
-imported by identifier:
+Projects import by numeric id or by identifier; states, labels, webhooks
+and GitHub integrations by their own numeric id; project members,
+ingestion tokens and error alert rules by `<project_id>/<id>` (members
+also by `<project_id>/user:<user_id>`):
 
 ```sh
 terraform import flightdeck_project.app 42
 terraform import flightdeck_project.app APP
+terraform import flightdeck_state.done 17
+terraform import flightdeck_project_member.deploy_bot 42/user:7
+terraform import flightdeck_error_alert_rule.new_errors 42/12
 ```
 
-Nested resources use their own id (`terraform import flightdeck_state.done 17`).
 Each resource's documentation page shows its import command.
 
 ## Building from source
@@ -166,7 +170,9 @@ The same tests run against a live Flightdeck when `TF_ACC=1` and
 `FLIGHTDECK_ENDPOINT` / `FLIGHTDECK_TOKEN` point at a **dedicated test
 workspace** (they create and delete projects). The member tests also need
 `FLIGHTDECK_ACC_MEMBER_USER_ID`, the numeric user id of another member of
-that workspace (the API has no route to resolve an email).
+that workspace (the API has no route to resolve an email), and the
+managed-mode GitHub-link tests run only when `FLIGHTDECK_ACC_GITHUB_REPO`
+names a repository the workspace's GitHub App can reach.
 
 ```sh
 export TF_ACC=1

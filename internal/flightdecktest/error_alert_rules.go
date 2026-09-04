@@ -143,8 +143,8 @@ func (s *Server) showErrorAlertRule(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-// applyRuleAttrs mirrors ErrorAlertRule#normalize_jsonb + #validate_values.
-// wasOpeningIncident is the pre-write open_incident flag (FD-665 gate).
+// applyRuleAttrs mirrors the API's rule normalisation and validation.
+// wasOpening is the pre-write open_incident flag, for the incidents-feature gate.
 func (s *Server) applyRuleAttrs(rule *ErrorAlertRule, attrs map[string]any, project *Project) (int, string, string) {
 	wasOpening := truthy(rule.Action["open_incident"])
 	if v, has := attrs["name"]; has {
@@ -250,11 +250,11 @@ func (s *Server) createErrorAlertRule(w http.ResponseWriter, r *http.Request) {
 		defer s.mu.Unlock()
 		project := s.liveProject(pid)
 		if project == nil {
-			return http.StatusNotFound, map[string]any{"error": "Not found", "code": "not_found"}
+			return http.StatusNotFound, errorBody("Not found", "not_found")
 		}
 		rule := &ErrorAlertRule{ID: s.id(), ProjectID: pid, Enabled: true, Trigger: "new_group", Condition: map[string]any{}, Action: map[string]any{}}
 		if status, code, msg := s.applyRuleAttrs(rule, attrs, project); status != 0 {
-			return status, map[string]any{"error": msg, "code": code}
+			return status, errorBody(msg, code)
 		}
 		s.errorAlertRules().byID[rule.ID] = rule
 		return http.StatusCreated, serializeRule(rule)

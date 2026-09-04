@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -32,14 +33,16 @@ type User struct {
 	Role  string `json:"role,omitempty"`
 }
 
-// RecordedRequest is one request the fake served, kept for assertions.
+// RecordedRequest is one request the fake served, kept for assertions. Body is
+// the request body; Response is the body the fake answered with.
 type RecordedRequest struct {
-	Method string
-	Path   string
-	Query  string
-	Header http.Header
-	Body   []byte
-	Status int
+	Method   string
+	Path     string
+	Query    string
+	Header   http.Header
+	Body     []byte
+	Status   int
+	Response []byte
 }
 
 // Server is the fake. All exported fields are safe to read only after the
@@ -67,10 +70,13 @@ type Server struct {
 	throttleNext   int
 	throttleRetry  time.Duration
 	inFlightNext   int
-	failNext       []int
 	beforeRequest  []requestHook
 	requests       []RecordedRequest
 	workspaceAdmin bool
+	// omitCodes drops the `code` field from every error body, like an older
+	// deployment that only sent the prose message. Atomic because the envelope
+	// helpers consult it while handlers hold mu.
+	omitCodes atomic.Bool
 }
 
 // requestHook runs once, just before the first request matching method + path
@@ -106,7 +112,13 @@ func New(t testing.TB) *Server {
 	mux := http.NewServeMux()
 	s.routes(mux)
 	s.Server = httptest.NewServer(s.middleware(mux))
-	t.Cleanup(s.Close)
+	currentServer = s
+	t.Cleanup(func() {
+		s.Close()
+		if currentServer == s {
+			currentServer = nil
+		}
+	})
 	return s
 }
 
@@ -145,13 +157,9 @@ func (s *Server) OnNextRequest(method, path string, fn func()) {
 	s.beforeRequest = append(s.beforeRequest, requestHook{method: method, path: path, fn: fn})
 }
 
-// FailNext queues HTTP statuses to answer the next requests with, in order,
-// before normal handling resumes (e.g. 502, 503).
-func (s *Server) FailNext(statuses ...int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.failNext = append(s.failNext, statuses...)
-}
+// OmitErrorCodes makes every error body prose-only (no `code`), like a
+// deployment that predates machine-readable codes.
+func (s *Server) OmitErrorCodes(on bool) { s.omitCodes.Store(on) }
 
 // SetWorkspaceAdmin controls whether the token's user is treated as a
 // workspace admin (required for webhooks and the self-healing block).
@@ -180,22 +188,21 @@ func (s *Server) RequestsMatching(method, pathPrefix string) []RecordedRequest {
 	return out
 }
 
-// ResetRequests clears the recorded request log.
-func (s *Server) ResetRequests() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.requests = nil
-}
-
-// statusRecorder captures the status code for the request log.
+// statusRecorder captures the status code and body for the request log.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+	body   bytes.Buffer
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	r.body.Write(b)
+	return r.ResponseWriter.Write(b)
 }
 
 func (s *Server) middleware(next http.Handler) http.Handler {
@@ -207,7 +214,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			s.mu.Lock()
 			s.requests = append(s.requests, RecordedRequest{
 				Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery,
-				Header: r.Header.Clone(), Body: body, Status: rec.status,
+				Header: r.Header.Clone(), Body: body, Status: rec.status, Response: rec.body.Bytes(),
 			})
 			s.mu.Unlock()
 		}()
@@ -217,7 +224,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Fault injection runs before auth, as Rack::Attack does.
+		// Fault injection runs before auth, as the real throttle does.
 		s.mu.Lock()
 		if s.throttleNext > 0 {
 			s.throttleNext--
@@ -228,15 +235,6 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			}
 			writeError(rec, http.StatusTooManyRequests, "rate_limited",
 				fmt.Sprintf("Rate limit exceeded. Retry in %d seconds.", int(retry/time.Second)))
-			return
-		}
-		if len(s.failNext) > 0 {
-			status := s.failNext[0]
-			s.failNext = s.failNext[1:]
-			s.mu.Unlock()
-			rec.Header().Set("Content-Type", "text/html")
-			rec.WriteHeader(status)
-			_, _ = fmt.Fprintf(rec, "<html>%d</html>", status)
 			return
 		}
 		token := s.token
@@ -289,10 +287,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
+	if code == "" || (currentServer != nil && currentServer.codesOmitted()) {
+		writeJSON(w, status, map[string]any{"error": message})
+		return
+	}
 	writeJSON(w, status, map[string]any{"error": message, "code": code})
 }
 
-// writeCollection applies Api::Pagination semantics (default 50, max 100) and
+// currentServer is the fake serving the request in flight. Tests start one
+// fake at a time per process (the harness runs resource tests serially), so a
+// package-level handle is enough for the envelope helper to consult knobs.
+var currentServer *Server
+
+func (s *Server) codesOmitted() bool { return s.omitCodes.Load() }
+
+// writeCollection applies the API's pagination (default 50, max 100) and
 // wraps the page in {results, meta}.
 func writeCollection(w http.ResponseWriter, r *http.Request, items []any) {
 	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))

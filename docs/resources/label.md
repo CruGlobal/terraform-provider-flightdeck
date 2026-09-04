@@ -46,7 +46,7 @@ resource "flightdeck_label" "security" {
 ### Read-Only
 
 - `id` (Number) Numeric id of the label.
-- `lock_version` (Number) Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates.
+- `lock_version` (Number) Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates and deletes.
 
 ## Import
 

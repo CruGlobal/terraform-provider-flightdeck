@@ -13,15 +13,16 @@ resource "flightdeck_webhook" "ci" {
   ]
 }
 
-# Scoped to one project, with a secret you manage yourself.
+# Scoped to one project. Flightdeck generates the HMAC signing secret and
+# returns it once; hand it to the receiver from state (for example through a
+# secret manager) rather than an output.
 resource "flightdeck_webhook" "app_intake" {
   project_id = flightdeck_project.app.id
   url        = "https://intake.example.com/flightdeck"
   events     = ["intake.created", "intake.accepted", "intake.declined"]
-  secret     = var.webhook_secret
 }
 
-variable "webhook_secret" {
-  type      = string
-  sensitive = true
-}
+# output "app_intake_signing_secret" {
+#   value     = flightdeck_webhook.app_intake.secret
+#   sensitive = true
+# }

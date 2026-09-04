@@ -74,7 +74,7 @@ func (s *Server) liveIngestionToken(projectID, id int64) *IngestionToken {
 	return t
 }
 
-// serializeIngestionToken mirrors Serializers.ingestion_token(token, reveal:).
+// serializeIngestionToken mirrors the API's token shape; reveal adds the secret.
 func serializeIngestionToken(t *IngestionToken, reveal bool) map[string]any {
 	out := map[string]any{
 		"id": t.ID, "project_id": t.ProjectID, "name": t.Name, "environment": t.Environment,
@@ -152,7 +152,7 @@ func (s *Server) createIngestionToken(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.liveProject(pid) == nil {
-			return http.StatusNotFound, map[string]any{"error": "Not found", "code": "not_found"}, nil
+			return http.StatusNotFound, errorBody("Not found", "not_found"), nil
 		}
 		t := &IngestionToken{ID: s.id(), ProjectID: pid, Name: "Ingestion token", Environment: "production", Scope: "post_server_item", CreatedAt: time.Now()}
 		if v := strings.TrimSpace(asString(attrs["name"])); v != "" {
@@ -163,7 +163,7 @@ func (s *Server) createIngestionToken(w http.ResponseWriter, r *http.Request) {
 		}
 		if v := strings.TrimSpace(asString(attrs["scope"])); v != "" {
 			if !contains(ingestionScopes, v) {
-				return http.StatusUnprocessableEntity, map[string]any{"error": "unknown scope: " + v, "code": "invalid_attribute"}, nil
+				return http.StatusUnprocessableEntity, errorBody("unknown scope: "+v, "invalid_attribute"), nil
 			}
 			t.Scope = v
 		}

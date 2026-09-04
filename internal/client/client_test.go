@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func newTestClient(t *testing.T, handler http.Handler, opts ...Option) (*Client, *httptest.Server) {
+func newTestClient(t *testing.T, handler http.Handler, opts ...Option) *Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
@@ -22,7 +22,7 @@ func newTestClient(t *testing.T, handler http.Handler, opts ...Option) (*Client,
 		t.Fatalf("New: %v", err)
 	}
 	c.sleep = func(context.Context, time.Duration) error { return nil }
-	return c, srv
+	return c
 }
 
 func TestNew_NormalisesEndpoint(t *testing.T) {
@@ -52,10 +52,30 @@ func TestNew_NormalisesEndpoint(t *testing.T) {
 	}
 }
 
+func TestNew_TrimsTokenWhitespace(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL, "fd_pat_pasted\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), "/me", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got != "Bearer fd_pat_pasted" {
+		t.Errorf("Authorization = %q; a pasted trailing newline must not reach the API", got)
+	}
+}
+
 func TestDo_SendsAuthAndHeaders(t *testing.T) {
 	var got *http.Request
 	var body []byte
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.Clone(r.Context())
 		body = make([]byte, r.ContentLength)
 		_, _ = r.Body.Read(body)
@@ -99,7 +119,7 @@ func TestDo_SendsAuthAndHeaders(t *testing.T) {
 }
 
 func TestDo_ErrorEnvelope(t *testing.T) {
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/v1/projects/404":
@@ -206,7 +226,7 @@ func TestDo_RetriesOn429HonouringRetryAfter(t *testing.T) {
 
 func TestDo_GivesUpAfterMaxRetries(t *testing.T) {
 	var calls atomic.Int32
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -225,7 +245,7 @@ func TestDo_GivesUpAfterMaxRetries(t *testing.T) {
 
 func TestDo_RetriesInFlightIdempotencyConflictButNotStale(t *testing.T) {
 	var calls atomic.Int32
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -263,7 +283,7 @@ func TestDo_RetriesInFlightIdempotencyConflictButNotStale(t *testing.T) {
 
 func TestDo_RetriesGatewayErrors(t *testing.T) {
 	var calls atomic.Int32
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if calls.Add(1) == 1 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
@@ -280,7 +300,7 @@ func TestDo_RetriesGatewayErrors(t *testing.T) {
 }
 
 func TestDo_ContextCancellationStopsRetrying(t *testing.T) {
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	c.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
@@ -298,7 +318,7 @@ func TestList_PaginatesFully(t *testing.T) {
 	}
 	const total = 250
 	var pagesSeen []string
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		pagesSeen = append(pagesSeen, q.Get("page")+"/"+q.Get("per_page"))
 		page, _ := strconv.Atoi(q.Get("page"))
@@ -335,7 +355,7 @@ func TestList_PaginatesFully(t *testing.T) {
 }
 
 func TestList_EmptyCollection(t *testing.T) {
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"results":[],"meta":{"count":0,"page":1,"per_page":100,"total_pages":0}}`)
 	}))
@@ -359,7 +379,8 @@ func TestIdempotencyKey_IsStableAndDistinct(t *testing.T) {
 	if len(a) != 43 || a[:3] != "tf-" {
 		t.Errorf("unexpected key shape %q", a)
 	}
-	if RandomIdempotencyKey() == RandomIdempotencyKey() {
+	r1, r2 := RandomIdempotencyKey(), RandomIdempotencyKey()
+	if r1 == r2 {
 		t.Error("random keys collided")
 	}
 

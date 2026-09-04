@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// defaultLabels mirrors Project::DEFAULT_LABELS, seeded on every project create.
+// defaultLabels are the starter labels a new project is seeded with.
 var defaultLabels = []struct{ name, color string }{
 	{"Bug", "#ef5974"}, {"Feature", "#3b82f6"}, {"Enhancement", "#14b8a6"},
 	{"Documentation", "#8b5cf6"}, {"Tech debt", "#f5b82e"},
@@ -125,7 +125,7 @@ func (s *Server) applyLabelAttrs(l *Label, attrs map[string]any) (int, string, s
 		l.Name = asString(v)
 	}
 	if v, ok := attrs["color"]; ok && v != nil {
-		l.Color = canonicalColor(asString(v))
+		l.Color = asString(v)
 	}
 	if strings.TrimSpace(l.Name) == "" {
 		return http.StatusUnprocessableEntity, "validation_failed", "Name can't be blank"
@@ -154,11 +154,11 @@ func (s *Server) createLabel(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.liveProject(pid) == nil {
-			return http.StatusNotFound, map[string]any{"error": "Not found", "code": "not_found"}
+			return http.StatusNotFound, errorBody("Not found", "not_found")
 		}
 		l := &Label{ID: s.id(), ProjectID: pid, Color: "#6b7280"}
 		if status, code, msg := s.applyLabelAttrs(l, attrs); status != 0 {
-			return status, map[string]any{"error": msg, "code": code}
+			return status, errorBody(msg, code)
 		}
 		s.labels().byID[l.ID] = l
 		return http.StatusCreated, serializeLabel(l)

@@ -656,3 +656,53 @@ func TestProject_idempotencyKeyReusedIsAClearConflict(t *testing.T) {
 		t.Error("idempotency_key_reused must not be retried")
 	}
 }
+
+func TestProject_worksAgainstADeploymentWithoutErrorCodes(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	env.fake.OmitErrorCodes(true)
+	identifier := randIdentifier()
+	var id string
+	// The in-flight replay window answers a keyed create with an uncoded 409;
+	// the client retries it once from the prose.
+	env.fake.InFlightNext(1)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `  name = "No codes"`),
+				Check:  captureAttr(projectRes, "id", &id),
+			},
+			{
+				// An uncoded 409 on an If-Match update is still reported as stale.
+				PreConfig: func() {
+					env.fake.OnNextRequest("PATCH", "/api/v1/projects/"+id, func() { env.fake.TouchProject(mustInt(id), "Elsewhere") })
+				},
+				Config:      projectConfig(env, identifier, `  name = "No codes v2"`),
+				ExpectError: regexMust(`(?s)modified outside of Terraform.*Nothing\s+was\s+overwritten`),
+			},
+			{
+				Config: projectConfig(env, identifier, `  name = "No codes v2"`),
+			},
+			{
+				// A 404 without a code is still "gone".
+				PreConfig: func() { env.fake.DeleteProjectOutOfBand(mustInt(id)) },
+				Config:    projectConfig(env, identifier, `  name = "No codes v2"`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(projectRes, plancheck.ResourceActionCreate)},
+				},
+			},
+		},
+	})
+	var errors int
+	for _, r := range env.fake.Requests() {
+		if r.Status >= 400 {
+			errors++
+			if strings.Contains(string(r.Response), `"code"`) {
+				t.Errorf("error body carried a code with OmitErrorCodes on: %s", r.Response)
+			}
+		}
+	}
+	if errors < 3 {
+		t.Errorf("expected the 409 in-flight, the 409 stale and the 404 to have been served, saw %d error responses", errors)
+	}
+}

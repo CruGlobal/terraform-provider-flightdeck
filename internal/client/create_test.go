@@ -27,17 +27,16 @@ func (w *widget) ResourceID() int64 { return w.ID }
 // widgetServer is a tiny API: POST /widgets creates (honouring Idempotency-Key
 // replay), GET /widgets/{id} shows. Knobs shape the responses.
 type widgetServer struct {
-	mu        sync.Mutex
-	nextID    int64
-	rows      map[int64]*widget
-	replays   map[string][]byte
-	wrap      bool // wrap responses in {"widget": ...}
-	zeroID    bool // omit id from the create response
-	lagReads  int  // number of GETs to 404 before answering
-	posts     int
-	gets      int
-	deleteOn  map[int64]bool
-	omitCodes bool
+	mu       sync.Mutex
+	nextID   int64
+	rows     map[int64]*widget
+	replays  map[string][]byte
+	wrap     bool // wrap responses in {"widget": ...}
+	zeroID   bool // omit id from the create response
+	lagReads int  // number of GETs to 404 before answering
+	posts    int
+	gets     int
+	deleteOn map[int64]bool
 }
 
 func newWidgetServer(t *testing.T) (*widgetServer, *Client) {
@@ -115,11 +114,7 @@ func (ws *widgetServer) show(w http.ResponseWriter, r *http.Request) {
 	if !ok || ws.deleteOn[id] {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		if ws.omitCodes {
-			_, _ = fmt.Fprint(w, `{"error":"Not found"}`)
-		} else {
-			_, _ = fmt.Fprint(w, `{"error":"Not found","code":"not_found"}`)
-		}
+		_, _ = fmt.Fprint(w, `{"error":"Not found","code":"not_found"}`)
 		return
 	}
 	ws.write(w, http.StatusOK, row)
@@ -383,7 +378,7 @@ func TestListResources_terminators(t *testing.T) {
 func TestUncodedConflicts(t *testing.T) {
 	// A deployment without error codes: every 409 is prose only.
 	var posts, patches int
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/widgets":
@@ -472,7 +467,7 @@ func TestErrorClassification_uncoded409(t *testing.T) {
 }
 
 func TestErrorMessageTruncation(t *testing.T) {
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(strings.Repeat("x", 10_000)))
@@ -486,7 +481,7 @@ func TestErrorMessageTruncation(t *testing.T) {
 
 func TestGatewayErrorsRetryOnlyReplayableRequests(t *testing.T) {
 	var calls int
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}), WithMaxRetries(2))
@@ -527,5 +522,194 @@ func TestIsTransient(t *testing.T) {
 	}
 	if !isTransient(&net.DNSError{IsTimeout: true}) || isTransient(&net.DNSError{IsNotFound: true}) {
 		t.Error("DNS: only timeouts/temporary failures are transient")
+	}
+}
+
+// ---- CreateSecretResource -----------------------------------------------------
+
+// keyed is a minimal secret-bearing resource: the create returns the secret
+// once, a replay returns the row without it.
+type keyed struct {
+	ID     int64  `json:"id"`
+	Secret string `json:"secret"`
+}
+
+func (k *keyed) ResourceID() int64 { return k.ID }
+func (k *keyed) secret() string    { return k.Secret }
+
+// keyedServer serves POST /keys with idempotent, secret-redacting replays and
+// GET /keys/{id}; discards are recorded rather than performed.
+type keyedServer struct {
+	mu        sync.Mutex
+	nextID    int64
+	rows      map[int64]bool
+	replays   map[string]int64
+	redactAll bool // even a fresh create comes back without its secret
+	posts     int
+	discarded []int64
+}
+
+func newKeyedServer(t *testing.T) (*keyedServer, *Client) {
+	t.Helper()
+	ks := &keyedServer{nextID: 500, rows: map[int64]bool{}, replays: map[string]int64{}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/keys", func(w http.ResponseWriter, r *http.Request) {
+		ks.mu.Lock()
+		defer ks.mu.Unlock()
+		ks.posts++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		key := r.Header.Get("Idempotency-Key")
+		if id, ok := ks.replays[key]; ok && key != "" {
+			_, _ = fmt.Fprintf(w, `{"id": %d, "secret": null, "secret_available": false}`, id)
+			return
+		}
+		ks.nextID++
+		ks.rows[ks.nextID] = true
+		if key != "" {
+			ks.replays[key] = ks.nextID
+		}
+		if ks.redactAll {
+			_, _ = fmt.Fprintf(w, `{"id": %d, "secret": null}`, ks.nextID)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"id": %d, "secret": "s3cret-%d"}`, ks.nextID, ks.nextID)
+	})
+	mux.HandleFunc("GET /api/v1/keys/{id}", func(w http.ResponseWriter, r *http.Request) {
+		ks.mu.Lock()
+		defer ks.mu.Unlock()
+		var id int64
+		_, _ = fmt.Sscan(r.PathValue("id"), &id)
+		w.Header().Set("Content-Type", "application/json")
+		if !ks.rows[id] {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprint(w, `{"error":"Not found","code":"not_found"}`)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"id": %d}`, id)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL, "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.sleep = func(context.Context, time.Duration) error { return nil }
+	return ks, c
+}
+
+func (ks *keyedServer) discard(_ context.Context, replayed *keyed) error {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.discarded = append(ks.discarded, replayed.ID)
+	delete(ks.rows, replayed.ID)
+	return nil
+}
+
+func (ks *keyedServer) verify(c *Client) Verifier[*keyed] {
+	return VerifyByGet(func(ctx context.Context, id int64) (*keyed, error) {
+		return GetResource[*keyed](ctx, c, fmt.Sprintf("/keys/%d", id), "key")
+	})
+}
+
+func TestCreateSecretResource_freshCreateWithSecretIsReturned(t *testing.T) {
+	ks, c := newKeyedServer(t)
+	ctx := context.Background()
+	got, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "k1", ks.verify(c), ks.discard)
+	if err != nil || got.Secret != "s3cret-501" || ks.posts != 1 || len(ks.discarded) != 0 {
+		t.Fatalf("got=%+v err=%v posts=%d discarded=%v", got, err, ks.posts, ks.discarded)
+	}
+}
+
+func TestCreateSecretResource_replayIsRetiredAndRecreated(t *testing.T) {
+	ks, c := newKeyedServer(t)
+	ctx := context.Background()
+	first, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", ks.verify(c), ks.discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", ks.verify(c), ks.discard)
+	if err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+	if second.ID == first.ID || second.Secret == "" {
+		t.Fatalf("recreate returned the replay: %+v", second)
+	}
+	// original + replayed + fresh-key; the replayed row was retired.
+	if ks.posts != 3 || len(ks.discarded) != 1 || ks.discarded[0] != first.ID {
+		t.Fatalf("posts=%d discarded=%v", ks.posts, ks.discarded)
+	}
+}
+
+// Branch 1: a fresh create carries its secret but cannot be read back — the
+// row is retired (never leave a live credential unrecorded) and no second
+// create is attempted.
+func TestCreateSecretResource_unverifiableFreshCreateIsRetired(t *testing.T) {
+	ks, c := newKeyedServer(t)
+	ctx := context.Background()
+	unknown := func(context.Context, *keyed) (Verdict, error) { return VerifiedUnknown, nil }
+	_, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "k1", unknown, ks.discard)
+	if err == nil || !strings.Contains(err.Error(), "revoked and nothing else was created") {
+		t.Fatalf("err = %v", err)
+	}
+	if ks.posts != 1 || len(ks.discarded) != 1 {
+		t.Fatalf("posts=%d discarded=%v: exactly one create, retired", ks.posts, ks.discarded)
+	}
+}
+
+// Branch 2: the replay cannot be retired (discard fails with something other
+// than 404) — stop, do not create another.
+func TestCreateSecretResource_replayRetireFailureStops(t *testing.T) {
+	ks, c := newKeyedServer(t)
+	ctx := context.Background()
+	if _, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", ks.verify(c), ks.discard); err != nil {
+		t.Fatal(err)
+	}
+	boom := &Error{Status: 403, Code: CodeForbidden, Message: "no"}
+	failing := func(context.Context, *keyed) error { return boom }
+	_, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", ks.verify(c), failing)
+	if err == nil || !strings.Contains(err.Error(), "could not be retired") || !errors.Is(err, boom) {
+		t.Fatalf("err = %v", err)
+	}
+	if ks.posts != 2 {
+		t.Fatalf("posts=%d: no fresh-key create after a failed retire", ks.posts)
+	}
+}
+
+// Branch 3: the fresh-key create also comes back without a secret — an API that
+// never returns one; refuse to record it.
+func TestCreateSecretResource_secretlessRecreateIsAnError(t *testing.T) {
+	ks, c := newKeyedServer(t)
+	ctx := context.Background()
+	ks.redactAll = true
+	_, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "k1", ks.verify(c), ks.discard)
+	if err == nil || !strings.Contains(err.Error(), "without its secret on a fresh create") {
+		t.Fatalf("err = %v", err)
+	}
+	if ks.posts != 2 || len(ks.discarded) != 1 {
+		t.Fatalf("posts=%d discarded=%v: the first (secretless) row is retired, the second is reported", ks.posts, ks.discarded)
+	}
+}
+
+// Branch 4: the fresh-key create has a secret but cannot be read back — retire
+// it too and report, never a third create.
+func TestCreateSecretResource_unverifiableRecreateIsRetired(t *testing.T) {
+	ks, c := newKeyedServer(t)
+	ctx := context.Background()
+	if _, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", ks.verify(c), ks.discard); err != nil {
+		t.Fatal(err)
+	}
+	var verifies int
+	flaky := func(ctx context.Context, k *keyed) (Verdict, error) {
+		verifies++
+		return VerifiedUnknown, nil
+	}
+	_, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", flaky, ks.discard)
+	if err == nil || !strings.Contains(err.Error(), "cannot be read back; it was revoked") {
+		t.Fatalf("err = %v", err)
+	}
+	// original, replayed, fresh-key: three POSTs, both replay and fresh rows retired.
+	if ks.posts != 3 || len(ks.discarded) != 2 {
+		t.Fatalf("posts=%d discarded=%v", ks.posts, ks.discarded)
 	}
 }

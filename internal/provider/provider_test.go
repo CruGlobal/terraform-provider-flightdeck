@@ -26,6 +26,10 @@ const (
 	// tests. A user id rather than an email: the API has no member directory
 	// route to resolve one.
 	envAccMemberUserID = "FLIGHTDECK_ACC_MEMBER_USER_ID"
+	// Optional: an owner/repo the workspace's GitHub App can reach, for the
+	// managed-mode flightdeck_github_integration tests. Unset, those tests skip
+	// live (the caller-managed mode needs no GitHub access and always runs).
+	envAccGithubRepo = "FLIGHTDECK_ACC_GITHUB_REPO"
 )
 
 // liveReady records which resources' acceptance tests may run against a live

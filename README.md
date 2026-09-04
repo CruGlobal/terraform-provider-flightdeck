@@ -170,7 +170,9 @@ The same tests run against a live Flightdeck when `TF_ACC=1` and
 `FLIGHTDECK_ENDPOINT` / `FLIGHTDECK_TOKEN` point at a **dedicated test
 workspace** (they create and delete projects). The member tests also need
 `FLIGHTDECK_ACC_MEMBER_USER_ID`, the numeric user id of another member of
-that workspace (the API has no route to resolve an email).
+that workspace (the API has no route to resolve an email), and the
+managed-mode GitHub-link tests run only when `FLIGHTDECK_ACC_GITHUB_REPO`
+names a repository the workspace's GitHub App can reach.
 
 ```sh
 export TF_ACC=1

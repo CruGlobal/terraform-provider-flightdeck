@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -26,10 +27,26 @@ data "flightdeck_project" "linked" {
 `, body)
 }
 
+// managedRepo returns a repository the managed mode can register a webhook on:
+// any name against the fake; against a live instance the one named by
+// FLIGHTDECK_ACC_GITHUB_REPO, or the test skips (the workspace's GitHub App
+// must be able to reach it).
+func managedRepo(t *testing.T, env *testEnv, fallback string) string {
+	t.Helper()
+	if !env.live() {
+		return fallback
+	}
+	repo := os.Getenv(envAccGithubRepo)
+	if repo == "" {
+		t.Skipf("%s not set: the workspace needs a GitHub App credential and a reachable repository for the managed mode", envAccGithubRepo)
+	}
+	return repo
+}
+
 func TestGithubIntegration_flightdeckManaged(t *testing.T) {
 	env := newTestEnv(t, "github_integration")
 	identifier := randIdentifier()
-	repo := "example-org/" + strings.ToLower(identifier)
+	repo := managedRepo(t, env, "example-org/"+strings.ToLower(identifier))
 	var id string
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
@@ -68,17 +85,6 @@ func TestGithubIntegration_flightdeckManaged(t *testing.T) {
 				),
 			},
 			{
-				// A new repository replaces the integration.
-				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`  repo_full_name = %q`, repo+"-v2")),
-				ConfigPlanChecks: resource.ConfigPlanChecks{
-					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(ghRes, plancheck.ResourceActionDestroyBeforeCreate)},
-				},
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr(ghRes, "repo_full_name", repo+"-v2"),
-					resource.TestCheckResourceAttr("data.flightdeck_project.linked", "github_repo_full_name", repo+"-v2"),
-				),
-			},
-			{
 				// Unlink.
 				Config: projectFixture(env, identifier),
 			},
@@ -91,6 +97,39 @@ data "flightdeck_project" "linked" {
 }
 `,
 				Check: resource.TestCheckNoResourceAttr("data.flightdeck_project.linked", "github_repo_full_name"),
+			},
+		},
+	})
+}
+
+func TestGithubIntegration_repoChangeReplaces(t *testing.T) {
+	env := newTestEnv(t, "github_integration")
+	env.requireFake(t) // a second reachable repository is not assumed live
+	identifier := randIdentifier()
+	repo := "example-org/" + strings.ToLower(identifier)
+	var id string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`  repo_full_name = %q`, repo)),
+				Check:  captureAttr(ghRes, "id", &id),
+			},
+			{
+				// A new repository replaces the integration and re-points the project.
+				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`  repo_full_name = %q`, repo+"-v2")),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(ghRes, plancheck.ResourceActionDestroyBeforeCreate)},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(ghRes, "repo_full_name", repo+"-v2"),
+					resource.TestCheckResourceAttr("data.flightdeck_project.linked", "github_repo_full_name", repo+"-v2"),
+					func(s *terraform.State) error {
+						if s.RootModule().Resources[ghRes].Primary.ID == id {
+							return fmt.Errorf("repository change should have replaced the integration")
+						}
+						return nil
+					},
+				),
 			},
 		},
 	})

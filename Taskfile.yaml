@@ -92,6 +92,8 @@ tasks:
   #   FLIGHTDECK_TOKEN             — fd_pat_… token bound to the test workspace
   #   FLIGHTDECK_ACC_MEMBER_USER_ID — numeric user id of another member of the test
 #                                   workspace, for the project_member tests
+#   FLIGHTDECK_ACC_GITHUB_REPO    — optional; an owner/repo the workspace's GitHub
+#                                   App can reach (managed-mode link tests skip if unset)
   #                                  the member data source / project_member tests
   testacc:
     desc: Run acceptance tests against a live Flightdeck workspace

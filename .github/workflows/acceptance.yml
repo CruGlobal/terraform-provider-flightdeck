@@ -26,6 +26,9 @@ name: acceptance
 #                                   owner), used by the project_member tests.
 #                                   The API has no directory route to resolve
 #                                   an email.
+#   FLIGHTDECK_ACC_GITHUB_REPO    — optional; an owner/repo the workspace's
+#                                   GitHub App can reach, for the managed-mode
+#                                   GitHub-integration tests (they skip if unset).
 #
 # Per-resource tests are additionally gated in code (`liveReady` in
 # internal/provider/provider_test.go) until the Flightdeck API change each
@@ -81,6 +84,7 @@ jobs:
           FLIGHTDECK_ENDPOINT: ${{ secrets.FLIGHTDECK_ENDPOINT }}
           FLIGHTDECK_TOKEN: ${{ secrets.FLIGHTDECK_TOKEN }}
           FLIGHTDECK_ACC_MEMBER_USER_ID: ${{ secrets.FLIGHTDECK_ACC_MEMBER_USER_ID }}
+          FLIGHTDECK_ACC_GITHUB_REPO: ${{ secrets.FLIGHTDECK_ACC_GITHUB_REPO }}
         run: go test -v -cover -count=1 -timeout 60m ./internal/provider/...
 
   # Aggregator job. Branch protection cannot require an individual matrix leg

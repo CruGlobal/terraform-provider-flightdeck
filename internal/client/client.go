@@ -105,7 +105,10 @@ func New(endpoint, token string, opts ...Option) (*Client, error) {
 	if endpoint == "" {
 		return nil, errors.New("endpoint must not be empty")
 	}
-	if strings.TrimSpace(token) == "" {
+	// Tokens arrive from environment variables and secret stores, which often
+	// carry a trailing newline; the API's bearer parser rejects one verbatim.
+	token = strings.TrimSpace(token)
+	if token == "" {
 		return nil, errors.New("token must not be empty")
 	}
 	u, err := url.Parse(endpoint)

@@ -52,6 +52,26 @@ func TestNew_NormalisesEndpoint(t *testing.T) {
 	}
 }
 
+func TestNew_TrimsTokenWhitespace(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL, "fd_pat_pasted\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), "/me", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got != "Bearer fd_pat_pasted" {
+		t.Errorf("Authorization = %q; a pasted trailing newline must not reach the API", got)
+	}
+}
+
 func TestDo_SendsAuthAndHeaders(t *testing.T) {
 	var got *http.Request
 	var body []byte

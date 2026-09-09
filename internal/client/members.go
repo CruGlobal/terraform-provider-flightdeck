@@ -12,15 +12,20 @@ import (
 // Role is the effective role key: a built-in (guest, member, admin, commenter)
 // or a custom role key defined by the workspace's permission scheme.
 // BuiltinRole is the built-in the row rests on even when a custom key applies.
+// Name and Email are the member's, carried on the membership so a client can
+// say who a row is for without a second lookup. They are pointers because the
+// API reports them from the associated user, which a stray row may lack.
 type ProjectMember struct {
-	ID          int64  `json:"id"`
-	ProjectID   int64  `json:"project_id"`
-	UserID      int64  `json:"user_id"`
-	Role        string `json:"role"`
-	BuiltinRole string `json:"builtin_role"`
-	LockVersion int64  `json:"lock_version"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	ID          int64   `json:"id"`
+	ProjectID   int64   `json:"project_id"`
+	UserID      int64   `json:"user_id"`
+	Name        *string `json:"name"`
+	Email       *string `json:"email"`
+	Role        string  `json:"role"`
+	BuiltinRole string  `json:"builtin_role"`
+	LockVersion int64   `json:"lock_version"`
+	CreatedAt   string  `json:"created_at"`
+	UpdatedAt   string  `json:"updated_at"`
 }
 
 // ResourceID implements Identified.

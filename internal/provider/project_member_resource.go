@@ -35,6 +35,8 @@ type projectMemberModel struct {
 	ID          types.Int64  `tfsdk:"id"`
 	ProjectID   types.Int64  `tfsdk:"project_id"`
 	UserID      types.Int64  `tfsdk:"user_id"`
+	Name        types.String `tfsdk:"name"`
+	Email       types.String `tfsdk:"email"`
 	Role        types.String `tfsdk:"role"`
 	BuiltinRole types.String `tfsdk:"builtin_role"`
 	LockVersion types.Int64  `tfsdk:"lock_version"`
@@ -45,6 +47,8 @@ func projectMemberToModel(m *client.ProjectMember) projectMemberModel {
 		ID:          types.Int64Value(m.ID),
 		ProjectID:   types.Int64Value(m.ProjectID),
 		UserID:      types.Int64Value(m.UserID),
+		Name:        stringPointerValue(m.Name),
+		Email:       stringPointerValue(m.Email),
 		Role:        types.StringValue(m.Role),
 		BuiltinRole: types.StringNull(),
 		LockVersion: types.Int64Value(m.LockVersion),
@@ -66,8 +70,9 @@ func (r *projectMemberResource) Configure(_ context.Context, req resource.Config
 func (r *projectMemberResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages a user's membership of a Flightdeck project — one membership row, addressed by its own " +
-			"id. The user must already be a member of the workspace; the API has no route to look a user up by email, " +
-			"so `user_id` is the numeric user id (visible in the workspace's member list).\n\n" +
+			"id. The user must already be a member of the workspace. `user_id` is the numeric user id; resolve it from " +
+			"an email address with a `flightdeck_workspace_member` data source rather than hard-coding it. The " +
+			"membership also reports the member's `name` and `email`.\n\n" +
 			"The role is one of the built-in roles (`" + strings.Join(client.ProjectMemberRoles, "`, `") + "`) or a " +
 			"custom role key defined by the workspace's permission scheme; the API rejects anything else. Changing " +
 			"`user_id` replaces the membership (the API refuses to move a row to another user).\n\n" +
@@ -87,9 +92,18 @@ func (r *projectMemberResource) Schema(_ context.Context, _ resource.SchemaReque
 				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 			},
 			"user_id": schema.Int64Attribute{
-				MarkdownDescription: "Id of the workspace member. Changing it replaces the membership.",
-				Required:            true,
-				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
+				MarkdownDescription: "Id of the workspace member, which a `flightdeck_workspace_member` data source resolves " +
+					"from an email address. Changing it replaces the membership.",
+				Required:      true,
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()},
+			},
+			"name": schema.StringAttribute{
+				MarkdownDescription: "Display name of the member, reported by the API so a membership says who it is for.",
+				Computed:            true,
+			},
+			"email": schema.StringAttribute{
+				MarkdownDescription: "Email address of the member, reported by the API.",
+				Computed:            true,
 			},
 			"role": schema.StringAttribute{
 				MarkdownDescription: "Project role: a built-in (`" + strings.Join(client.ProjectMemberRoles, "`, `") +

@@ -15,7 +15,7 @@ const memberRes = "flightdeck_project_member.test"
 
 // memberUserID is the workspace member the tests grant access to: a seeded
 // user of the fake, or FLIGHTDECK_ACC_MEMBER_USER_ID against a live instance
-// (the API has no directory route to resolve an email).
+// (an id rather than an address, so no test depends on a workspace's roster).
 func memberUserID(t *testing.T, env *testEnv) int64 {
 	t.Helper()
 	if env.live() {

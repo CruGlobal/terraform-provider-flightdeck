@@ -3,10 +3,14 @@ resource "flightdeck_project" "app" {
   identifier = "APP"
 }
 
-# user_id is the workspace member's numeric id (the API has no route to look a
-# user up by email). Find it in the workspace's member list.
+# user_id is the workspace member's numeric id. Resolve it from an email
+# address rather than hard-coding it.
+data "flightdeck_workspace_member" "deploy_bot" {
+  email = "deploy-bot@example.com"
+}
+
 resource "flightdeck_project_member" "deploy_bot" {
   project_id = flightdeck_project.app.id
-  user_id    = 7
+  user_id    = data.flightdeck_workspace_member.deploy_bot.id
   role       = "member"
 }

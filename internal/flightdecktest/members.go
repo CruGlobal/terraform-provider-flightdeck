@@ -127,11 +127,18 @@ func (s *Server) applyRole(m *ProjectMember, role string) bool {
 	return false
 }
 
-func serializeMember(m *ProjectMember) map[string]any {
-	return map[string]any{
+// The shape carries the member's name and email, from the associated user, so
+// a client can say who a membership is for without a second lookup.
+func (s *Server) serializeMember(m *ProjectMember) map[string]any {
+	out := map[string]any{
 		"id": m.ID, "project_id": m.ProjectID, "user_id": m.UserID, "role": m.Role,
 		"builtin_role": m.BuiltinRole, "lock_version": m.LockVersion,
+		"name": nil, "email": nil,
 	}
+	if u := s.workspaceUser(m.UserID); u != nil {
+		out["name"], out["email"] = u.Name, u.Email
+	}
+	return out
 }
 
 // Every member action is :administer_project, reads included; the fake's
@@ -156,7 +163,7 @@ func (s *Server) listMembers(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	items := make([]any, 0, len(rows))
 	for _, m := range rows {
-		items = append(items, serializeMember(m))
+		items = append(items, s.serializeMember(m))
 	}
 	s.mu.Unlock()
 	writeCollection(w, r, items)
@@ -178,7 +185,7 @@ func (s *Server) showMember(w http.ResponseWriter, r *http.Request) {
 		notFound(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, serializeMember(m))
+	writeJSON(w, http.StatusOK, s.serializeMember(m))
 }
 
 func (s *Server) createMember(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +220,7 @@ func (s *Server) createMember(w http.ResponseWriter, r *http.Request) {
 				"error": "User has already been taken", "code": "validation_failed"}
 		}
 		s.projectMembers().byID[m.ID] = m
-		return http.StatusCreated, serializeMember(m)
+		return http.StatusCreated, s.serializeMember(m)
 	})
 }
 
@@ -254,7 +261,7 @@ func (s *Server) updateMember(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	m.LockVersion++
-	writeJSON(w, http.StatusOK, serializeMember(m))
+	writeJSON(w, http.StatusOK, s.serializeMember(m))
 }
 
 func (s *Server) destroyMember(w http.ResponseWriter, r *http.Request) {

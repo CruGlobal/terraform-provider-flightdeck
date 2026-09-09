@@ -38,6 +38,7 @@ project, not to infrastructure code.
 | --- | --- |
 | `flightdeck_project` | A project by id or identifier. |
 | `flightdeck_states` | All workflow states of a project. |
+| `flightdeck_workspace_member` | Resolves a workspace member by email address to a numeric user id, for `project_member.user_id` and `project.lead_id`. |
 
 There is no data source to resolve a workspace member by email: the API
 has no member-directory route yet, so `flightdeck_project_member` takes

@@ -25,12 +25,15 @@ import (
 // DefaultToken is the personal access token the fake accepts unless changed.
 const DefaultToken = "fd_pat_test_token_0123456789"
 
-// User is a workspace member.
+// User is a workspace member. Kind is "human" or "service" (empty reads as
+// human); a service account is visible in the directory only to a workspace
+// admin.
 type User struct {
 	ID    int64  `json:"id"`
 	Name  string `json:"name"`
 	Email string `json:"email"`
 	Role  string `json:"role,omitempty"`
+	Kind  string `json:"kind,omitempty"`
 }
 
 // RecordedRequest is one request the fake served, kept for assertions. Body is
@@ -105,9 +108,10 @@ func New(t testing.TB) *Server {
 		workspaceAdmin: true,
 	}
 	s.members = []User{
-		{ID: 1, Name: "Token Owner", Email: "owner@example.com", Role: "admin"},
-		{ID: 2, Name: "Alex Example", Email: "alex@example.com", Role: "member"},
-		{ID: 3, Name: "Sam Sample", Email: "sam@example.com", Role: "guest"},
+		{ID: 1, Name: "Token Owner", Email: "owner@example.com", Role: "admin", Kind: KindHuman},
+		{ID: 2, Name: "Alex Example", Email: "alex@example.com", Role: "member", Kind: KindHuman},
+		{ID: 3, Name: "Sam Sample", Email: "sam@example.com", Role: "guest", Kind: KindHuman},
+		{ID: 4, Name: "Deploy Bot", Email: "deploy-bot@example.com", Role: "member", Kind: KindService},
 	}
 	mux := http.NewServeMux()
 	s.routes(mux)

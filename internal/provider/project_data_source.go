@@ -111,6 +111,7 @@ func (d *projectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 					"recovery_window_minutes": schema.Int64Attribute{MarkdownDescription: "Post-rollback grace period, in minutes.", Computed: true},
 				},
 			},
+			"slack_channel": slackChannelDataSourceSchema(),
 		},
 	}
 }
@@ -138,5 +139,6 @@ func (d *projectDataSource) Read(ctx context.Context, req datasource.ReadRequest
 
 	state := projectToModel(ctx, p, nil, featuresAll, &resp.Diagnostics)
 	state.SelfHealing = readSelfHealing(ctx, d.client, p.ID, &resp.Diagnostics)
+	state.SlackChannel = readSlackChannel(ctx, d.client, p.ID, types.MapNull(types.BoolType), slackEventsAll, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }

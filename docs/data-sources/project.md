@@ -48,6 +48,7 @@ output "app_project_id" {
 - `name` (String) Display name.
 - `network` (String) Project visibility, `public_project` or `private_project`.
 - `self_healing` (Attributes) Resolved self-healing control-loop configuration (armed flag and thresholds), read from the project's `self-healing` API resource. Null unless the token's user is a workspace admin and the Flightdeck version exposes the endpoint. (see [below for nested schema](#nestedatt--self_healing))
+- `slack_channel` (Attributes) Per-project Slack channel configuration, read from the project's `slack-channel` API resource. Null unless the token's user administers the project and the Flightdeck version exposes the endpoint. `event_filter` reports every category resolved against its default. (see [below for nested schema](#nestedatt--slack_channel))
 
 <a id="nestedatt--self_healing"></a>
 ### Nested Schema for `self_healing`
@@ -66,3 +67,22 @@ Read-Only:
 - `recovery_window_minutes` (Number) Post-rollback grace period, in minutes.
 - `short_window_minutes` (Number) Short burn-rate window in minutes.
 - `sustain_count` (Number) Consecutive trips required before acting.
+
+
+<a id="nestedatt--slack_channel"></a>
+### Nested Schema for `slack_channel`
+
+Read-Only:
+
+- `available` (Boolean) Whether the workspace has a connected Slack integration.
+- `basename` (String) The effective channel name the provisioner uses.
+- `channel_id` (String) Slack's id for the linked channel.
+- `enabled` (Boolean) Whether the project gets its own Slack channel.
+- `event_filter` (Map of Boolean) Every activity category, resolved against its default.
+- `invites_skipped` (Number) Members the latest invite cycle could not invite.
+- `linked` (Boolean) Whether a Slack channel is linked.
+- `name` (String) Channel-name override; empty when there is none.
+- `notifications_enabled` (Boolean) Master switch for the project's Slack posts.
+- `provision_note` (String) Short note from the provision job.
+- `provision_status` (String) Outcome of the asynchronous provision.
+- `scopes_sufficient` (Boolean) Whether that connection has the channel scopes.

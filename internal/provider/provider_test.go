@@ -45,6 +45,7 @@ var liveReady = map[string]bool{
 	"error_alert_rule":   true,
 	"webhook":            true,
 	"self_healing":       true,
+	"slack_channel":      true,
 	"github_integration": true,
 }
 

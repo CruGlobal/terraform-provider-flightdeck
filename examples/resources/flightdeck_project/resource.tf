@@ -24,3 +24,23 @@ resource "flightdeck_project" "payments" {
     max_rollbacks_per_hour = 2
   }
 }
+
+# A project's Slack channel (project admins). Provisioning is asynchronous:
+# enabling the channel enqueues the job, and `channel_id` and
+# `provision_status` are filled in once it has run.
+resource "flightdeck_project" "support" {
+  name       = "Support"
+  identifier = "SUP"
+
+  slack_channel = {
+    enabled = true
+    name    = "team-support" # omit to use the project-name default
+
+    # Only the categories listed here are managed; the API merges them, so
+    # removing one leaves it as it is rather than restoring its default.
+    event_filter = {
+      logged        = true
+      field_changed = false
+    }
+  }
+}

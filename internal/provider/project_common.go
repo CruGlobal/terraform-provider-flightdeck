@@ -14,7 +14,10 @@ import (
 
 // toggleableFeatures are the project feature keys the API accepts on write —
 // the same allowlist the settings UI uses.
-// self_healing and slack are reported on read but are not settable here.
+// self_healing and slack are reported on read but are not settable here: both
+// are managed on their own endpoint, self-healing through the `self_healing`
+// block and the Slack notifications master switch as
+// `slack_channel.notifications_enabled`.
 var toggleableFeatures = []string{
 	"cycles", "modules", "milestones", "views", "pages", "meeting_notes",
 	"decisions", "intake", "errors", "incidents", "estimates",
@@ -40,6 +43,7 @@ type projectModel struct {
 	Network            types.String `tfsdk:"network"`
 	LockVersion        types.Int64  `tfsdk:"lock_version"`
 	SelfHealing        types.Object `tfsdk:"self_healing"`
+	SlackChannel       types.Object `tfsdk:"slack_channel"`
 }
 
 // featureKeyFilter says which feature keys to keep when mapping the API's
@@ -60,8 +64,9 @@ const (
 )
 
 // projectToModel maps an API project into state. prior supplies the feature
-// keys to keep when filter is featuresFromPrior. The self_healing block is
-// filled separately (see selfHealingToObject); it starts null here.
+// keys to keep when filter is featuresFromPrior. The self_healing and
+// slack_channel blocks travel on their own endpoints and are filled
+// separately; they start null here.
 func projectToModel(ctx context.Context, p *client.Project, prior *projectModel, filter featureKeyFilter, diags *diag.Diagnostics) projectModel {
 	m := projectModel{
 		ID:                 types.Int64Value(p.ID),
@@ -75,6 +80,7 @@ func projectToModel(ctx context.Context, p *client.Project, prior *projectModel,
 		Network:            types.StringNull(),
 		LockVersion:        types.Int64Value(p.LockVersion),
 		SelfHealing:        types.ObjectNull(selfHealingAttrTypes),
+		SlackChannel:       types.ObjectNull(slackChannelAttrTypes),
 	}
 	if p.LeadID != nil {
 		m.LeadID = types.Int64Value(*p.LeadID)

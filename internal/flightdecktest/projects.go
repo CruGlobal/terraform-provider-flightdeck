@@ -16,11 +16,20 @@ var DefaultFeatures = map[string]bool{
 	"errors": false, "incidents": false, "self_healing": false, "slack": true,
 }
 
-// ToggleableFeatures are the feature keys the API
-// accepts on write. self_healing and slack are deliberately absent.
+// ToggleableFeatures are the feature keys the API accepts on write.
+// self_healing and slack are deliberately absent: both are settable, each on
+// its own endpoint (see self_healing.go and slack_channel.go).
 var ToggleableFeatures = []string{
 	"cycles", "modules", "milestones", "views", "pages", "meeting_notes",
 	"decisions", "intake", "errors", "incidents", "estimates",
+}
+
+// featuresElsewhere are feature keys that ARE settable, just not here: naming
+// the endpoint beats "unknown feature", which would be a lie for a key the
+// read reports.
+var featuresElsewhere = map[string]string{
+	"slack":        "PATCH /api/v1/projects/:id/slack-channel as slack_notifications_enabled, with the rest of the project's Slack configuration",
+	"self_healing": "PATCH /api/v1/projects/:id/self-healing, with the rest of the project's self-healing configuration",
 }
 
 var identifierFormat = regexp.MustCompile(`^[A-Z][A-Z0-9]{0,9}$`)
@@ -40,8 +49,18 @@ type Project struct {
 	Network            string
 	// SelfHealing holds the stored jsonb overrides; reads resolve defaults.
 	SelfHealing map[string]any
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// Slack channel configuration, all on the project row (see
+	// slack_channel.go). SlackEventFilter holds the stored overrides only, and
+	// the notifications master switch is the "slack" key of Features.
+	SlackChannelEnabled  bool
+	SlackChannelName     string
+	SlackChannelID       string
+	SlackProvisionStatus string
+	SlackProvisionNote   string
+	SlackInvitesSkipped  int64
+	SlackEventFilter     map[string]bool
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 	// Deleting mirrors projects.deleting_at: the row still exists but every
 	// /api/v1 lookup goes through .not_deleting and 404s.
 	Deleting bool
@@ -273,11 +292,22 @@ func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, strin
 		if !isMap {
 			return http.StatusUnprocessableEntity, "invalid_attribute", "features must be an object of key => boolean"
 		}
-		var unknown []string
+		var unknown, elsewhere []string
 		for k := range submitted {
-			if !contains(ToggleableFeatures, k) {
+			switch {
+			case featuresElsewhere[k] != "":
+				elsewhere = append(elsewhere, k)
+			case !contains(ToggleableFeatures, k):
 				unknown = append(unknown, k)
 			}
+		}
+		if len(elsewhere) > 0 {
+			sort.Strings(elsewhere)
+			reasons := make([]string, 0, len(elsewhere))
+			for _, k := range elsewhere {
+				reasons = append(reasons, "the "+k+" feature is not settable here — write it at "+featuresElsewhere[k])
+			}
+			return http.StatusUnprocessableEntity, "invalid_attribute", strings.Join(reasons, "; ")
 		}
 		if len(unknown) > 0 {
 			sort.Strings(unknown)

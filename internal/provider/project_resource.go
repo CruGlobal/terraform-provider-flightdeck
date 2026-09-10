@@ -90,8 +90,10 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"features": schema.MapAttribute{
 				MarkdownDescription: "Feature toggles to manage, as a map of feature key to boolean. Only the keys listed here " +
 					"are managed; keys you leave out keep whatever value the project has. Settable keys: `" +
-					strings.Join(toggleableFeatures, "`, `") + "`. (`self_healing` and `slack` are reported by the " +
-					"`flightdeck_project` data source but cannot be set through the API.)",
+					strings.Join(toggleableFeatures, "`, `") + "`. `self_healing` and `slack` are reported by the " +
+					"`flightdeck_project` data source and refused here, because each is settable on its own endpoint: " +
+					"self-healing through the `self_healing` block, and `slack` — the Slack notifications master switch — " +
+					"as `slack_channel.notifications_enabled`.",
 				ElementType: types.BoolType,
 				Optional:    true,
 				Validators: []validator.Map{
@@ -125,11 +127,13 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"lock_version": schema.Int64Attribute{
-				MarkdownDescription: "Optimistic-locking version the API bumps on every change (including self-healing writes). " +
+				MarkdownDescription: "Optimistic-locking version the API bumps on every change (including self-healing and " +
+					"Slack channel writes). " +
 					"Sent as `If-Match` on updates.",
 				Computed: true,
 			},
-			"self_healing": selfHealingSchema(),
+			"self_healing":  selfHealingSchema(),
+			"slack_channel": slackChannelSchema(),
 		},
 	}
 }
@@ -166,9 +170,12 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	reconcileFeatures(ctx, &state, &plan, &resp.Diagnostics)
 	block, lockVersion := writeSelfHealing(ctx, r.client, created.ID, config.SelfHealing, created.LockVersion, &resp.Diagnostics)
 	state.SelfHealing = block
+	slack, lockVersion := writeSlackChannel(ctx, r.client, created.ID, config.SlackChannel, plan.SlackChannel,
+		types.ObjectNull(slackChannelAttrTypes), lockVersion, &resp.Diagnostics)
+	state.SlackChannel = slack
 	state.LockVersion = types.Int64Value(lockVersion)
-	// The project is created even if the self-healing write failed; record it so
-	// the next apply reconciles rather than creating a duplicate.
+	// The project is created even if a block's write failed; record it so the
+	// next apply reconciles rather than creating a duplicate.
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -193,6 +200,8 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 
 	newState := projectToModel(ctx, p, &state, featuresFromPrior, &resp.Diagnostics)
 	newState.SelfHealing = readSelfHealing(ctx, r.client, p.ID, &resp.Diagnostics)
+	newState.SlackChannel = readSlackChannel(ctx, r.client, p.ID,
+		slackEventFilterOf(ctx, state.SlackChannel, &resp.Diagnostics), slackEventsManaged, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
 }
 
@@ -227,10 +236,13 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	newState := projectToModel(ctx, updated, &plan, featuresFromPrior, &resp.Diagnostics)
 	reconcileFeatures(ctx, &newState, &plan, &resp.Diagnostics)
-	// The self-healing write pins the lock_version the project PATCH just
-	// produced and bumps it again; the state keeps the final value.
+	// Each block's write pins the lock_version the previous call produced and
+	// bumps it again; the state keeps the final value.
 	block, lockVersion := writeSelfHealing(ctx, r.client, id, config.SelfHealing, updated.LockVersion, &resp.Diagnostics)
 	newState.SelfHealing = block
+	slack, lockVersion := writeSlackChannel(ctx, r.client, id, config.SlackChannel, plan.SlackChannel,
+		state.SlackChannel, lockVersion, &resp.Diagnostics)
+	newState.SlackChannel = slack
 	newState.LockVersion = types.Int64Value(lockVersion)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
 }
@@ -276,6 +288,9 @@ func (r *projectResource) ImportState(ctx context.Context, req resource.ImportSt
 
 	state := projectToModel(ctx, p, nil, featuresToggleable, &resp.Diagnostics)
 	state.SelfHealing = readSelfHealing(ctx, r.client, p.ID, &resp.Diagnostics)
+	// No prior configuration to defer to, so no event categories are managed;
+	// list the ones you want in `slack_channel.event_filter` afterwards.
+	state.SlackChannel = readSlackChannel(ctx, r.client, p.ID, types.MapNull(types.BoolType), slackEventsManaged, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 

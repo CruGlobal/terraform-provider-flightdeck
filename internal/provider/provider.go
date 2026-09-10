@@ -154,6 +154,7 @@ func (p *flightdeckProvider) DataSources(_ context.Context) []func() datasource.
 	return []func() datasource.DataSource{
 		NewProjectDataSource,
 		NewStatesDataSource,
+		NewWorkspaceMemberDataSource,
 	}
 }
 

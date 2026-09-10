@@ -23,8 +23,9 @@ var protoV6ProviderFactories = map[string]func() (tfprotov6.ProviderServer, erro
 // projects). Otherwise they run against the in-process fake.
 const (
 	// The numeric user id of another workspace member, for the project_member
-	// tests. A user id rather than an email: the API has no member directory
-	// route to resolve one.
+	// tests. A user id rather than an email so the tests do not depend on a
+	// particular address; the flightdeck_workspace_member data source is what
+	// resolves one, and its own live test reads the address off a membership.
 	envAccMemberUserID = "FLIGHTDECK_ACC_MEMBER_USER_ID"
 	// Optional: an owner/repo the workspace's GitHub App can reach, for the
 	// managed-mode flightdeck_github_integration tests. Unset, those tests skip
@@ -47,6 +48,7 @@ var liveReady = map[string]bool{
 	"self_healing":       true,
 	"slack_channel":      true,
 	"github_integration": true,
+	"workspace_member":   true,
 }
 
 // testEnv is what a test needs to point the provider at a backend.

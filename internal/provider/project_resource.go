@@ -101,8 +101,9 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				},
 			},
 			"lead_id": schema.Int64Attribute{
-				MarkdownDescription: "User id of the project lead; must be a workspace member. Defaults to the token's user " +
-					"on create. When unset, the current lead is kept.",
+				MarkdownDescription: "User id of the project lead; must be a workspace member, and a " +
+					"`flightdeck_workspace_member` data source resolves one from an email address. Defaults to the " +
+					"token's user on create. When unset, the current lead is kept.",
 				Optional:      true,
 				Computed:      true,
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},

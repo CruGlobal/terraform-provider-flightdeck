@@ -3,7 +3,7 @@
 page_title: "flightdeck_project_member Resource - flightdeck"
 subcategory: ""
 description: |-
-  Manages a user's membership of a Flightdeck project — one membership row, addressed by its own id. The user must already be a member of the workspace; the API has no route to look a user up by email, so user_id is the numeric user id (visible in the workspace's member list).
+  Manages a user's membership of a Flightdeck project — one membership row, addressed by its own id. The user must already be a member of the workspace. user_id is the numeric user id; resolve it from an email address with a flightdeck_workspace_member data source rather than hard-coding it. The membership also reports the member's name and email.
   The role is one of the built-in roles (guest, member, admin, commenter) or a custom role key defined by the workspace's permission scheme; the API rejects anything else. Changing user_id replaces the membership (the API refuses to move a row to another user).
   Reads and writes require administer_project on the project. The user who created a project is written in as its admin automatically; managing that membership here requires importing it first.
   Import with <project_id>/<membership_id>, or <project_id>/user:<user_id> to look the membership up by user: terraform import flightdeck_project_member.deploy_bot 42/user:7.
@@ -11,7 +11,7 @@ description: |-
 
 # flightdeck_project_member (Resource)
 
-Manages a user's membership of a Flightdeck project — one membership row, addressed by its own id. The user must already be a member of the workspace; the API has no route to look a user up by email, so `user_id` is the numeric user id (visible in the workspace's member list).
+Manages a user's membership of a Flightdeck project — one membership row, addressed by its own id. The user must already be a member of the workspace. `user_id` is the numeric user id; resolve it from an email address with a `flightdeck_workspace_member` data source rather than hard-coding it. The membership also reports the member's `name` and `email`.
 
 The role is one of the built-in roles (`guest`, `member`, `admin`, `commenter`) or a custom role key defined by the workspace's permission scheme; the API rejects anything else. Changing `user_id` replaces the membership (the API refuses to move a row to another user).
 
@@ -27,11 +27,15 @@ resource "flightdeck_project" "app" {
   identifier = "APP"
 }
 
-# user_id is the workspace member's numeric id (the API has no route to look a
-# user up by email). Find it in the workspace's member list.
+# user_id is the workspace member's numeric id. Resolve it from an email
+# address rather than hard-coding it.
+data "flightdeck_workspace_member" "deploy_bot" {
+  email = "deploy-bot@example.com"
+}
+
 resource "flightdeck_project_member" "deploy_bot" {
   project_id = flightdeck_project.app.id
-  user_id    = 7
+  user_id    = data.flightdeck_workspace_member.deploy_bot.id
   role       = "member"
 }
 ```
@@ -43,13 +47,15 @@ resource "flightdeck_project_member" "deploy_bot" {
 
 - `project_id` (Number) Id of the project. Changing it replaces the membership.
 - `role` (String) Project role: a built-in (`guest`, `member`, `admin`, `commenter`) or a custom role key from the workspace's permission scheme.
-- `user_id` (Number) Id of the workspace member. Changing it replaces the membership.
+- `user_id` (Number) Id of the workspace member, which a `flightdeck_workspace_member` data source resolves from an email address. Changing it replaces the membership.
 
 ### Read-Only
 
 - `builtin_role` (String) The built-in role the membership rests on, which equals `role` unless a custom role key is assigned.
+- `email` (String) Email address of the member, reported by the API.
 - `id` (Number) Numeric id of the membership row (not the user).
 - `lock_version` (Number) Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates and deletes.
+- `name` (String) Display name of the member, reported by the API so a membership says who it is for.
 
 ## Import
 

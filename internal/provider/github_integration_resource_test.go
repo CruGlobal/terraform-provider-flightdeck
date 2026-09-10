@@ -81,7 +81,9 @@ func TestGithubIntegration_flightdeckManaged(t *testing.T) {
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttrPtr(ghRes, "id", &id),
 					resource.TestCheckResourceAttr(ghRes, "enabled", "false"),
-					resource.TestCheckResourceAttr(ghRes, "lock_version", "1"),
+					// Two writes so far: the create, and recording the id of the
+					// webhook it registered. This one makes three.
+					resource.TestCheckResourceAttr(ghRes, "lock_version", "2"),
 				),
 			},
 			{
@@ -334,7 +336,9 @@ func TestGithubIntegration_reEnablingMirrorsTheProjectColumn(t *testing.T) {
   enabled        = false`, repo)),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(ghRes, "enabled", "false"),
-					resource.TestCheckResourceAttr(ghRes, "lock_version", "1"),
+					// The create, the hook-id write-back, then the follow-up that
+					// applies the planned `enabled = false`.
+					resource.TestCheckResourceAttr(ghRes, "lock_version", "2"),
 				),
 			},
 			{

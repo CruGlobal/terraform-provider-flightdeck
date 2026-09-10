@@ -230,6 +230,13 @@ func (s *Server) createGithubIntegration(w http.ResponseWriter, r *http.Request)
 			}
 			// A hook already aimed at the receiver is skipped and not claimed.
 			g.WebhookRegistered = !s.githubIntegrations().hookPresent[strings.ToLower(repo)]
+			// Recording the hook's id is a SECOND write to the row, so a managed
+			// create that registers one leaves lock_version at 1 rather than 0.
+			// A caller-managed link, or one that declined to claim an existing
+			// hook, has nothing to record and stays at 0.
+			if g.WebhookRegistered {
+				g.LockVersion++
+			}
 		}
 		s.githubIntegrations().byID[g.ID] = g
 		// The column side effect: the project records the mapping.

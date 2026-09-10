@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.2.0...v0.3.0) (2026-09-10)
+
+
+### Added
+
+* manage a project's Slack channel ([#16](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/16)) ([33833a3](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/33833a3f784c1f986622d88c03377f6afc659e5d))
+* resolve workspace members by email ([#17](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/17)) ([b0e0c38](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/b0e0c3845e05c2049089fee246c6216a62077de0))
+
 ## [0.2.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.1.0...v0.2.0) (2026-09-04)
 
 

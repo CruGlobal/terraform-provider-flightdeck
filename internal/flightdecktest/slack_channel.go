@@ -110,13 +110,9 @@ const slackChannelMaxName = 80
 
 // normalizeSlackChannelName coerces arbitrary text into a Slack channel name:
 // trim, lower-case, runs of other characters become a single "-", no leading
-// or trailing "-", cut to the length cap.
-//
-// The trim runs BEFORE the cut, exactly as the API does it, so a cut landing
-// on a separator stores a name ending in "-". That is not a bug to fix here:
-// the provider's own copy of this rule trims again after the cut, because it
-// is a comparison key that has to be idempotent, and the difference between
-// the two is precisely what a name longer than the cap exercises.
+// or trailing "-", cut to the length cap. The API applies this lazily, to
+// DERIVE the basename — a written name is stored as typed — so the trim runs
+// before the cut and a derived name may end in "-".
 func normalizeSlackChannelName(source string) string {
 	var b strings.Builder
 	dash := false
@@ -153,6 +149,15 @@ func slackChannelBasename(p *Project) string {
 // filter MERGES rather than replacing, and a change to the effective name
 // drops the stored channel id so the next provision re-links.
 func (s *Server) applySlackChannel(p *Project, submitted map[string]any) (int, string, string) {
+	// An explicit null means "no opinion" on every key but the name, where it
+	// is a real instruction (reset to the project-name default). An unset
+	// optional serializes as null, so refusing it would leave a configuration
+	// no way to be correct.
+	for _, key := range []string{"slack_channel_enabled", "slack_notifications_enabled", "slack_event_filter"} {
+		if value, sent := submitted[key]; sent && value == nil {
+			delete(submitted, key)
+		}
+	}
 	var readOnly, unknown []string
 	for k := range submitted {
 		switch {
@@ -208,14 +213,18 @@ func (s *Server) applySlackChannel(p *Project, submitted map[string]any) (int, s
 			if !isString {
 				return http.StatusUnprocessableEntity, "invalid_attribute", "slack_channel_name must be a string"
 			}
-			if strings.TrimSpace(raw) == "" {
+			trimmed := strings.TrimSpace(raw)
+			switch {
+			case trimmed == "":
 				p.SlackChannelName = "" // blank resets to the project-name default
-			} else if name := normalizeSlackChannelName(raw); name == "" {
+			case normalizeSlackChannelName(trimmed) == "":
 				return http.StatusUnprocessableEntity, "invalid_attribute",
 					"slack_channel_name " + asString(v) + " normalizes to an empty Slack channel name — it needs at least " +
 						"one letter or digit (send null to use the project-name default)"
-			} else {
-				p.SlackChannelName = name
+			default:
+				// Stored as typed: the derivation happens lazily, at provision
+				// time, and is visible on the read as slack_channel_basename.
+				p.SlackChannelName = trimmed
 			}
 		}
 	}
@@ -254,6 +263,29 @@ func (s *Server) applySlackChannel(p *Project, submitted map[string]any) (int, s
 		p.SlackChannelID = ""
 	}
 	return 0, "", ""
+}
+
+// slackChannelChanged reports whether the write touched anything the Slack
+// channel resource owns, standing in for the saved_changes check the API makes.
+func slackChannelChanged(before, after *Project) bool {
+	// The features entry is compared by what is STORED, presence included: the
+	// column changing from "no opinion" to an explicit value is a change even
+	// when the value matches the default it was resolving to.
+	beforeSlack, beforeStored := before.Features["slack"]
+	afterSlack, afterStored := after.Features["slack"]
+	if before.SlackChannelEnabled != after.SlackChannelEnabled ||
+		before.SlackChannelName != after.SlackChannelName ||
+		before.SlackChannelID != after.SlackChannelID ||
+		beforeStored != afterStored || beforeSlack != afterSlack ||
+		len(before.SlackEventFilter) != len(after.SlackEventFilter) {
+		return true
+	}
+	for category, on := range after.SlackEventFilter {
+		if before.SlackEventFilter[category] != on {
+			return true
+		}
+	}
+	return false
 }
 
 // enqueueSlackProvision mirrors the model's enqueue: it no-ops when the
@@ -387,11 +419,16 @@ func (s *Server) updateSlackChannel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, code, msg)
 		return
 	}
-	candidate.LockVersion++
-	*p = candidate
-	// The write saves the configuration and enqueues the job; the channel is
-	// created and linked afterwards.
-	s.enqueueSlackProvision(p)
+	// A write that changes nothing saves nothing, so it neither bumps the
+	// lock_version nor re-enqueues provisioning — which would otherwise stamp
+	// a channel still waiting to be linked back to "queued" and lose a
+	// terminal failure note. The empty body this endpoint blesses is exactly
+	// that case.
+	if changed := slackChannelChanged(p, &candidate); changed {
+		candidate.LockVersion++
+		*p = candidate
+		s.enqueueSlackProvision(p)
+	}
 	writeJSON(w, http.StatusOK, s.serializeSlackChannel(p))
 }
 

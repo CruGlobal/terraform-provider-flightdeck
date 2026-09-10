@@ -73,11 +73,12 @@ func TestProjectSlackChannel_configurationRoundTrip(t *testing.T) {
 	})
 }
 
-// longChannelName is 84 characters, so the API's 80-character cut lands on the
-// separator before "tail" and the stored name ends in a dash.
+// longChannelName is 84 characters, so the 80-character cut the API applies
+// when it DERIVES a channel name lands on the separator before "tail". The
+// name itself is stored whole.
 var longChannelName = strings.Repeat("a", 79) + " tail"
 
-func TestProjectSlackChannel_nameIsNormalizedAndResettable(t *testing.T) {
+func TestProjectSlackChannel_nameIsStoredAsTypedAndResettable(t *testing.T) {
 	env := newTestEnv(t, "slack_channel")
 	identifier := randIdentifier()
 	named := projectConfig(env, identifier, `
@@ -90,9 +91,10 @@ func TestProjectSlackChannel_nameIsNormalizedAndResettable(t *testing.T) {
 			{
 				Config: named,
 				Check: resource.ComposeAggregateTestCheckFunc(
-					// The server stores the normalized name; state keeps the
-					// spelling that was configured.
+					// Stored as typed, so the read is a fixed point of the write;
+					// only the padding the server trims is absorbed here.
 					resource.TestCheckResourceAttr(projectRes, "slack_channel.name", "  My Team Channel!  "),
+					// The Slack-legal name is derived from it, and reported apart.
 					resource.TestCheckResourceAttr(projectRes, "slack_channel.basename", "my-team-channel"),
 				),
 			},
@@ -124,10 +126,8 @@ func TestProjectSlackChannel_nameIsNormalizedAndResettable(t *testing.T) {
 				),
 			},
 			{
-				// A name past the 80-character cap, cut where a separator falls:
-				// the server stores one ending in `-`, which is not what
-				// normalizing the configured spelling produces. The apply has to
-				// settle on the configured value all the same.
+				// A name past the cap: it is stored whole, and only the derived
+				// name is cut — here on a separator, so `basename` ends in `-`.
 				Config: projectConfig(env, identifier, fmt.Sprintf(`
   name = "Slack naming"
   slack_channel = {
@@ -135,7 +135,7 @@ func TestProjectSlackChannel_nameIsNormalizedAndResettable(t *testing.T) {
   }`, longChannelName)),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(projectRes, "slack_channel.name", longChannelName),
-					resource.TestCheckResourceAttr(projectRes, "slack_channel.basename", strings.Repeat("a", 79)),
+					resource.TestCheckResourceAttr(projectRes, "slack_channel.basename", strings.Repeat("a", 79)+"-"),
 				),
 			},
 			{
@@ -150,7 +150,7 @@ func TestProjectSlackChannel_nameIsNormalizedAndResettable(t *testing.T) {
 	})
 }
 
-func TestProjectSlackChannel_nameThatNormalizesToNothing(t *testing.T) {
+func TestProjectSlackChannel_nameThatDerivesToNothing(t *testing.T) {
 	env := newTestEnv(t, "slack_channel")
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
@@ -160,7 +160,7 @@ func TestProjectSlackChannel_nameThatNormalizesToNothing(t *testing.T) {
   slack_channel = {
     name = "!!!"
   }`),
-				ExpectError: regexMust(`normalizes to an empty Slack channel name`),
+				ExpectError: regexMust(`empty Slack channel name`),
 			},
 		},
 	})
@@ -662,29 +662,23 @@ func TestProjectSlackChannel_endpointAbsent(t *testing.T) {
 	})
 }
 
-func TestNormalizeSlackChannelName(t *testing.T) {
-	cases := map[string]string{
-		"  My Team Channel!  ":  "my-team-channel",
-		"team-web":              "team-web",
-		"STAY":                  "stay",
-		"fd-Web  Redesign":      "fd-web-redesign",
-		"--edges--":             "edges",
-		"!!!":                   "",
-		"":                      "",
-		"   ":                   "",
-		strings.Repeat("a", 90): strings.Repeat("a", 80),
-		// The cut lands on the separator, and the dash it would leave behind is
-		// trimmed: this is the key both sides of a comparison go through, so it
-		// has to be idempotent even where the server's stored name is not.
-		longChannelName: strings.Repeat("a", 79),
+func TestSlackChannelNameDerivesToNothing(t *testing.T) {
+	cases := map[string]bool{
+		"Release Eng":          false,
+		"team-web":             false,
+		"7":                    false,
+		"  My Team Channel!  ": false,
+		"!!!":                  true,
+		"---":                  true,
+		"":                     true,
+		"   ":                  true,
+		// Not ASCII alphanumeric once lower-cased, so the API derives nothing
+		// from it either.
+		"ÉÉÉ": true,
 	}
 	for input, want := range cases {
-		got := normalizeSlackChannelName(input)
-		if got != want {
-			t.Errorf("normalizeSlackChannelName(%q) = %q, want %q", input, got, want)
-		}
-		if again := normalizeSlackChannelName(got); again != got {
-			t.Errorf("normalizeSlackChannelName is not idempotent for %q: %q then %q", input, got, again)
+		if got := slackChannelNameDerivesToNothing(input); got != want {
+			t.Errorf("slackChannelNameDerivesToNothing(%q) = %t, want %t", input, got, want)
 		}
 	}
 }
@@ -697,10 +691,13 @@ func TestSlackChannelNameSemanticEquality(t *testing.T) {
 		a, b slackChannelNameValue
 		want bool
 	}{
-		{name("My Team!"), name("my-team"), true},
-		{name("STAY"), name("stay"), true},
-		{name("team-web"), name("team-ops"), false},
+		// The trim is the only liberty the server takes with a name…
+		{name("  Release Eng  "), name("Release Eng"), true},
 		{slackChannelNameValue{StringValue: types.StringNull()}, name("  "), true},
+		// …so two spellings that derive to one channel are still two names.
+		{name("Release Eng"), name("release-eng"), false},
+		{name("STAY"), name("stay"), false},
+		{name("team-web"), name("team-ops"), false},
 		{slackChannelNameValue{StringValue: types.StringNull()}, name("team-web"), false},
 	}
 	for _, tc := range cases {

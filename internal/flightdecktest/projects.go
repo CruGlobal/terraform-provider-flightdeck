@@ -28,7 +28,8 @@ var ToggleableFeatures = []string{
 // the endpoint beats "unknown feature", which would be a lie for a key the
 // read reports.
 var featuresElsewhere = map[string]string{
-	"slack": "PATCH /api/v1/projects/:id/slack-channel as slack_notifications_enabled, with the rest of the project's Slack configuration",
+	"slack":        "PATCH /api/v1/projects/:id/slack-channel as slack_notifications_enabled, with the rest of the project's Slack configuration",
+	"self_healing": "PATCH /api/v1/projects/:id/self-healing, with the rest of the project's self-healing configuration",
 }
 
 var identifierFormat = regexp.MustCompile(`^[A-Z][A-Z0-9]{0,9}$`)

@@ -43,9 +43,11 @@ import (
 //     API: only the categories a write names change. So event_filter declares
 //     OVERRIDES, not the full set — dropping a category from the map stops
 //     managing it at its current value rather than restoring its default.
-//   - THE CHANNEL NAME IS NORMALIZED on write ("My Team!" comes back as
-//     my-team), so `name` carries a semantic-equality type: a configured
-//     spelling survives the round trip instead of diffing forever.
+//   - THE CHANNEL NAME IS STORED AS TYPED, trimmed and no more: "Release Eng"
+//     comes back as "Release Eng", and the Slack-legal form derived from it is
+//     reported separately as `basename`. `name` carries a semantic-equality
+//     type only to absorb that trim, so surrounding whitespace in a
+//     configuration is not a perpetual diff.
 //
 // Every attribute here is Optional+Computed or Computed, never Optional
 // alone: dropping the block from a configuration nulls an Optional-only
@@ -140,13 +142,14 @@ func slackChannelSchema() schema.Attribute {
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "Channel name to use instead of the project-name default. Flightdeck normalizes it to " +
-					"Slack's rules (lower case, runs of other characters become `-`, at most 80 characters), so `My Team!` " +
-					"is stored as `my-team`; the configured spelling is kept in state and does not diff. When unset the " +
-					"project's current value is kept, so **set it to `\"\"` to clear an override** and fall back to the " +
-					"project-name default — removing the attribute leaves whatever is there. Empty means no override, " +
-					"which is what `basename` then reports. Changing the effective name drops the stored `channel_id` so " +
-					"the next provision links the new channel; the old one is left on Slack.",
+				MarkdownDescription: "Channel name to use instead of the project-name default, stored as you write it " +
+					"(Flightdeck only trims surrounding whitespace, which is why that whitespace is not a diff). The " +
+					"Slack-legal name derived from it — lower case, runs of other characters collapsed to `-`, at most 80 " +
+					"characters — is reported as `basename`, so `Release Eng` here means channel `release-eng`. A name with " +
+					"no letter or digit is refused, since it would derive to nothing. When unset the project's current " +
+					"value is kept, so **set it to `\"\"` to clear an override** and fall back to the project-name default " +
+					"— removing the attribute leaves whatever is there. Changing the derived name drops the stored " +
+					"`channel_id` so the next provision links the new channel; the old one is left on Slack.",
 				Optional:      true,
 				Computed:      true,
 				CustomType:    slackChannelNameType{},
@@ -258,10 +261,10 @@ func slackChannelWriteNeeded(ctx context.Context, config, state types.Object, di
 	if !cfg.NotificationsEnabled.IsNull() && !cfg.NotificationsEnabled.IsUnknown() && !cfg.NotificationsEnabled.Equal(st.NotificationsEnabled) {
 		return true
 	}
-	// Compared by effective name, so a spelling the server normalizes is not a
-	// change; a configured "" against a stored override is.
+	// Compared on the trim the server applies, so padding is not a change; a
+	// configured "" against a stored override is.
 	if !cfg.Name.IsNull() && !cfg.Name.IsUnknown() &&
-		normalizeSlackChannelName(cfg.Name.ValueString()) != normalizeSlackChannelName(st.Name.ValueString()) {
+		strings.TrimSpace(cfg.Name.ValueString()) != strings.TrimSpace(st.Name.ValueString()) {
 		return true
 	}
 	if cfg.EventFilter.IsNull() || cfg.EventFilter.IsUnknown() {
@@ -527,46 +530,21 @@ func slackChannelProvisioningWarnings(sc *client.SlackChannel, diags *diag.Diagn
 	}
 }
 
-// normalizeSlackChannelName is the key both sides of a name comparison go
-// through: trim, lower-case, collapse every run of other characters into a
-// single `-`, drop leading and trailing `-`, and cut to 80 characters. Blank
-// input normalizes to "", which is how both sides spell "no override, use the
-// project-name default".
-//
-// It has to be IDEMPOTENT, because one side of the comparison is a name the
-// server has already normalized. The server trims and then cuts, so a cut
-// landing on a separator leaves a trailing `-` in what it stores; trimming
-// again after the cut here is what makes f(f(x)) == f(x) and keeps a name
-// longer than the cap from failing the apply with an inconsistent result.
-// This is deliberately not a prediction of the stored value — see the copy in
-// the fake, which models the server exactly.
-func normalizeSlackChannelName(source string) string {
-	var b strings.Builder
-	b.Grow(len(source))
-	dash := false
-	for _, r := range strings.ToLower(strings.TrimSpace(source)) {
+// slackChannelNameDerivesToNothing reports whether the API would refuse a
+// name. Flightdeck derives the Slack channel name by lower-casing and turning
+// every run of other characters into "-", so a name carrying no letter or
+// digit derives to nothing at all — the one thing it will not store.
+func slackChannelNameDerivesToNothing(name string) bool {
+	for _, r := range strings.ToLower(name) {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			b.WriteRune(r)
-			dash = false
-			continue
-		}
-		if !dash {
-			b.WriteByte('-')
-			dash = true
+			return false
 		}
 	}
-	normalized := strings.Trim(b.String(), "-")
-	if len(normalized) > slackChannelMaxName {
-		normalized = strings.Trim(normalized[:slackChannelMaxName], "-")
-	}
-	return normalized
+	return true
 }
 
-// slackChannelMaxName is the API's channel-name length cap.
-const slackChannelMaxName = 80
-
-// slackChannelNameValidator refuses a name that normalizes to nothing, which
-// the API answers with a 422. Blank is fine: it is the reset.
+// slackChannelNameValidator refuses a name that derives to nothing, which the
+// API answers with a 422. Blank is fine: it is the reset.
 type slackChannelNameValidator struct{}
 
 func (slackChannelNameValidator) Description(context.Context) string {
@@ -582,19 +560,19 @@ func (slackChannelNameValidator) ValidateString(_ context.Context, req validator
 		return
 	}
 	name := req.ConfigValue.ValueString()
-	if strings.TrimSpace(name) == "" || normalizeSlackChannelName(name) != "" {
+	if strings.TrimSpace(name) == "" || !slackChannelNameDerivesToNothing(name) {
 		return
 	}
 	resp.Diagnostics.AddAttributeError(req.Path, "Invalid Slack channel name",
-		fmt.Sprintf("%q normalizes to an empty Slack channel name; it needs at least one letter or digit. "+
+		fmt.Sprintf("%q derives to an empty Slack channel name; it needs at least one letter or digit. "+
 			"Omit the attribute to use the project-name default.", name))
 }
 
-// slackChannelNameType is a string type whose values compare by the channel
-// they name rather than by spelling: `My Team!`, `my-team` and ` My  Team ! `
-// all name #my-team. The server stores the normalized form, so a configured
-// spelling reads back as equal to itself and no perpetual diff appears — the
-// same arrangement hexColorType uses for colours.
+// slackChannelNameType is a string type whose values compare after trimming,
+// which is the one liberty the server takes with a channel name: it stores
+// what you wrote, minus surrounding whitespace. Everything else about the
+// spelling is significant, because two names that derive to the same Slack
+// channel are still two different stored names.
 type slackChannelNameType struct {
 	basetypes.StringType
 }
@@ -643,9 +621,9 @@ func (v slackChannelNameValue) Equal(o attr.Value) bool {
 	return v.StringValue.Equal(other.StringValue)
 }
 
-// StringSemanticEquals treats two names as equal when they normalize to the
-// same channel. A null and a blank name are equal too: both mean "no
-// override", which the API reports back as null.
+// StringSemanticEquals treats two names as equal when they are equal once
+// trimmed. A null and a blank name are equal too: both mean "no override",
+// which the API reports back as null.
 func (v slackChannelNameValue) StringSemanticEquals(_ context.Context, other basetypes.StringValuable) (bool, diag.Diagnostics) {
 	o, ok := other.(slackChannelNameValue)
 	if !ok {
@@ -654,5 +632,5 @@ func (v slackChannelNameValue) StringSemanticEquals(_ context.Context, other bas
 	if v.IsUnknown() || o.IsUnknown() {
 		return v.StringValue.Equal(o.StringValue), nil
 	}
-	return normalizeSlackChannelName(v.ValueString()) == normalizeSlackChannelName(o.ValueString()), nil
+	return strings.TrimSpace(v.ValueString()) == strings.TrimSpace(o.ValueString()), nil
 }

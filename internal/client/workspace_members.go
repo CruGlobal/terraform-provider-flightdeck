@@ -21,15 +21,7 @@ type WorkspaceMember struct {
 	Kind  string `json:"kind"`
 }
 
-// WorkspaceMemberKinds are the values Kind takes.
-var WorkspaceMemberKinds = []string{"human", "service"}
-
 const workspaceMembersPath = "/workspace-members"
-
-// ListWorkspaceMembers returns the workspace's directory, ordered by name.
-func (c *Client) ListWorkspaceMembers(ctx context.Context) ([]WorkspaceMember, error) {
-	return List[WorkspaceMember](ctx, c, workspaceMembersPath)
-}
 
 // FindWorkspaceMembersByEmail returns the members whose email address is
 // exactly email. The filter is an exact match — the API normalizes case and

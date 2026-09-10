@@ -111,6 +111,12 @@ const slackChannelMaxName = 80
 // normalizeSlackChannelName coerces arbitrary text into a Slack channel name:
 // trim, lower-case, runs of other characters become a single "-", no leading
 // or trailing "-", cut to the length cap.
+//
+// The trim runs BEFORE the cut, exactly as the API does it, so a cut landing
+// on a separator stores a name ending in "-". That is not a bug to fix here:
+// the provider's own copy of this rule trims again after the cut, because it
+// is a comparison key that has to be idempotent, and the difference between
+// the two is precisely what a name longer than the cap exercises.
 func normalizeSlackChannelName(source string) string {
 	var b strings.Builder
 	dash := false

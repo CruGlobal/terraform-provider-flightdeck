@@ -73,6 +73,10 @@ func TestProjectSlackChannel_configurationRoundTrip(t *testing.T) {
 	})
 }
 
+// longChannelName is 84 characters, so the API's 80-character cut lands on the
+// separator before "tail" and the stored name ends in a dash.
+var longChannelName = strings.Repeat("a", 79) + " tail"
+
 func TestProjectSlackChannel_nameIsNormalizedAndResettable(t *testing.T) {
 	env := newTestEnv(t, "slack_channel")
 	identifier := randIdentifier()
@@ -118,6 +122,29 @@ func TestProjectSlackChannel_nameIsNormalizedAndResettable(t *testing.T) {
 					resource.TestCheckResourceAttr(projectRes, "slack_channel.name", ""),
 					resource.TestCheckResourceAttr(projectRes, "slack_channel.basename", "fd-slack-naming"),
 				),
+			},
+			{
+				// A name past the 80-character cap, cut where a separator falls:
+				// the server stores one ending in `-`, which is not what
+				// normalizing the configured spelling produces. The apply has to
+				// settle on the configured value all the same.
+				Config: projectConfig(env, identifier, fmt.Sprintf(`
+  name = "Slack naming"
+  slack_channel = {
+    name = %q
+  }`, longChannelName)),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "slack_channel.name", longChannelName),
+					resource.TestCheckResourceAttr(projectRes, "slack_channel.basename", strings.Repeat("a", 79)),
+				),
+			},
+			{
+				Config: projectConfig(env, identifier, fmt.Sprintf(`
+  name = "Slack naming"
+  slack_channel = {
+    name = %q
+  }`, longChannelName)),
+				PlanOnly: true,
 			},
 		},
 	})
@@ -646,10 +673,18 @@ func TestNormalizeSlackChannelName(t *testing.T) {
 		"":                      "",
 		"   ":                   "",
 		strings.Repeat("a", 90): strings.Repeat("a", 80),
+		// The cut lands on the separator, and the dash it would leave behind is
+		// trimmed: this is the key both sides of a comparison go through, so it
+		// has to be idempotent even where the server's stored name is not.
+		longChannelName: strings.Repeat("a", 79),
 	}
 	for input, want := range cases {
-		if got := normalizeSlackChannelName(input); got != want {
+		got := normalizeSlackChannelName(input)
+		if got != want {
 			t.Errorf("normalizeSlackChannelName(%q) = %q, want %q", input, got, want)
+		}
+		if again := normalizeSlackChannelName(got); again != got {
+			t.Errorf("normalizeSlackChannelName is not idempotent for %q: %q then %q", input, got, again)
 		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	datasourceschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -206,25 +207,25 @@ func slackChannelSchema() schema.Attribute {
 }
 
 // slackChannelDataSourceSchema is the read-only view for the data source.
-func slackChannelDataSourceSchema() schema.Attribute {
-	return schema.SingleNestedAttribute{
+func slackChannelDataSourceSchema() datasourceschema.Attribute {
+	return datasourceschema.SingleNestedAttribute{
 		MarkdownDescription: "Per-project Slack channel configuration, read from the project's `slack-channel` API " +
 			"resource. Null unless the token's user administers the project and the Flightdeck version exposes the " +
 			"endpoint. `event_filter` reports every category resolved against its default.",
 		Computed: true,
-		Attributes: map[string]schema.Attribute{
-			"enabled":               schema.BoolAttribute{MarkdownDescription: "Whether the project gets its own Slack channel.", Computed: true},
-			"notifications_enabled": schema.BoolAttribute{MarkdownDescription: "Master switch for the project's Slack posts.", Computed: true},
-			"name":                  schema.StringAttribute{MarkdownDescription: "Channel-name override; empty when there is none.", Computed: true},
-			"event_filter":          schema.MapAttribute{MarkdownDescription: "Every activity category, resolved against its default.", ElementType: types.BoolType, Computed: true},
-			"available":             schema.BoolAttribute{MarkdownDescription: "Whether the workspace has a connected Slack integration.", Computed: true},
-			"scopes_sufficient":     schema.BoolAttribute{MarkdownDescription: "Whether that connection has the channel scopes.", Computed: true},
-			"linked":                schema.BoolAttribute{MarkdownDescription: "Whether a Slack channel is linked.", Computed: true},
-			"channel_id":            schema.StringAttribute{MarkdownDescription: "Slack's id for the linked channel.", Computed: true},
-			"basename":              schema.StringAttribute{MarkdownDescription: "The effective channel name the provisioner uses.", Computed: true},
-			"provision_status":      schema.StringAttribute{MarkdownDescription: "Outcome of the asynchronous provision.", Computed: true},
-			"provision_note":        schema.StringAttribute{MarkdownDescription: "Short note from the provision job.", Computed: true},
-			"invites_skipped":       schema.Int64Attribute{MarkdownDescription: "Members the latest invite cycle could not invite.", Computed: true},
+		Attributes: map[string]datasourceschema.Attribute{
+			"enabled":               datasourceschema.BoolAttribute{MarkdownDescription: "Whether the project gets its own Slack channel.", Computed: true},
+			"notifications_enabled": datasourceschema.BoolAttribute{MarkdownDescription: "Master switch for the project's Slack posts.", Computed: true},
+			"name":                  datasourceschema.StringAttribute{MarkdownDescription: "Channel-name override; empty when there is none.", Computed: true},
+			"event_filter":          datasourceschema.MapAttribute{MarkdownDescription: "Every activity category, resolved against its default.", ElementType: types.BoolType, Computed: true},
+			"available":             datasourceschema.BoolAttribute{MarkdownDescription: "Whether the workspace has a connected Slack integration.", Computed: true},
+			"scopes_sufficient":     datasourceschema.BoolAttribute{MarkdownDescription: "Whether that connection has the channel scopes.", Computed: true},
+			"linked":                datasourceschema.BoolAttribute{MarkdownDescription: "Whether a Slack channel is linked.", Computed: true},
+			"channel_id":            datasourceschema.StringAttribute{MarkdownDescription: "Slack's id for the linked channel.", Computed: true},
+			"basename":              datasourceschema.StringAttribute{MarkdownDescription: "The effective channel name the provisioner uses.", Computed: true},
+			"provision_status":      datasourceschema.StringAttribute{MarkdownDescription: "Outcome of the asynchronous provision.", Computed: true},
+			"provision_note":        datasourceschema.StringAttribute{MarkdownDescription: "Short note from the provision job.", Computed: true},
+			"invites_skipped":       datasourceschema.Int64Attribute{MarkdownDescription: "Members the latest invite cycle could not invite.", Computed: true},
 		},
 	}
 }
@@ -526,10 +527,19 @@ func slackChannelProvisioningWarnings(sc *client.SlackChannel, diags *diag.Diagn
 	}
 }
 
-// normalizeSlackChannelName mirrors the API's rule: trim, lower-case, collapse
-// every run of other characters into a single `-`, drop leading and trailing
-// `-`, and cut to 80 characters. Blank input normalizes to "", which is how
-// both sides spell "no override, use the project-name default".
+// normalizeSlackChannelName is the key both sides of a name comparison go
+// through: trim, lower-case, collapse every run of other characters into a
+// single `-`, drop leading and trailing `-`, and cut to 80 characters. Blank
+// input normalizes to "", which is how both sides spell "no override, use the
+// project-name default".
+//
+// It has to be IDEMPOTENT, because one side of the comparison is a name the
+// server has already normalized. The server trims and then cuts, so a cut
+// landing on a separator leaves a trailing `-` in what it stores; trimming
+// again after the cut here is what makes f(f(x)) == f(x) and keeps a name
+// longer than the cap from failing the apply with an inconsistent result.
+// This is deliberately not a prediction of the stored value — see the copy in
+// the fake, which models the server exactly.
 func normalizeSlackChannelName(source string) string {
 	var b strings.Builder
 	b.Grow(len(source))
@@ -547,7 +557,7 @@ func normalizeSlackChannelName(source string) string {
 	}
 	normalized := strings.Trim(b.String(), "-")
 	if len(normalized) > slackChannelMaxName {
-		normalized = normalized[:slackChannelMaxName]
+		normalized = strings.Trim(normalized[:slackChannelMaxName], "-")
 	}
 	return normalized
 }

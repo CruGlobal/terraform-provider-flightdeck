@@ -36,6 +36,7 @@ type githubIntegrationModel struct {
 	ProjectID         types.Int64  `tfsdk:"project_id"`
 	RepoFullName      types.String `tfsdk:"repo_full_name"`
 	Enabled           types.Bool   `tfsdk:"enabled"`
+	CIFailureAction   types.String `tfsdk:"ci_failure_action"`
 	Secret            types.String `tfsdk:"secret"`
 	WebhookRegistered types.Bool   `tfsdk:"webhook_registered"`
 	LockVersion       types.Int64  `tfsdk:"lock_version"`
@@ -49,6 +50,7 @@ func githubIntegrationToModel(g *client.GithubIntegration, configuredSecret type
 		ProjectID:         types.Int64Value(g.ProjectID),
 		RepoFullName:      types.StringValue(g.RepoFullName),
 		Enabled:           types.BoolValue(g.Enabled),
+		CIFailureAction:   types.StringValue(g.CIFailureAction),
 		Secret:            configuredSecret,
 		WebhookRegistered: types.BoolValue(g.WebhookRegistered),
 		LockVersion:       types.Int64Value(g.LockVersion),
@@ -81,6 +83,8 @@ func (r *githubIntegrationResource) Schema(_ context.Context, _ resource.SchemaR
 			"never read back, and state holds only the value you configured; it must be at least 16 characters " +
 			"(a blank value counts as omitted). Changing `repo_full_name` or `secret` replaces the integration " +
 			"(unlink, then link again), since a webhook has to be torn down and another registered.\n\n" +
+			"A failed workflow run can also be turned into work — see `ci_failure_action`, which is `off` on a " +
+			"new integration, so `workflow_run` deliveries are accepted and dropped until it is set.\n\n" +
 			"Reading and writing this resource requires the token's user to be a **workspace admin** — stricter " +
 			"than the other project-scoped resources, because linking spends the workspace's GitHub App credential " +
 			"and aims the self-healing rollback loop. Import by numeric id: " +
@@ -111,6 +115,19 @@ func (r *githubIntegrationResource) Schema(_ context.Context, _ resource.SchemaR
 				Optional:      true,
 				Computed:      true,
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"ci_failure_action": schema.StringAttribute{
+				MarkdownDescription: "What a failed workflow run on the repository turns into: `off` (deliveries are " +
+					"accepted and dropped), `create_work_item` (one work item per repository, workflow and branch " +
+					"while the branch stays red) or `file_intake` (the same, parked as a pending intake request " +
+					"someone accepts first). A passing run resolves the open item whichever is set. New " +
+					"integrations are created `off`. When unset, the current value is kept — including one chosen " +
+					"on the Flightdeck settings page — so set it explicitly, even to `off`, for Terraform to own " +
+					"it; removing the line leaves the current value in place, and `off` is how you switch it back off.",
+				Optional:      true,
+				Computed:      true,
+				Validators:    []validator.String{stringvalidator.OneOf(client.GithubCIFailureActions...)},
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"secret": schema.StringAttribute{
 				MarkdownDescription: "Webhook signing secret for the caller-managed mode; at least 16 characters. Omit it " +
@@ -146,6 +163,12 @@ func (r *githubIntegrationResource) Create(ctx context.Context, req resource.Cre
 	// The API ignores `enabled` on create (a new integration is always
 	// enabled); a planned false is applied with a follow-up update below.
 	fields := client.Fields{"repo_full_name": plan.RepoFullName.ValueString()}
+	// `ci_failure_action`, unlike `enabled`, IS read on create and set before
+	// the row is written: no follow-up, and a refused value links nothing.
+	// Omitting it leaves the server default (`off`) in place.
+	if !plan.CIFailureAction.IsNull() && !plan.CIFailureAction.IsUnknown() {
+		fields["ci_failure_action"] = plan.CIFailureAction.ValueString()
+	}
 	// A blank secret is "omitted" (managed mode), as the API reads it.
 	if !plan.Secret.IsNull() && !plan.Secret.IsUnknown() && strings.TrimSpace(plan.Secret.ValueString()) != "" {
 		fields["secret"] = plan.Secret.ValueString()
@@ -213,6 +236,11 @@ func (r *githubIntegrationResource) Update(ctx context.Context, req resource.Upd
 	if !plan.Enabled.IsNull() && !plan.Enabled.IsUnknown() {
 		fields["enabled"] = plan.Enabled.ValueBool()
 	}
+	// Re-asserted on every write: the API keeps the current value when the key
+	// is absent, so only a sent key can undo a change made in the console.
+	if !plan.CIFailureAction.IsNull() && !plan.CIFailureAction.IsUnknown() {
+		fields["ci_failure_action"] = plan.CIFailureAction.ValueString()
+	}
 	updated, err := r.client.UpdateGithubIntegration(ctx, id, fields, state.LockVersion.ValueInt64())
 	if err != nil {
 		switch {
@@ -222,6 +250,8 @@ func (r *githubIntegrationResource) Update(ctx context.Context, req resource.Upd
 				current = &fresh.LockVersion
 			}
 			addStaleError(&resp.Diagnostics, fmt.Sprintf("GitHub integration for %s", state.RepoFullName.ValueString()), state.LockVersion.ValueInt64(), current, err)
+		case client.IsValidation(err) && strings.Contains(apiMessage(err), "ci_failure_action"):
+			resp.Diagnostics.AddAttributeError(pathRoot("ci_failure_action"), "Invalid CI failure action", apiMessage(err))
 		case client.IsValidation(err):
 			resp.Diagnostics.AddAttributeError(pathRoot("enabled"), "Cannot enable this integration", apiMessage(err))
 		default:

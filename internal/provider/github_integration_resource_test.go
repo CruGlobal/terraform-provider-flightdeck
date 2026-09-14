@@ -57,6 +57,8 @@ func TestGithubIntegration_flightdeckManaged(t *testing.T) {
 					resource.TestCheckResourceAttrSet(ghRes, "id"),
 					resource.TestCheckResourceAttr(ghRes, "repo_full_name", repo),
 					resource.TestCheckResourceAttr(ghRes, "enabled", "true"),
+					// A new integration files nothing until the action is chosen.
+					resource.TestCheckResourceAttr(ghRes, "ci_failure_action", "off"),
 					resource.TestCheckResourceAttr(ghRes, "webhook_registered", "true"),
 					resource.TestCheckNoResourceAttr(ghRes, "secret"),
 					resource.TestCheckResourceAttrSet(ghRes, "lock_version"),
@@ -146,10 +148,13 @@ func TestGithubIntegration_callerManagedSecretIsWriteOnly(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`
-  repo_full_name = %q
-  secret         = "caller-managed-secret-0123456789"`, repo)),
+  repo_full_name    = %q
+  secret            = "caller-managed-secret-0123456789"
+  ci_failure_action = "file_intake"`, repo)),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(ghRes, "webhook_registered", "false"),
+					// Honoured on create, and read back by the refresh and import below.
+					resource.TestCheckResourceAttr(ghRes, "ci_failure_action", "file_intake"),
 					resource.TestCheckResourceAttr(ghRes, "secret", "caller-managed-secret-0123456789"),
 					captureAttr(ghRes, "id", &id),
 				),
@@ -377,6 +382,9 @@ func TestGithubIntegration_createNeverSendsEnabled(t *testing.T) {
 			if strings.Contains(string(r.Body), `"enabled"`) {
 				t.Errorf("create body must not carry enabled (the API ignores it): %s", r.Body)
 			}
+			if strings.Contains(string(r.Body), `"ci_failure_action"`) {
+				t.Errorf("an unconfigured action must not be sent, so the server default stands: %s", r.Body)
+			}
 		case r.Method == "PATCH" && strings.Contains(r.Path, "/github-integrations/"):
 			patches++
 			if !strings.Contains(string(r.Body), `"enabled":false`) {
@@ -409,4 +417,89 @@ func TestGithubIntegration_existingHookIsNotClaimed(t *testing.T) {
 			},
 		},
 	})
+}
+
+// ciActionConfig omits the linked-project data source so a step can assert an
+// empty plan without a deferred data read showing up in it.
+func ciActionConfig(env *testEnv, identifier, repo, body string) string {
+	return projectFixture(env, identifier) + fmt.Sprintf(`
+resource "flightdeck_github_integration" "test" {
+  project_id     = flightdeck_project.parent.id
+  repo_full_name = %q
+%s
+}
+`, repo, body)
+}
+
+func TestGithubIntegration_ciFailureActionIsSetOnCreateAndKeptWhenUnset(t *testing.T) {
+	env := newTestEnv(t, "github_integration")
+	env.requireFake(t) // the console toggle and the request bodies need the fake
+	identifier := randIdentifier()
+	repo := "example-org/" + strings.ToLower(identifier)
+	fileIntake := ciActionConfig(env, identifier, repo, `  ci_failure_action = "file_intake"`)
+	var id string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// Plan-time enum check: nothing is linked.
+				Config:      ciActionConfig(env, identifier, repo, `  ci_failure_action = "always"`),
+				ExpectError: regexMust(`value must be one of`),
+			},
+			{
+				// Read on create, unlike `enabled`: no follow-up update, so the
+				// create and the hook-id write-back are the only two writes.
+				Config: fileIntake,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(ghRes, "ci_failure_action", "file_intake"),
+					resource.TestCheckResourceAttr(ghRes, "lock_version", "1"),
+					captureAttr(ghRes, "id", &id),
+				),
+			},
+			{
+				// A toggle in the console is corrected while the attribute is
+				// configured, because every update re-asserts it.
+				PreConfig: func() { env.fake.SetGithubCIFailureAction(mustInt(id), "off") },
+				Config:    fileIntake,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(ghRes, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.TestCheckResourceAttr(ghRes, "ci_failure_action", "file_intake"),
+			},
+			{
+				// Dropping the line keeps the current value: the API merges, so
+				// there is no reset to the default to plan.
+				Config: ciActionConfig(env, identifier, repo, ""),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+				Check: resource.TestCheckResourceAttr(ghRes, "ci_failure_action", "file_intake"),
+			},
+			{
+				// Switching it off is written, never implied.
+				Config: ciActionConfig(env, identifier, repo, `  ci_failure_action = "off"`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(ghRes, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.TestCheckResourceAttr(ghRes, "ci_failure_action", "off"),
+			},
+		},
+	})
+	var creates, patches int
+	for _, r := range env.fake.Requests() {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.Path, "/github-integrations"):
+			creates++
+			if !strings.Contains(string(r.Body), `"ci_failure_action":"file_intake"`) {
+				t.Errorf("create body should carry the configured action: %s", r.Body)
+			}
+		case r.Method == "PATCH" && strings.Contains(r.Path, "/github-integrations/"):
+			patches++
+		}
+	}
+	if creates != 1 {
+		t.Errorf("expected 1 create, got %d", creates)
+	}
+	if patches != 2 {
+		t.Errorf("expected 2 updates (the console correction and the switch off), got %d", patches)
+	}
 }

@@ -10,6 +10,23 @@ import (
 
 var repoFullNameForm = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
 
+var ciFailureActions = []string{"off", "create_work_item", "file_intake"}
+
+// ciFailureAction applies the API's normalisation: trimmed and lower-cased,
+// with a blank or null value meaning the default, and anything else refused.
+func ciFailureAction(v any) (string, bool) {
+	token := strings.ToLower(strings.TrimSpace(asString(v)))
+	if token == "" {
+		return "off", true
+	}
+	return token, contains(ciFailureActions, token)
+}
+
+// ciFailureActionRefusal is the API's message, which names the value it got.
+func ciFailureActionRefusal(v any) string {
+	return "ci_failure_action must be one of: " + strings.Join(ciFailureActions, ", ") + " (got " + asString(v) + ")"
+}
+
 // GithubIntegration is the fake's stored project<->repository link. SecretSet
 // records whether the caller supplied the secret (caller-managed webhook) or
 // Flightdeck generated it and registered the webhook itself.
@@ -18,6 +35,7 @@ type GithubIntegration struct {
 	ProjectID         int64
 	RepoFullName      string
 	Enabled           bool
+	CIFailureAction   string
 	WebhookRegistered bool
 	SecretSet         bool
 	LockVersion       int64
@@ -88,6 +106,17 @@ func (s *Server) TouchGithubIntegration(id int64, enabled bool) {
 	}
 }
 
+// SetGithubCIFailureAction simulates the settings page choosing the action,
+// out of band, which bumps lock_version.
+func (s *Server) SetGithubCIFailureAction(id int64, action string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if g := s.githubIntegrations().byID[id]; g != nil {
+		g.CIFailureAction = action
+		g.LockVersion++
+	}
+}
+
 func (s *Server) liveGithubIntegration(id int64) *GithubIntegration {
 	g := s.githubIntegrations().byID[id]
 	if g == nil || s.liveProject(g.ProjectID) == nil {
@@ -99,8 +128,9 @@ func (s *Server) liveGithubIntegration(id int64) *GithubIntegration {
 func serializeGithubIntegration(g *GithubIntegration) map[string]any {
 	return map[string]any{
 		"id": g.ID, "project_id": g.ProjectID, "repo_full_name": g.RepoFullName,
-		"enabled": g.Enabled, "webhook_registered": g.WebhookRegistered,
-		"lock_version": g.LockVersion, "created_at": iso(g.CreatedAt), "updated_at": iso(g.CreatedAt),
+		"enabled": g.Enabled, "ci_failure_action": g.CIFailureAction,
+		"webhook_registered": g.WebhookRegistered,
+		"lock_version":       g.LockVersion, "created_at": iso(g.CreatedAt), "updated_at": iso(g.CreatedAt),
 	}
 }
 
@@ -198,8 +228,18 @@ func (s *Server) createGithubIntegration(w http.ResponseWriter, r *http.Request)
 		if !repoFullNameForm.MatchString(repo) {
 			return http.StatusUnprocessableEntity, errorBody("repo_full_name is required, in owner/repo form", "invalid_attribute")
 		}
+		// Unlike `enabled`, ci_failure_action IS read on create and lands on the
+		// row before it is written, so a refused value links nothing.
+		action := "off"
+		if v, has := attrs["ci_failure_action"]; has {
+			resolved, ok := ciFailureAction(v)
+			if !ok {
+				return http.StatusUnprocessableEntity, errorBody(ciFailureActionRefusal(v), "invalid_attribute")
+			}
+			action = resolved
+		}
 		// `enabled` is not read on create: a new integration is always enabled.
-		g := &GithubIntegration{ID: s.id(), ProjectID: pid, RepoFullName: repo, Enabled: true, CreatedAt: time.Now()}
+		g := &GithubIntegration{ID: s.id(), ProjectID: pid, RepoFullName: repo, Enabled: true, CIFailureAction: action, CreatedAt: time.Now()}
 		// A blank secret counts as absent (managed mode); a short one is refused.
 		secret := asString(attrs["secret"])
 		if strings.TrimSpace(secret) != "" {
@@ -269,7 +309,8 @@ func (s *Server) updateGithubIntegration(w http.ResponseWriter, r *http.Request)
 	if !checkIfMatch(w, r, g.LockVersion) {
 		return
 	}
-	// PATCH accepts only `enabled`; repo_full_name may be re-sent unchanged.
+	// PATCH accepts `enabled` and `ci_failure_action`; repo_full_name may be
+	// re-sent unchanged.
 	if v, has := attrs["repo_full_name"]; has && !strings.EqualFold(strings.TrimSpace(asString(v)), g.RepoFullName) {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_attribute",
 			"repo_full_name cannot be changed on an existing integration — DELETE it and POST a new one")
@@ -279,6 +320,17 @@ func (s *Server) updateGithubIntegration(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusUnprocessableEntity, "invalid_attribute",
 			"secret cannot be changed over the API — rotate it in Settings -> Integrations, or DELETE this integration and POST a new one")
 		return
+	}
+	// Resolved before anything is written, so a refused value leaves the row
+	// untouched; an omitted key keeps the current action.
+	action := g.CIFailureAction
+	if v, has := attrs["ci_failure_action"]; has {
+		resolved, ok := ciFailureAction(v)
+		if !ok {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_attribute", ciFailureActionRefusal(v))
+			return
+		}
+		action = resolved
 	}
 	wasEnabled := g.Enabled
 	if v, has := attrs["enabled"]; has && v != nil {
@@ -290,6 +342,7 @@ func (s *Server) updateGithubIntegration(w http.ResponseWriter, r *http.Request)
 		}
 		g.Enabled = enabled
 	}
+	g.CIFailureAction = action
 	g.LockVersion++
 	if g.Enabled && !wasEnabled {
 		// Re-enabling mirrors the column again.

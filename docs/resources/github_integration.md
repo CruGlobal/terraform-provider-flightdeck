@@ -7,6 +7,7 @@ description: |-
   Two modes follow from secret:
   Flightdeck-managed (secret omitted): Flightdeck generates the signing secret and registers the repository webhook through its GitHub App. The App must be installed on the repository, or the create fails with repo_unreachable. webhook_registered is true when Flightdeck registered the hook itself; if a webhook targeting Flightdeck already exists on the repository it is left in place and not claimed.Caller-managed (secret supplied): Flightdeck stores the secret and touches nothing on GitHub; you declare the matching repository webhook yourself (for example a github_repository_webhook pointing at Flightdeck's GitHub webhook endpoint with the same secret). webhook_registered is false.
   A repository can be linked once across the workspace, enabled or not (repo_already_linked), and a project can have one enabled integration at a time. The secret is write-only: sent on create only, never read back, and state holds only the value you configured; it must be at least 16 characters (a blank value counts as omitted). Changing repo_full_name or secret replaces the integration (unlink, then link again), since a webhook has to be torn down and another registered.
+  A failed workflow run can also be turned into work — see ci_failure_action, which is off on a new integration, so workflow_run deliveries are accepted and dropped until it is set.
   Reading and writing this resource requires the token's user to be a workspace admin — stricter than the other project-scoped resources, because linking spends the workspace's GitHub App credential and aims the self-healing rollback loop. Import by numeric id: terraform import flightdeck_github_integration.app 17.
 ---
 
@@ -21,6 +22,8 @@ Two modes follow from `secret`:
 
 A repository can be linked once across the workspace, enabled or not (`repo_already_linked`), and a project can have one enabled integration at a time. The secret is write-only: sent on create only, never read back, and state holds only the value you configured; it must be at least 16 characters (a blank value counts as omitted). Changing `repo_full_name` or `secret` replaces the integration (unlink, then link again), since a webhook has to be torn down and another registered.
 
+A failed workflow run can also be turned into work — see `ci_failure_action`, which is `off` on a new integration, so `workflow_run` deliveries are accepted and dropped until it is set.
+
 Reading and writing this resource requires the token's user to be a **workspace admin** — stricter than the other project-scoped resources, because linking spends the workspace's GitHub App credential and aims the self-healing rollback loop. Import by numeric id: `terraform import flightdeck_github_integration.app 17`.
 
 ## Example Usage
@@ -34,9 +37,15 @@ resource "flightdeck_project" "app" {
 # Flightdeck-managed: the secret is generated and the repository webhook is
 # registered through Flightdeck's GitHub App, which must be installed on the
 # repository.
+#
+# `ci_failure_action` is `off` on a new integration, so failed workflow runs are
+# accepted and dropped. Set it explicitly — the API keeps whatever is already
+# there when the key is absent, so an unset attribute lets a choice made in the
+# Flightdeck settings page stand with no diff to show for it.
 resource "flightdeck_github_integration" "app" {
-  project_id     = flightdeck_project.app.id
-  repo_full_name = "example-org/mobile-app"
+  project_id        = flightdeck_project.app.id
+  repo_full_name    = "example-org/mobile-app"
+  ci_failure_action = "file_intake"
 }
 
 # Caller-managed: you hold the secret and declare the repository webhook
@@ -47,9 +56,10 @@ resource "random_password" "flightdeck_webhook" {
 }
 
 resource "flightdeck_github_integration" "api" {
-  project_id     = flightdeck_project.app.id
-  repo_full_name = "example-org/api"
-  secret         = random_password.flightdeck_webhook.result
+  project_id        = flightdeck_project.app.id
+  repo_full_name    = "example-org/api"
+  secret            = random_password.flightdeck_webhook.result
+  ci_failure_action = "off"
 }
 
 resource "github_repository_webhook" "flightdeck" {
@@ -74,6 +84,7 @@ resource "github_repository_webhook" "flightdeck" {
 
 ### Optional
 
+- `ci_failure_action` (String) What a failed workflow run on the repository turns into: `off` (deliveries are accepted and dropped), `create_work_item` (one work item per repository, workflow and branch while the branch stays red) or `file_intake` (the same, parked as a pending intake request someone accepts first). A passing run resolves the open item whichever is set. New integrations are created `off`. When unset, the current value is kept — including one chosen on the Flightdeck settings page — so set it explicitly, even to `off`, for Terraform to own it; removing the line leaves the current value in place, and `off` is how you switch it back off.
 - `enabled` (Boolean) Whether deliveries from the repository are processed. The API always creates an integration enabled; `enabled = false` on a new resource is applied by an immediate follow-up update. When unset, the current value is kept.
 - `secret` (String, Sensitive) Webhook signing secret for the caller-managed mode; at least 16 characters. Omit it (or pass an empty string) to let Flightdeck generate one and register the webhook itself. Write-only: sent on create, never read back. Changing it replaces the integration.
 

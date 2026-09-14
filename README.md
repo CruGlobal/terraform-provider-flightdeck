@@ -32,7 +32,7 @@ project, not to infrastructure code.
 | `flightdeck_ingestion_token` | An error-ingestion token for a project (the secret is returned once, on create). |
 | `flightdeck_error_alert_rule` | A trigger → conditions → action error alert rule. |
 | `flightdeck_webhook` | An outbound webhook, workspace-wide or scoped to one project. |
-| `flightdeck_github_integration` | A project's link to a GitHub repository, with Flightdeck registering the repository webhook or the caller supplying the shared secret. |
+| `flightdeck_github_integration` | A project's link to a GitHub repository, with Flightdeck registering the repository webhook or the caller supplying the shared secret, and what a failed workflow run files. |
 
 | Data source | Resolves |
 | --- | --- |

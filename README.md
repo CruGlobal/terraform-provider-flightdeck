@@ -40,9 +40,11 @@ project, not to infrastructure code.
 | `flightdeck_states` | All workflow states of a project. |
 | `flightdeck_workspace_member` | Resolves a workspace member by email address to a numeric user id, for `project_member.user_id` and `project.lead_id`. |
 
-There is no data source to resolve a workspace member by email: the API
-has no member-directory route yet, so `flightdeck_project_member` takes
-the numeric `user_id`.
+`flightdeck_project_member.user_id` and `flightdeck_project.lead_id` take
+a numeric user id; `flightdeck_workspace_member` resolves one from an
+email address, so a configuration can name people rather than ids. The
+match is exact — case and surrounding whitespace are ignored, nothing
+else — and an address that resolves to nobody fails the plan.
 
 Resources are added in the order the corresponding Flightdeck API
 endpoints ship; see [`CHANGELOG.md`](./CHANGELOG.md) for what a given
@@ -171,9 +173,10 @@ The same tests run against a live Flightdeck when `TF_ACC=1` and
 `FLIGHTDECK_ENDPOINT` / `FLIGHTDECK_TOKEN` point at a **dedicated test
 workspace** (they create and delete projects). The member tests also need
 `FLIGHTDECK_ACC_MEMBER_USER_ID`, the numeric user id of another member of
-that workspace (the API has no route to resolve an email), and the
-managed-mode GitHub-link tests run only when `FLIGHTDECK_ACC_GITHUB_REPO`
-names a repository the workspace's GitHub App can reach.
+that workspace — a user id rather than an email so the tests do not
+depend on a particular address — and the managed-mode GitHub-link tests
+run only when `FLIGHTDECK_ACC_GITHUB_REPO` names a repository the
+workspace's GitHub App can reach.
 
 ```sh
 export TF_ACC=1

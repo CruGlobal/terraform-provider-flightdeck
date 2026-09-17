@@ -24,14 +24,30 @@ import (
 // /api/v1/projects/:project_id/self-healing, workspace-admin for both. It is
 // modelled as a block on flightdeck_project because it configures that
 // project, but its transport is separate: the read nests the resolved values
-// under `config`, the write takes the threshold keys, and the If-Match is the
-// PROJECT's lock_version (the jsonb lives on the project row, so a write here
-// bumps it). `armed` is read-only: the API refuses a write that would change
-// it with code arming_refused. Reversing that is a two-line change here (make
-// `armed` Optional and include it in selfHealingFields).
+// under `config` with `feature_enabled` alongside it, the write takes the
+// writable keys flat, and the If-Match is the PROJECT's lock_version (the
+// jsonb lives on the project row, so a write here bumps it). `armed` is
+// read-only: the API refuses a write that would change it with code
+// arming_refused. Reversing that is a two-line change here (make `armed`
+// Optional and include it in selfHealingFields) and is deliberately not done:
+// arming lets a machine roll production back with no human in the loop, so it
+// stays a console decision that a merged pull request cannot grant.
+//
+// `feature_enabled` is a different thing and IS settable. It puts the project
+// in shadow mode, where decisions are computed and logged and nothing acts;
+// acting needs `armed` as well. Exposing the first does not weaken the second.
+//
+// The endpoint MERGES: an absent key keeps its stored value, so only the
+// configured settings are ever sent and an unmanaged threshold is never
+// disturbed. The corollary is the usual one — an attribute left out of
+// configuration is not managed, and a console change to it wins silently.
+// `features.self_healing` on PATCH /projects/:id is refused (422); this
+// endpoint is the only way in.
 
-// selfHealingModel is the Terraform shape of the `config` object.
+// selfHealingModel is the Terraform shape of the block: the `config` object
+// plus the `feature_enabled` switch that rides beside it.
 type selfHealingModel struct {
+	FeatureEnabled        types.Bool    `tfsdk:"feature_enabled"`
 	Armed                 types.Bool    `tfsdk:"armed"`
 	BakeMinutes           types.Int64   `tfsdk:"bake_minutes"`
 	BaselineMultiplier    types.Float64 `tfsdk:"baseline_multiplier"`
@@ -47,6 +63,7 @@ type selfHealingModel struct {
 }
 
 var selfHealingAttrTypes = map[string]attr.Type{
+	"feature_enabled":         types.BoolType,
 	"armed":                   types.BoolType,
 	"bake_minutes":            types.Int64Type,
 	"baseline_multiplier":     types.Float64Type,
@@ -71,9 +88,12 @@ const (
 	maxFloor   = 100000
 )
 
-// selfHealingSchema is the resource attribute. Every threshold is optional
-// and computed (the server supplies the documented default when unset);
-// `armed` is computed only.
+// selfHealingSchema is the resource attribute. Every threshold and the feature
+// switch are optional and computed (the server supplies the documented default
+// when unset); `armed` is computed only. None of them carries a framework
+// default: a default would manufacture a value for an unset attribute and
+// write it, which on a merging endpoint silently overrides whatever the
+// project already had.
 func selfHealingSchema() schema.Attribute {
 	intThreshold := func(desc string, upper int64) schema.Attribute {
 		return schema.Int64Attribute{
@@ -96,16 +116,33 @@ func selfHealingSchema() schema.Attribute {
 	return schema.SingleNestedAttribute{
 		MarkdownDescription: "Self-healing (automated rollback) control-loop configuration, managed through the project's " +
 			"`self-healing` API resource. Reading and writing it requires the token's user to be a **workspace admin**; " +
-			"for other tokens, and on a Flightdeck version without the endpoint, the block is null. Thresholds you " +
-			"leave unset take the server's documented defaults. `armed` is read-only: arming a project is a " +
-			"console-only operation and the API refuses a write that would change it. `short_window_minutes` must " +
-			"not exceed `long_window_minutes`. A write here bumps the project's `lock_version`.",
+			"for other tokens, and on a Flightdeck version without the endpoint, the block is null.\n\n" +
+			"There are two switches, and they are not the same one. `feature_enabled` turns the loop on in **shadow " +
+			"mode** — decisions are computed and logged, nothing acts — and is settable here. `armed` is what lets it " +
+			"act, and is **read-only**: arming a project is a console-only operation and the API refuses a write that " +
+			"would change it.\n\n" +
+			"The endpoint merges, so this block only ever sends what you configure: a threshold you leave unset keeps " +
+			"whatever the project has (the server's documented default, until someone overrides it), and a setting you " +
+			"never name is never disturbed — including one changed in the console. `short_window_minutes` must not " +
+			"exceed `long_window_minutes`, checked against the merged result rather than against what you sent. A write " +
+			"here bumps the project's `lock_version`. The `self_healing` key is refused in `features`; it is spelled " +
+			"`feature_enabled` here.",
 		Optional: true,
 		Computed: true,
 		PlanModifiers: []planmodifier.Object{
 			objectplanmodifier.UseStateForUnknown(),
 		},
 		Attributes: map[string]schema.Attribute{
+			"feature_enabled": schema.BoolAttribute{
+				MarkdownDescription: "Whether the self-healing control loop runs for this project at all. Enabling it puts the " +
+					"project in **shadow mode**: decisions are computed and logged, and nothing acts. Acting additionally " +
+					"requires `armed`, which is not settable here. Turning this on therefore starts the observation, not " +
+					"the automation.\n\nWhen unset, the project's current value is kept, so a switch flipped in the " +
+					"console survives an apply. Set it explicitly — even to `false` — for Terraform to own it.",
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
 			"armed": schema.BoolAttribute{
 				MarkdownDescription: "Whether live rollback (as opposed to shadow mode) is armed for this project. Read-only; set from the console.",
 				Computed:            true,
@@ -168,6 +205,8 @@ func selfHealingToObject(sh *client.SelfHealing, diags *diag.Diagnostics) types.
 	}
 	cfg := sh.Config
 	obj, d := types.ObjectValue(selfHealingAttrTypes, map[string]attr.Value{
+		// feature_enabled rides alongside `config` in the response, not inside it.
+		"feature_enabled":         types.BoolValue(sh.FeatureEnabled),
 		"armed":                   types.BoolValue(cfg.Armed),
 		"bake_minutes":            types.Int64Value(cfg.BakeMinutes),
 		"baseline_multiplier":     types.Float64Value(cfg.BaselineMultiplier),
@@ -185,9 +224,9 @@ func selfHealingToObject(sh *client.SelfHealing, diags *diag.Diagnostics) types.
 	return obj
 }
 
-// selfHealingFields returns the thresholds to send from the CONFIGURED block,
-// or nil when the configuration has no block (null/unknown). Only known,
-// non-null thresholds are sent; `armed` never is.
+// selfHealingFields returns the settings to send from the CONFIGURED block, or
+// nil when the configuration has no block (null/unknown). Only known, non-null
+// settings are sent, which is what makes the merge safe; `armed` never is.
 func selfHealingFields(ctx context.Context, block types.Object, diags *diag.Diagnostics) client.Fields {
 	if block.IsNull() || block.IsUnknown() {
 		return nil
@@ -204,6 +243,9 @@ func selfHealingFields(ctx context.Context, block types.Object, diags *diag.Diag
 		if !v.IsNull() && !v.IsUnknown() {
 			fields[key] = v.ValueFloat64()
 		}
+	}
+	if !m.FeatureEnabled.IsNull() && !m.FeatureEnabled.IsUnknown() {
+		fields["feature_enabled"] = m.FeatureEnabled.ValueBool()
 	}
 	putInt("bake_minutes", m.BakeMinutes)
 	putFloat("baseline_multiplier", m.BaselineMultiplier)

@@ -347,3 +347,122 @@ func TestProjectSelfHealing_thresholdValidation(t *testing.T) {
 }
 
 type flightdecktestRequest = flightdecktest.RecordedRequest
+
+func TestProjectSelfHealing_featureEnabledRoundTrips(t *testing.T) {
+	env := newTestEnv(t, "self_healing")
+	identifier := randIdentifier()
+	var id string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// A fresh project has the loop switched off.
+				Config: projectConfig(env, identifier, `
+  name = "Shadow"
+  self_healing = {
+    feature_enabled = false
+  }`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					captureAttr(projectRes, "id", &id),
+					resource.TestCheckResourceAttr(projectRes, "self_healing.feature_enabled", "false"),
+					resource.TestCheckResourceAttr(projectRes, "self_healing.armed", "false"),
+				),
+			},
+			{
+				// True puts it in shadow mode; arming is a separate, console-only step.
+				Config: projectConfig(env, identifier, `
+  name = "Shadow"
+  self_healing = {
+    feature_enabled = true
+  }`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(projectRes, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPtr(projectRes, "id", &id),
+					resource.TestCheckResourceAttr(projectRes, "self_healing.feature_enabled", "true"),
+					resource.TestCheckResourceAttr(projectRes, "self_healing.armed", "false"),
+				),
+			},
+			{
+				// ...and back off again.
+				Config: projectConfig(env, identifier, `
+  name = "Shadow"
+  self_healing = {
+    feature_enabled = false
+  }`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(projectRes, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.TestCheckResourceAttr(projectRes, "self_healing.feature_enabled", "false"),
+			},
+		},
+	})
+}
+
+// Turning the feature on must not disturb a threshold the configuration does
+// not mention: the endpoint merges, and the provider only sends what it is
+// given. This is the failure the provider has shipped twice before.
+func TestProjectSelfHealing_featureEnabledLeavesThresholdsAlone(t *testing.T) {
+	env := newTestEnv(t, "self_healing")
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `
+  name = "Merge"
+  self_healing = {
+    bake_minutes = 45
+    burn_rate    = 7.5
+  }`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "self_healing.bake_minutes", "45"),
+					resource.TestCheckResourceAttr(projectRes, "self_healing.burn_rate", "7.5"),
+				),
+			},
+			{
+				// Only feature_enabled and one threshold are named; burn_rate is
+				// not, and must survive at its overridden value rather than
+				// snapping back to the 14.4 default.
+				Config: projectConfig(env, identifier, `
+  name = "Merge"
+  self_healing = {
+    feature_enabled = true
+    bake_minutes    = 50
+  }`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "self_healing.feature_enabled", "true"),
+					resource.TestCheckResourceAttr(projectRes, "self_healing.bake_minutes", "50"),
+					resource.TestCheckResourceAttr(projectRes, "self_healing.burn_rate", "7.5"),
+				),
+			},
+		},
+	})
+}
+
+// A write that names only thresholds must not carry feature_enabled, or
+// Terraform would silently switch the loop off for anyone who never set it.
+func TestProjectSelfHealing_featureEnabledOmittedIsNotSent(t *testing.T) {
+	env := newTestEnv(t, "self_healing")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `
+  name = "Untouched"
+  self_healing = {
+    bake_minutes = 33
+  }`),
+				Check: resource.TestCheckResourceAttr(projectRes, "self_healing.bake_minutes", "33"),
+			},
+		},
+	})
+	for _, r := range env.fake.RequestsMatching("PATCH", "/api/v1/projects/") {
+		if !strings.HasSuffix(r.Path, "/self-healing") {
+			continue
+		}
+		if strings.Contains(string(r.Body), "feature_enabled") {
+			t.Fatalf("self-healing write named feature_enabled although the configuration did not: %s", r.Body)
+		}
+	}
+}

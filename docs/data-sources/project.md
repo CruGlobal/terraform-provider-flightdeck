@@ -47,7 +47,7 @@ output "app_project_id" {
 - `lock_version` (Number) Optimistic-locking version the API bumps on every change.
 - `name` (String) Display name.
 - `network` (String) Project visibility, `public_project` or `private_project`.
-- `self_healing` (Attributes) Resolved self-healing control-loop configuration (armed flag and thresholds), read from the project's `self-healing` API resource. Null unless the token's user is a workspace admin and the Flightdeck version exposes the endpoint. (see [below for nested schema](#nestedatt--self_healing))
+- `self_healing` (Attributes) Resolved self-healing control-loop configuration (the feature switch, the armed flag and the thresholds), read from the project's `self-healing` API resource. Null unless the token's user is a workspace admin and the Flightdeck version exposes the endpoint. (see [below for nested schema](#nestedatt--self_healing))
 - `slack_channel` (Attributes) Per-project Slack channel configuration, read from the project's `slack-channel` API resource. Null unless the token's user administers the project and the Flightdeck version exposes the endpoint. `event_filter` reports every category resolved against its default. (see [below for nested schema](#nestedatt--slack_channel))
 
 <a id="nestedatt--self_healing"></a>
@@ -62,6 +62,7 @@ Read-Only:
 - `burn_rate` (Number) Burn rate that counts as severe.
 - `consecutive_error_limit` (Number) Metrics-query failures tolerated before inconclusive.
 - `cooldown_minutes` (Number) Cooldown between actions, in minutes.
+- `feature_enabled` (Boolean) Whether the control loop runs at all, in shadow mode or armed.
 - `long_window_minutes` (Number) Long burn-rate window in minutes.
 - `max_rollbacks_per_hour` (Number) Per-app blast-radius cap.
 - `recovery_window_minutes` (Number) Post-rollback grace period, in minutes.

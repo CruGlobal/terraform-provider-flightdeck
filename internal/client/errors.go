@@ -35,6 +35,9 @@ const (
 	// created), and one enabled integration per repository per workspace.
 	CodeRepoUnreachable   = "repo_unreachable"
 	CodeRepoAlreadyLinked = "repo_already_linked"
+	// PagerDuty: one credential per project, so a second POST is refused (422)
+	// rather than replacing the stored key.
+	CodePagerDutyAlreadyConfigured = "pagerduty_already_configured"
 )
 
 // HasCode reports whether err is an API error carrying the given code.

@@ -38,17 +38,20 @@ const (
 // gate a resource again while its API is being changed. The unit-test run (no
 // TF_ACC) is unaffected by this table.
 var liveReady = map[string]bool{
-	"project":            true,
-	"state":              true,
-	"label":              true,
-	"project_member":     true,
-	"ingestion_token":    true,
-	"error_alert_rule":   true,
-	"webhook":            true,
-	"self_healing":       true,
-	"slack_channel":      true,
-	"github_integration": true,
-	"workspace_member":   true,
+	"project":               true,
+	"state":                 true,
+	"label":                 true,
+	"project_member":        true,
+	"ingestion_token":       true,
+	"error_alert_rule":      true,
+	"incident_alert_rule":   true,
+	"routing_key":           true,
+	"pagerduty_integration": true,
+	"webhook":               true,
+	"self_healing":          true,
+	"slack_channel":         true,
+	"github_integration":    true,
+	"workspace_member":      true,
 }
 
 // testEnv is what a test needs to point the provider at a backend.

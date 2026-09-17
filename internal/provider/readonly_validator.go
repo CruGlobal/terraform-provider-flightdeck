@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 )
 
@@ -22,6 +24,17 @@ func (v readOnlyAttribute) ValidateString(_ context.Context, req validator.Strin
 	if req.ConfigValue.IsNull() {
 		return
 	}
-	resp.Diagnostics.AddAttributeError(req.Path, "Read-only attribute",
+	v.refuse(req.Path, &resp.Diagnostics)
+}
+
+func (v readOnlyAttribute) ValidateInt64(_ context.Context, req validator.Int64Request, resp *validator.Int64Response) {
+	if req.ConfigValue.IsNull() {
+		return
+	}
+	v.refuse(req.Path, &resp.Diagnostics)
+}
+
+func (v readOnlyAttribute) refuse(at path.Path, diags *diag.Diagnostics) {
+	diags.AddAttributeError(at, "Read-only attribute",
 		"This attribute is reported by the API but cannot be set here; "+string(v)+".")
 }

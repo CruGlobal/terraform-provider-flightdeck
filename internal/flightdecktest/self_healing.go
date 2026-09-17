@@ -151,7 +151,11 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 	shortW, _ := asFloat64(after["short_window_minutes"])
 	longW, _ := asFloat64(after["long_window_minutes"])
 	if shortW > longW {
-		return http.StatusUnprocessableEntity, "invalid_attribute", "short_window_minutes cannot exceed long_window_minutes"
+		// The API names both values, and it compares the MERGED pair — so a
+		// write naming only one window can be refused by the other's stored
+		// value. Tests match on this shape, so keep it close to the API's.
+		return http.StatusUnprocessableEntity, "invalid_attribute",
+			"short_window_minutes (" + asString(int64(shortW)) + ") cannot exceed long_window_minutes (" + asString(int64(longW)) + ")"
 	}
 	p.SelfHealing = next
 	return 0, "", ""

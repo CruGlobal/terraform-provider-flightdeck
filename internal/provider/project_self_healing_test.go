@@ -563,7 +563,7 @@ func TestProjectSelfHealing_mergedWindowStillFailsAtApply(t *testing.T) {
   self_healing = {
     short_window_minutes = 60
   }`),
-				ExpectError: regexMust(`(?s)short_window_minutes\s+cannot\s+exceed\s+long_window_minutes`),
+				ExpectError: regexMust(`(?s)short_window_minutes\s+\(60\)\s+cannot\s+exceed\s+long_window_minutes\s+\(10\)`),
 			},
 		},
 	})

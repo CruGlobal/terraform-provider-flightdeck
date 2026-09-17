@@ -280,18 +280,19 @@ func TestPagerDutyIntegration_secondLinkIsRefused(t *testing.T) {
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
 			{
-				Config: projectFixture(env, identifier) + fmt.Sprintf(`
-resource "flightdeck_pagerduty_integration" "test" {
-  project_id  = flightdeck_project.parent.id
-  routing_key = %q
-}
-
+				Config: pagerDutyConfig(env, identifier, fmt.Sprintf(`  routing_key = %q`, pdKeyA)),
+			},
+			{
+				// Added in a LATER step, so the create is sequential and lands
+				// on the API's own guard rather than racing the first one.
+				Config: pagerDutyConfig(env, identifier, fmt.Sprintf(`  routing_key = %q`, pdKeyA)) + fmt.Sprintf(`
 resource "flightdeck_pagerduty_integration" "second" {
   project_id  = flightdeck_project.parent.id
   routing_key = %q
 }
-`, pdKeyA, pdKeyB),
-				ExpectError: regexMust(`(?s)already has a PagerDuty link|already has a PagerDuty integration`),
+`, pdKeyB),
+				// Terraform hard-wraps diagnostics, so match across newlines.
+				ExpectError: regexMust(`(?s)already\s+has\s+a\s+PagerDuty\s+(link|integration)`),
 			},
 		},
 	})

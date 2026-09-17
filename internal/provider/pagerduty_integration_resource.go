@@ -285,7 +285,11 @@ func (r *pagerDutyIntegrationResource) Create(ctx context.Context, req resource.
 	fields := pagerDutyFields(&plan, config.RoutingKey)
 	created, err := r.client.CreatePagerDuty(ctx, projectID, fields, client.PayloadKey("pagerduty", strconv.FormatInt(projectID, 10), fields))
 	if err != nil {
-		if client.HasCode(err, client.CodePagerDutyAlreadyConfigured) {
+		// Two spellings, depending on which guard catches it: the controller
+		// answers pagerduty_already_configured, while two creates racing in
+		// one apply fall through to the model's uniqueness validation.
+		if client.HasCode(err, client.CodePagerDutyAlreadyConfigured) ||
+			(client.IsValidation(err) && strings.Contains(apiMessage(err), "already has a PagerDuty integration")) {
 			resp.Diagnostics.AddError("The project already has a PagerDuty link",
 				apiMessage(err)+fmt.Sprintf("\n\nImport it instead: terraform import flightdeck_pagerduty_integration.<name> %d", projectID))
 			return

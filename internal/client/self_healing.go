@@ -36,18 +36,14 @@ type SelfHealingConfig struct {
 }
 
 // SelfHealingThresholdKeys are the writable threshold settings, in the order
-// the API documents them. "armed" is deliberately absent; "feature_enabled" is
-// writable but is not a threshold, so it lives in SelfHealingWritableKeys only.
+// the API documents them. "armed" is deliberately absent, and "feature_enabled"
+// is writable but is not a threshold, so the endpoint's full writable set is
+// this list plus that one key.
 var SelfHealingThresholdKeys = []string{
 	"bake_minutes", "baseline_multiplier", "absolute_floor", "long_window_minutes",
 	"short_window_minutes", "burn_rate", "sustain_count", "consecutive_error_limit",
 	"cooldown_minutes", "max_rollbacks_per_hour", "recovery_window_minutes",
 }
-
-// SelfHealingWritableKeys is everything the endpoint accepts on a write: the
-// thresholds plus the feature switch. It mirrors the `writable_settings` list
-// the API reports on read.
-var SelfHealingWritableKeys = append(append([]string{}, SelfHealingThresholdKeys...), "feature_enabled")
 
 const selfHealingRoot = "self_healing"
 

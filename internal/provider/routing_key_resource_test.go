@@ -182,6 +182,73 @@ func TestRoutingKey_reportsAConsoleAttachedPolicy(t *testing.T) {
 	})
 }
 
+// Two keys in one project must each end up with a LIVE secret. The create's
+// Idempotency-Key is a hash of the request body, and `name` is the only thing
+// in that body, so before `name` was required two nameless declarations sent
+// identical payloads: the second replayed the first, the replay carried no
+// secret, and recovering from that revoked the first resource's live key while
+// the apply reported success.
+func TestRoutingKey_siblingKeysAreIndependent(t *testing.T) {
+	env := newTestEnv(t, "routing_key")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectFixture(env, identifier) + `
+resource "flightdeck_routing_key" "a" {
+  project_id = flightdeck_project.parent.id
+  name       = "Uptime monitor"
+}
+
+resource "flightdeck_routing_key" "b" {
+  project_id = flightdeck_project.parent.id
+  name       = "Synthetic checks"
+}
+`,
+				Check: func(s *terraform.State) error {
+					seen := map[string]bool{}
+					for _, name := range []string{"flightdeck_routing_key.a", "flightdeck_routing_key.b"} {
+						rs := s.RootModule().Resources[name].Primary
+						row := env.fake.RoutingKey(mustInt(rs.ID))
+						if row == nil {
+							return fmt.Errorf("%s: routing key %s is not on the server", name, rs.ID)
+						}
+						if row.RevokedAt != nil {
+							return fmt.Errorf("%s holds routing key %s, which is revoked on the server", name, rs.ID)
+						}
+						if secret := rs.Attributes["routing_key"]; secret == "" || seen[secret] {
+							return fmt.Errorf("%s did not get a distinct live secret", name)
+						} else {
+							seen[secret] = true
+						}
+					}
+					return nil
+				},
+			},
+		},
+	})
+}
+
+// A key with no name would share its payload, and so its Idempotency-Key, with
+// every other nameless key in the project. The schema refuses it outright.
+func TestRoutingKey_nameIsRequired(t *testing.T) {
+	env := newTestEnv(t, "routing_key")
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectFixture(env, identifier) + `
+resource "flightdeck_routing_key" "unnamed" {
+  project_id = flightdeck_project.parent.id
+}
+`,
+				ExpectError: regexMust(`(?s)Missing required argument|"name" is required`),
+			},
+		},
+	})
+}
+
 func TestRoutingKey_staleWriteIsReported(t *testing.T) {
 	env := newTestEnv(t, "routing_key")
 	env.requireFake(t)

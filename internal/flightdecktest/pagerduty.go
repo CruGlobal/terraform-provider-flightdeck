@@ -231,6 +231,12 @@ func (s *Server) createPagerDuty(w http.ResponseWriter, r *http.Request) {
 		if s.liveProject(pid) == nil {
 			return http.StatusNotFound, errorBody("Not found", "not_found")
 		}
+		// Same bar as show/update/destroy: linking spends a paging credential.
+		// Checked after the existence test so a non-admin cannot tell project
+		// ids apart by 403 vs 404.
+		if !s.workspaceAdmin {
+			return http.StatusForbidden, errorBody("This action requires workspace owner or admin rights.", "forbidden")
+		}
 		if s.pagerDuty().byProject[pid] != nil {
 			return http.StatusUnprocessableEntity, errorBody(
 				"this project already has a PagerDuty integration — PATCH it to rotate the routing key or change its "+

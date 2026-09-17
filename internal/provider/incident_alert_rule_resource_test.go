@@ -63,10 +63,6 @@ func TestIncidentAlertRule_basicLifecycle(t *testing.T) {
 				ResourceName:      incidentRuleRes,
 				ImportState:       true,
 				ImportStateVerify: true,
-				// Import has no configuration to defer to, so it records every
-				// severity of the priority table; the configuration above
-				// manages none of them.
-				ImportStateVerifyIgnore: []string{"action.priority_map"},
 				ImportStateIdFunc: func(s *terraform.State) (string, error) {
 					rs := s.RootModule().Resources[incidentRuleRes].Primary
 					return rs.Attributes["project_id"] + "/" + rs.ID, nil
@@ -221,6 +217,50 @@ func TestIncidentAlertRule_omittedEnabledIsNotReset(t *testing.T) {
 					resource.TestCheckResourceAttr(incidentRuleRes, "name", "Console toggled, renamed"),
 					resource.TestCheckResourceAttr(incidentRuleRes, "enabled", "false"),
 				),
+			},
+		},
+	})
+}
+
+// An imported rule records the severities it actually overrides and nothing
+// else, so the first plan after an import is empty. Recording the whole
+// effective table would propose a change instead — and since `action` replaces
+// whole, applying that plan would drop the overrides being imported.
+func TestIncidentAlertRule_importRecordsOnlyRealOverrides(t *testing.T) {
+	env := newTestEnv(t, "incident_alert_rule")
+	identifier := randIdentifier()
+	overriding := incidentRuleConfig(env, identifier, `
+  name    = "Imported"
+  trigger = "incident_opened"
+  action = {
+    file_intake = true
+    priority_map = {
+      warning = "urgent"
+    }
+  }`)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: overriding,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(incidentRuleRes, "action.priority_map.warning", "urgent"),
+					resource.TestCheckNoResourceAttr(incidentRuleRes, "action.priority_map.info"),
+				),
+			},
+			{
+				ResourceName:      incidentRuleRes,
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateIdFunc: func(s *terraform.State) (string, error) {
+					rs := s.RootModule().Resources[incidentRuleRes].Primary
+					return rs.Attributes["project_id"] + "/" + rs.ID, nil
+				},
+			},
+			{
+				Config: overriding,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
 			},
 		},
 	})

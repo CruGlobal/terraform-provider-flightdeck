@@ -13,7 +13,7 @@ description: |-
     "payload": { "summary": "Disk nearly full", "severity": "warning", "source": "web-1" }
   }
   
-  A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own. Receiving events does not imply paging: a key pages only if an escalation policy is attached to it, which is a console operation and read-only here (see escalation_policy_id).
+  A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own — each with its own name, which must be distinct within the project. Receiving events does not imply paging: a key pages only if an escalation policy is attached to it, which is a console operation and read-only here (see escalation_policy_id).
   The key value is returned by the API once, on create, and stored in Terraform state as a sensitive attribute so it can be handed to the monitor. It is never re-read; an imported key has no routing_key value. The API has no rotate route, so rotation is replacement: terraform apply -replace=flightdeck_routing_key.monitor mints a new key and revokes the old one. Deleting the resource revokes the key — irreversibly, and the row stays readable as history, so a revoked key is not a free identifier.
   Import with <project_id>/<key_id>: terraform import flightdeck_routing_key.monitor 42/7.
 ---
@@ -33,7 +33,7 @@ The key is posted to Flightdeck's Events API in a PagerDuty-Events-v2-shaped bod
 }
 ```
 
-A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own. Receiving events does not imply paging: a key pages only if an escalation policy is attached to it, which is a console operation and read-only here (see `escalation_policy_id`).
+A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own — each with its own `name`, which must be distinct within the project. Receiving events does not imply paging: a key pages only if an escalation policy is attached to it, which is a console operation and read-only here (see `escalation_policy_id`).
 
 The key value is returned by the API **once, on create**, and stored in Terraform state as a sensitive attribute so it can be handed to the monitor. It is never re-read; an imported key has no `routing_key` value. The API has no rotate route, so **rotation is replacement**: `terraform apply -replace=flightdeck_routing_key.monitor` mints a new key and revokes the old one. Deleting the resource revokes the key — irreversibly, and the row stays readable as history, so a revoked key is not a free identifier.
 
@@ -76,11 +76,10 @@ output "uptime_routing_key" {
 
 ### Required
 
+- `name` (String) Label shown in the project's routing-key list — the monitor's name, usually. Editable in place.
+
+**Give every routing key in a project a distinct name.** A create is made idempotent with a key derived from the request body, and `name` is the only thing in that body, so two keys in one project declared with the same name are one create as far as the API is concerned: the second replays the first, and because a replay never returns the secret the provider retires that row and mints a fresh key. The second declaration ends up holding a working key and the first is left pointing at a revoked one. The provider warns when this happens, but distinct names avoid it.
 - `project_id` (Number) Id of the project events on this key open incidents in. Changing it replaces the key.
-
-### Optional
-
-- `name` (String) Label shown in the project's routing-key list (for example the monitor's name). Defaults to `Routing key` when unset; names need not be unique. Editable in place.
 
 ### Read-Only
 

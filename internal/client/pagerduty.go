@@ -2,9 +2,6 @@ package client
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
 	"strconv"
 )
 
@@ -35,6 +32,10 @@ type PagerDuty struct {
 	UpdatedAt          string  `json:"updated_at"`
 }
 
+// ResourceID implements Identified. The link has no id of its own because the
+// project IS its identity — which is also what lets a create be verified.
+func (p *PagerDuty) ResourceID() int64 { return p.ProjectID }
+
 // PagerDutyMinSeverities are the severities the link will forward at or above.
 // They are the incident severities, so the allowlist lives in one place.
 var PagerDutyMinSeverities = IncidentSeverities
@@ -51,25 +52,23 @@ func (c *Client) GetPagerDuty(ctx context.Context, projectID int64) (*PagerDuty,
 	return GetResource[*PagerDuty](ctx, c, pagerDutyPath(projectID), pagerDutyRoot)
 }
 
-// CreatePagerDuty POSTs the link. `routing_key` is required; the API refuses a
-// null or blank one rather than storing a credential-less integration.
+// CreatePagerDuty creates the link through the verified create path.
+// `routing_key` is required; the API refuses a null or blank one rather than
+// storing a credential-less integration.
 //
-// This does not go through CreateResource: the resource has no id, so there is
-// nothing to verify a create against. It does not need one — the singleton is
-// its own guard, because a second POST is a 422 CodePagerDutyAlreadyConfigured
-// instead of a duplicate row.
+// Verification matters here even though the resource has no id of its own. The
+// Idempotency-Key is derived from the payload, so re-creating an identical
+// declaration inside the 24-hour window replays the original 201 — and if the
+// link was deleted in between, that replay describes a link the server no
+// longer has. The CodePagerDutyAlreadyConfigured guard cannot catch it, since
+// a replayed request never reaches the controller. A GET on the singleton is
+// the authoritative answer, and a 404 there is exactly the signal
+// CreateResource re-POSTs on, under a fresh key.
 func (c *Client) CreatePagerDuty(ctx context.Context, projectID int64, fields Fields, idempotencyKey string) (*PagerDuty, error) {
-	path := pagerDutyPath(projectID)
-	var raw json.RawMessage
-	if err := c.Post(ctx, path, map[string]any{pagerDutyRoot: fields}, &raw, WithIdempotencyKey(idempotencyKey)); err != nil {
-		return nil, err
-	}
-	out, err := DecodeResource[*PagerDuty](raw, pagerDutyRoot)
-	if err != nil {
-		return nil, &Error{Method: http.MethodPost, Path: path, Status: http.StatusCreated, Err: err,
-			Message: fmt.Sprintf("create response could not be decoded as a %s: %s", pagerDutyRoot, err)}
-	}
-	return out, nil
+	return CreateResource(ctx, c, pagerDutyPath(projectID), pagerDutyRoot, fields, idempotencyKey,
+		VerifyByGet(func(ctx context.Context, id int64) (*PagerDuty, error) {
+			return c.GetPagerDuty(ctx, id)
+		}))
 }
 
 // UpdatePagerDuty PATCHes the link with an If-Match precondition carrying the

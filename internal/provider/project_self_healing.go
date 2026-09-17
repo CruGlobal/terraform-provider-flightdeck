@@ -124,7 +124,9 @@ func selfHealingSchema() schema.Attribute {
 			"The endpoint merges, so this block only ever sends what you configure: a threshold you leave unset keeps " +
 			"whatever the project has (the server's documented default, until someone overrides it), and a setting you " +
 			"never name is never disturbed — including one changed in the console. `short_window_minutes` must not " +
-			"exceed `long_window_minutes`, checked against the merged result rather than against what you sent. A write " +
+			"exceed `long_window_minutes`; the API checks that against the merged result, so a write naming only one " +
+			"of them can still be refused by the other's stored value. Terraform can only check the pair when both are " +
+			"in the configuration, so that refusal arrives during apply rather than at plan. A write " +
 			"here bumps the project's `lock_version`. The `self_healing` key is refused in `features`; it is spelled " +
 			"`feature_enabled` here.",
 		Optional: true,
@@ -182,6 +184,12 @@ func (positiveFloat64) ValidateFloat64(_ context.Context, req validator.Float64R
 
 // validateSelfHealingConfig checks the cross-field rule the API enforces
 // (short window <= long window) when both sides are known at plan time.
+//
+// The API checks the same rule against the MERGED result, so it can still
+// refuse a write that names only one window because of the other's stored
+// value. Terraform cannot see that stored value at plan time — a configuration
+// omitting a threshold is saying nothing about it — so that case surfaces as
+// an apply-time 422 rather than being guessed at here.
 func validateSelfHealingConfig(ctx context.Context, block types.Object, diags *diag.Diagnostics) {
 	if block.IsNull() || block.IsUnknown() {
 		return

@@ -247,6 +247,55 @@ func TestPagerDutyIntegration_importCarriesNoKey(t *testing.T) {
 	})
 }
 
+// Destroying the link and re-declaring it identically must actually recreate
+// it. The Idempotency-Key is a hash of the request body, so the second create
+// sends the same key as the first and the API replays its cached 201 — which
+// describes a link that no longer exists. Without verifying the create against
+// the singleton's show route, the apply reported success, state recorded a
+// link, and nothing was being paged.
+//
+// The final step is the assertion: if the server had no link, the refresh
+// would drop it from state and the plan would not be empty.
+func TestPagerDutyIntegration_recreateAfterDestroy(t *testing.T) {
+	env := newTestEnv(t, "pagerduty_integration")
+	identifier := randIdentifier()
+	withLink := pagerDutyConfig(env, identifier, fmt.Sprintf(`  routing_key = %q`, pdKeyA))
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{Config: withLink},
+			// Dropping it from configuration destroys the link.
+			{Config: projectFixture(env, identifier)},
+			// The identical declaration comes back, under the same payload
+			// and so the same Idempotency-Key.
+			{Config: withLink},
+			{
+				Config: withLink,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+				Check: resource.TestCheckResourceAttr(pagerDutyRes, "routing_key_last_four", "3333"),
+			},
+		},
+	})
+}
+
+// Every PagerDuty route is workspace-admin, create included — it is the one
+// that spends a paging credential.
+func TestPagerDutyIntegration_requiresWorkspaceAdmin(t *testing.T) {
+	env := newTestEnv(t, "pagerduty_integration")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				PreConfig:   func() { env.fake.SetWorkspaceAdmin(false) },
+				Config:      pagerDutyConfig(env, identifier, fmt.Sprintf(`  routing_key = %q`, pdKeyA)),
+				ExpectError: regexMust(`(?s)HTTP 403`),
+			},
+		},
+	})
+}
+
 func TestPagerDutyIntegration_validation(t *testing.T) {
 	env := newTestEnv(t, "pagerduty_integration")
 	identifier := randIdentifier()

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -356,9 +357,12 @@ const (
 	// names, so a rule that overrides one severity never diffs against the
 	// other three. No configured severities means a null map.
 	incidentPrioritiesManaged incidentPriorityKeys = iota
-	// incidentPrioritiesAll keeps every severity the API resolves (import,
-	// where there is no configuration to defer to).
-	incidentPrioritiesAll
+	// incidentPrioritiesStored keeps only the severities the API actually has
+	// an override for (import, where there is no configuration to defer to).
+	// Recording the whole effective table instead would hand the importer a
+	// first plan that proposes a change — and since `action` replaces whole,
+	// applying it would silently drop the overrides set in the console.
+	incidentPrioritiesStored
 )
 
 // incidentRuleToModel maps an API rule into state. wanted supplies the
@@ -378,7 +382,7 @@ func incidentRuleToModel(ctx context.Context, rule *client.IncidentAlertRule, wa
 		"file_intake":      rawBool(rule.Action["file_intake"]),
 		"notify_webhook":   rawBool(rule.Action["notify_webhook"]),
 		"webhook_url":      rawString("action.webhook_url", rule.Action["webhook_url"], diags),
-		"priority_map":     incidentPriorityMap(ctx, rule.PriorityMap, wanted, scope, diags),
+		"priority_map":     incidentPriorityMap(ctx, rule, wanted, scope, diags),
 	})
 	diags.Append(d...)
 
@@ -399,7 +403,7 @@ func incidentRuleToModel(ctx context.Context, rule *client.IncidentAlertRule, wa
 // stored overrides is what lets a configuration name a severity and give it
 // its own default value without diffing forever: the API drops that row as
 // "not an override", but the effective table still reports it.
-func incidentPriorityMap(ctx context.Context, effective map[string]string, wanted types.Map, scope incidentPriorityKeys, diags *diag.Diagnostics) types.Map {
+func incidentPriorityMap(ctx context.Context, rule *client.IncidentAlertRule, wanted types.Map, scope incidentPriorityKeys, diags *diag.Diagnostics) types.Map {
 	keep := map[string]bool{}
 	switch scope {
 	case incidentPrioritiesManaged:
@@ -409,13 +413,26 @@ func incidentPriorityMap(ctx context.Context, effective map[string]string, wante
 		for k := range wanted.Elements() {
 			keep[k] = true
 		}
-	case incidentPrioritiesAll:
-		for _, k := range client.IncidentSeverities {
+	case incidentPrioritiesStored:
+		stored, err := storedPriorityOverrides(rule.Action["priority_map"])
+		if err != nil {
+			diags.AddError("Unexpected value from Flightdeck",
+				fmt.Sprintf("action.priority_map should be an object of severity to priority but the API returned %s.",
+					strings.TrimSpace(string(rule.Action["priority_map"]))))
+			return types.MapNull(types.StringType)
+		}
+		// No overrides is not an empty map: it is a rule that does not manage
+		// priorities at all, which is what a configuration without the
+		// attribute says too.
+		if len(stored) == 0 {
+			return types.MapNull(types.StringType)
+		}
+		for k := range stored {
 			keep[k] = true
 		}
 	}
 	selected := map[string]string{}
-	for k, v := range effective {
+	for k, v := range rule.PriorityMap {
 		if keep[k] {
 			selected[k] = v
 		}
@@ -423,6 +440,19 @@ func incidentPriorityMap(ctx context.Context, effective map[string]string, wante
 	out, d := types.MapValueFrom(ctx, types.StringType, selected)
 	diags.Append(d...)
 	return out
+}
+
+// storedPriorityOverrides reads the rows the API actually stores, as opposed
+// to the effective table it reports alongside them.
+func storedPriorityOverrides(raw json.RawMessage) (map[string]string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var stored map[string]string
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return nil, err
+	}
+	return stored, nil
 }
 
 // managedPriorityMap pulls the priority_map out of a plan or a prior state:
@@ -561,8 +591,10 @@ func (r *incidentAlertRuleResource) Delete(ctx context.Context, req resource.Del
 }
 
 // ImportState accepts `<project_id>/<rule_id>`: rules are addressed within
-// their project. With no configuration to defer to, every severity of the
-// priority table is recorded.
+// their project. With no configuration to defer to, only the severities the
+// rule actually overrides are recorded — recording the whole effective table
+// would make the first plan after an import propose a change that, applied,
+// would drop those overrides.
 func (r *incidentAlertRuleResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	parts := strings.Split(strings.TrimSpace(req.ID), "/")
 	if len(parts) != 2 {
@@ -582,6 +614,6 @@ func (r *incidentAlertRuleResource) ImportState(ctx context.Context, req resourc
 		addAPIError(&resp.Diagnostics, "Error importing Flightdeck incident alert rule", err)
 		return
 	}
-	state := incidentRuleToModel(ctx, rule, types.MapNull(types.StringType), incidentPrioritiesAll, &resp.Diagnostics)
+	state := incidentRuleToModel(ctx, rule, types.MapNull(types.StringType), incidentPrioritiesStored, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }

@@ -75,8 +75,16 @@ func (c *Client) GetRoutingKey(ctx context.Context, projectID, id int64) (*Routi
 // replay), the replayed row is revoked and the key is minted again under a
 // fresh Idempotency-Key; the stable key is never re-sent. See
 // CreateSecretResource.
-func (c *Client) CreateRoutingKey(ctx context.Context, projectID int64, fields Fields, idempotencyKey string) (*RoutingKey, error) {
-	return CreateSecretResource(ctx, c, routingKeysPath(projectID), routingKeyRoot, fields, idempotencyKey,
+//
+// retiredID reports the row that had to be revoked to get here, or 0. The
+// caller needs to know, because the Idempotency-Key is derived from the
+// payload and nothing else: an earlier attempt at THIS declaration and a
+// DIFFERENT declaration sending an identical payload are indistinguishable
+// from here. The first is a retry recovering itself; the second means a
+// sibling's live credential was just retired. Only the caller can tell them
+// apart, and only if it is told a row went.
+func (c *Client) CreateRoutingKey(ctx context.Context, projectID int64, fields Fields, idempotencyKey string) (key *RoutingKey, retiredID int64, err error) {
+	created, err := CreateSecretResource(ctx, c, routingKeysPath(projectID), routingKeyRoot, fields, idempotencyKey,
 		VerifyByGet(func(ctx context.Context, id int64) (*RoutingKey, error) {
 			return c.GetRoutingKey(ctx, projectID, id)
 		}),
@@ -87,11 +95,13 @@ func (c *Client) CreateRoutingKey(ctx context.Context, projectID int64, fields F
 			if err != nil {
 				return err
 			}
+			retiredID = current.ID
 			if current.IsRevoked() {
 				return nil
 			}
 			return c.RevokeRoutingKey(ctx, projectID, current.ID, current.LockVersion)
 		})
+	return created, retiredID, err
 }
 
 // UpdateRoutingKey PATCHes a key with an If-Match precondition. Only `name` is

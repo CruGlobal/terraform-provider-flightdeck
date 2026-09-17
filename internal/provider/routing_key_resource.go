@@ -91,7 +91,8 @@ func (r *routingKeyResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			"The key is posted to Flightdeck's Events API in a PagerDuty-Events-v2-shaped body:\n\n" +
 			"```json\n{\n  \"routing_key\": \"fd_evt_…\",\n  \"event_action\": \"trigger\",\n  \"dedup_key\": \"disk-full-web-1\",\n" +
 			"  \"payload\": { \"summary\": \"Disk nearly full\", \"severity\": \"warning\", \"source\": \"web-1\" }\n}\n```\n\n" +
-			"A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own. " +
+			"A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own — each " +
+			"with its own `name`, which must be distinct within the project. " +
 			"Receiving events does not imply paging: a key pages only if an escalation policy is attached to it, " +
 			"which is a console operation and read-only here (see `escalation_policy_id`).\n\n" +
 			"The key value is returned by the API **once, on create**, and stored in Terraform state as a sensitive " +
@@ -113,12 +114,16 @@ func (r *routingKeyResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "Label shown in the project's routing-key list (for example the monitor's name). " +
-					"Defaults to `Routing key` when unset; names need not be unique. Editable in place.",
-				Optional:      true,
-				Computed:      true,
-				Validators:    []validator.String{stringvalidator.LengthAtLeast(1)},
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				MarkdownDescription: "Label shown in the project's routing-key list — the monitor's name, usually. " +
+					"Editable in place.\n\n" +
+					"**Give every routing key in a project a distinct name.** A create is made idempotent with a key " +
+					"derived from the request body, and `name` is the only thing in that body, so two keys in one " +
+					"project declared with the same name are one create as far as the API is concerned: the second " +
+					"replays the first, and because a replay never returns the secret the provider retires that row " +
+					"and mints a fresh key. The second declaration ends up holding a working key and the first is left " +
+					"pointing at a revoked one. The provider warns when this happens, but distinct names avoid it.",
+				Required:   true,
+				Validators: []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"routing_key": schema.StringAttribute{
 				MarkdownDescription: "The key value (`fd_evt_…`). Available only when this resource created the key; " +
@@ -165,14 +170,24 @@ func (r *routingKeyResource) Create(ctx context.Context, req resource.CreateRequ
 		return
 	}
 	projectID := plan.ProjectID.ValueInt64()
-	fields := client.Fields{}
-	if !plan.Name.IsNull() && !plan.Name.IsUnknown() {
-		fields["name"] = plan.Name.ValueString()
-	}
-	created, err := r.client.CreateRoutingKey(ctx, projectID, fields, client.PayloadKey("routing_key", strconv.FormatInt(projectID, 10), fields))
+	fields := client.Fields{"name": plan.Name.ValueString()}
+	created, retiredID, err := r.client.CreateRoutingKey(ctx, projectID, fields, client.PayloadKey("routing_key", strconv.FormatInt(projectID, 10), fields))
 	if err != nil {
 		addAPIError(&resp.Diagnostics, "Error creating Flightdeck routing key", err)
 		return
+	}
+	if retiredID != 0 {
+		// Either a previous attempt at this same declaration is recovering
+		// itself, which is fine, or another resource in this project declared
+		// the same name and has just had its live key revoked, which is not.
+		// Nothing below this layer can tell those apart, so say so plainly.
+		resp.Diagnostics.AddWarning("An existing routing key was retired to create this one",
+			fmt.Sprintf("Creating %q replayed an earlier create of an identical declaration, so routing key %d was revoked "+
+				"and a new key minted. A replayed create never returns its secret, so the old key could not be kept.\n\n"+
+				"If an earlier attempt at this same resource failed part-way, this is that attempt being cleaned up and "+
+				"there is nothing to do. If another flightdeck_routing_key in project %d is declared with the name %q, "+
+				"that resource is now holding a revoked key: give each routing key a distinct name and re-apply to mint "+
+				"it a working one.", plan.Name.ValueString(), retiredID, projectID, plan.Name.ValueString()))
 	}
 	// The client guarantees the key carries its secret or fails.
 	state := routingKeyToModel(created, types.StringNull())
@@ -214,10 +229,7 @@ func (r *routingKeyResource) Update(ctx context.Context, req resource.UpdateRequ
 		return
 	}
 	projectID, id := state.ProjectID.ValueInt64(), state.ID.ValueInt64()
-	fields := client.Fields{}
-	if !plan.Name.IsNull() && !plan.Name.IsUnknown() {
-		fields["name"] = plan.Name.ValueString()
-	}
+	fields := client.Fields{"name": plan.Name.ValueString()}
 	updated, err := r.client.UpdateRoutingKey(ctx, projectID, id, fields, state.LockVersion.ValueInt64())
 	if err != nil {
 		if client.IsStale(err) {

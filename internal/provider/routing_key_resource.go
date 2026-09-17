@@ -92,7 +92,9 @@ func (r *routingKeyResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			"```json\n{\n  \"routing_key\": \"fd_evt_…\",\n  \"event_action\": \"trigger\",\n  \"dedup_key\": \"disk-full-web-1\",\n" +
 			"  \"payload\": { \"summary\": \"Disk nearly full\", \"severity\": \"warning\", \"source\": \"web-1\" }\n}\n```\n\n" +
 			"A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own — each " +
-			"with its own `name`, which must be distinct within the project. " +
+			"with its own `name`. Names must be distinct within a project, and **nothing enforces that**: the API " +
+			"accepts duplicates, and the provider can only notice the consequence after the fact and warn (see " +
+			"`name`). " +
 			"Receiving events does not imply paging: a key pages only if an escalation policy is attached to it, " +
 			"which is a console operation and read-only here (see `escalation_policy_id`).\n\n" +
 			"The key value is returned by the API **once, on create**, and stored in Terraform state as a sensitive " +
@@ -121,7 +123,14 @@ func (r *routingKeyResource) Schema(_ context.Context, _ resource.SchemaRequest,
 					"project declared with the same name are one create as far as the API is concerned: the second " +
 					"replays the first, and because a replay never returns the secret the provider retires that row " +
 					"and mints a fresh key. The second declaration ends up holding a working key and the first is left " +
-					"pointing at a revoked one. The provider warns when this happens, but distinct names avoid it.",
+					"pointing at a revoked one.\n\n" +
+					"Requiring a name removes the accidental version of this — two keys declared with no name at all — " +
+					"but a deliberate duplicate name is still reachable. Neither the API nor the provider can prevent " +
+					"it: at the point the collision is detectable, a replay that means *another resource just lost its " +
+					"key* is indistinguishable from one that means *an earlier attempt at this same resource is " +
+					"recovering*, and the second must keep working. So the provider warns rather than failing, the " +
+					"resource left holding a revoked key is dropped from state on the next refresh and recreated, and " +
+					"distinct names avoid the whole thing.",
 				Required:   true,
 				Validators: []validator.String{stringvalidator.LengthAtLeast(1)},
 			},

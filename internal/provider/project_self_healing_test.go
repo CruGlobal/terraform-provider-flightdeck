@@ -1,10 +1,19 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/flightdecktest"
 
@@ -465,4 +474,185 @@ func TestProjectSelfHealing_featureEnabledOmittedIsNotSent(t *testing.T) {
 			t.Fatalf("self-healing write named feature_enabled although the configuration did not: %s", r.Body)
 		}
 	}
+}
+
+// warnSelfHealingWindows is what catches the case validateSelfHealingConfig
+// cannot see: a configuration that raises one burn-rate window past a stored
+// value it never mentions. The pair it judges comes from the PLAN, which fills
+// a dropped threshold from prior state — the same value the API merges into.
+func TestProjectSelfHealing_mergedWindowWarning(t *testing.T) {
+	ctx := context.Background()
+	object := func(shortW, longW types.Int64) types.Object {
+		obj, d := types.ObjectValueFrom(ctx, selfHealingAttrTypes, selfHealingModel{
+			ShortWindowMinutes: shortW,
+			LongWindowMinutes:  longW,
+		})
+		if d.HasError() {
+			t.Fatalf("building the block: %v", d)
+		}
+		return obj
+	}
+	null := types.Int64Null()
+
+	for _, tc := range []struct {
+		name          string
+		config, plan  types.Object
+		expectWarning bool
+	}{
+		{
+			// The review's reproduction: long dropped from configuration,
+			// short raised past the value the server still holds.
+			name:          "one configured, merged pair incoherent",
+			config:        object(types.Int64Value(60), null),
+			plan:          object(types.Int64Value(60), types.Int64Value(10)),
+			expectWarning: true,
+		},
+		{
+			name:   "one configured, merged pair coherent",
+			config: object(types.Int64Value(5), null),
+			plan:   object(types.Int64Value(5), types.Int64Value(60)),
+		},
+		{
+			// Both configured has no staleness question, so it is an error
+			// from validateSelfHealingConfig rather than a warning here.
+			name:   "both configured",
+			config: object(types.Int64Value(60), types.Int64Value(10)),
+			plan:   object(types.Int64Value(60), types.Int64Value(10)),
+		},
+		{
+			// Neither is being written, so nothing changes server-side.
+			name:   "neither configured",
+			config: object(null, null),
+			plan:   object(types.Int64Value(60), types.Int64Value(10)),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var diags diag.Diagnostics
+			warnSelfHealingWindows(ctx, tc.config, tc.plan, &diags)
+			if diags.HasError() {
+				t.Fatalf("expected no errors, got %v", diags.Errors())
+			}
+			if got := diags.WarningsCount() > 0; got != tc.expectWarning {
+				t.Fatalf("warning = %v, want %v (diags: %v)", got, tc.expectWarning, diags)
+			}
+		})
+	}
+}
+
+// The warning does not stand in front of the apply: the API still refuses the
+// merged pair, and that refusal is what the operator ultimately sees.
+func TestProjectSelfHealing_mergedWindowStillFailsAtApply(t *testing.T) {
+	env := newTestEnv(t, "self_healing")
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `
+  name = "Windows"
+  self_healing = {
+    long_window_minutes  = 10
+    short_window_minutes = 5
+  }`),
+				Check: resource.TestCheckResourceAttr(projectRes, "self_healing.long_window_minutes", "10"),
+			},
+			{
+				// long_window_minutes leaves the configuration; short is raised
+				// past the value the server still holds for it.
+				Config: projectConfig(env, identifier, `
+  name = "Windows"
+  self_healing = {
+    short_window_minutes = 60
+  }`),
+				ExpectError: regexMust(`(?s)short_window_minutes\s+cannot\s+exceed\s+long_window_minutes`),
+			},
+		},
+	})
+}
+
+// SelfHealingThresholdKeys documents the endpoint's writable threshold set,
+// but selfHealingFields writes its own list by hand — so the two can drift
+// apart silently, and both are exported, which puts them out of reach of the
+// unused-symbol linters. These two tests are what hold the invariant: one
+// against the write path, one against the API's own answer.
+func TestProjectSelfHealing_writePathMatchesThresholdKeys(t *testing.T) {
+	ctx := context.Background()
+	// Every threshold set, so selfHealingFields emits all of them.
+	block, d := types.ObjectValueFrom(ctx, selfHealingAttrTypes, selfHealingModel{
+		FeatureEnabled:        types.BoolValue(true),
+		BakeMinutes:           types.Int64Value(20),
+		BaselineMultiplier:    types.Float64Value(5),
+		AbsoluteFloor:         types.Float64Value(5),
+		LongWindowMinutes:     types.Int64Value(60),
+		ShortWindowMinutes:    types.Int64Value(5),
+		BurnRate:              types.Float64Value(14.4),
+		SustainCount:          types.Int64Value(3),
+		ConsecutiveErrorLimit: types.Int64Value(3),
+		CooldownMinutes:       types.Int64Value(30),
+		MaxRollbacksPerHour:   types.Int64Value(1),
+		RecoveryWindowMinutes: types.Int64Value(15),
+	})
+	if d.HasError() {
+		t.Fatalf("building the block: %v", d)
+	}
+	var diags diag.Diagnostics
+	fields := selfHealingFields(ctx, block, &diags)
+	if diags.HasError() {
+		t.Fatalf("selfHealingFields: %v", diags.Errors())
+	}
+
+	want := append(append([]string{}, client.SelfHealingThresholdKeys...), "feature_enabled")
+	got := make([]string, 0, len(fields))
+	for k := range fields {
+		got = append(got, k)
+	}
+	sort.Strings(want)
+	sort.Strings(got)
+	if strings.Join(want, ",") != strings.Join(got, ",") {
+		t.Fatalf("the write path and SelfHealingThresholdKeys have drifted:\n  sends: %v\n   list: %v", got, want)
+	}
+	// `armed` is the one thing that must never be written.
+	if _, sent := fields["armed"]; sent {
+		t.Fatal("selfHealingFields sent `armed`; arming is console-only")
+	}
+}
+
+// The same list, against the API's own writable_settings. Fake or live, the
+// endpoint answers with what it will accept, so drift shows up here.
+func TestProjectSelfHealing_thresholdKeysMatchTheAPI(t *testing.T) {
+	env := newTestEnv(t, "self_healing")
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `  name = "Writable settings"`),
+				Check: func(s *terraform.State) error {
+					c, err := client.New(env.endpoint, env.token)
+					if err != nil {
+						return err
+					}
+					id, err := strconv.ParseInt(s.RootModule().Resources[projectRes].Primary.ID, 10, 64)
+					if err != nil {
+						return err
+					}
+					sh, err := c.GetSelfHealing(context.Background(), id)
+					if err != nil {
+						return err
+					}
+					want := append(append([]string{}, client.SelfHealingThresholdKeys...), "feature_enabled")
+					got := append([]string{}, sh.WritableSettings...)
+					sort.Strings(want)
+					sort.Strings(got)
+					if strings.Join(want, ",") != strings.Join(got, ",") {
+						return fmt.Errorf("SelfHealingThresholdKeys no longer mirrors the API:\n  API: %v\n list: %v", got, want)
+					}
+					for _, k := range got {
+						if k == "armed" {
+							return fmt.Errorf("the API now reports `armed` as writable; arming is meant to be console-only")
+						}
+					}
+					return nil
+				},
+			},
+		},
+	})
 }

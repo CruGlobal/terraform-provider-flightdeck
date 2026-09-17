@@ -15,6 +15,10 @@ type SelfHealing struct {
 	GloballyDisarmed bool              `json:"globally_disarmed"`
 	Config           SelfHealingConfig `json:"config"`
 	LockVersion      int64             `json:"lock_version"`
+	// WritableSettings is the endpoint's own list of what it accepts on a
+	// write. It is reported so the provider's idea of that set can be checked
+	// against the API's rather than only asserted in a comment.
+	WritableSettings []string `json:"writable_settings"`
 }
 
 // SelfHealingConfig is the API's resolved self-healing config, the values

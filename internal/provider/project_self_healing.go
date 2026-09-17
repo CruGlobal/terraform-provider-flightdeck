@@ -124,10 +124,10 @@ func selfHealingSchema() schema.Attribute {
 			"The endpoint merges, so this block only ever sends what you configure: a threshold you leave unset keeps " +
 			"whatever the project has (the server's documented default, until someone overrides it), and a setting you " +
 			"never name is never disturbed — including one changed in the console. `short_window_minutes` must not " +
-			"exceed `long_window_minutes`; the API checks that against the merged result, so a write naming only one " +
-			"of them can still be refused by the other's stored value. Terraform can only check the pair when both are " +
-			"in the configuration, so that refusal arrives during apply rather than at plan. A write " +
-			"here bumps the project's `lock_version`. The `self_healing` key is refused in `features`; it is spelled " +
+			"exceed `long_window_minutes`, and the API checks that against the merged result — so a write naming only " +
+			"one of them can still be refused by the other's stored value. Setting both incoherently fails the plan; " +
+			"raising one past a stored value the configuration does not mention is a plan-time **warning**, since the " +
+			"stored value is only as current as the last refresh. A write here bumps the project's `lock_version`. The `self_healing` key is refused in `features`; it is spelled " +
 			"`feature_enabled` here.",
 		Optional: true,
 		Computed: true,
@@ -204,6 +204,57 @@ func validateSelfHealingConfig(ctx context.Context, block types.Object, diags *d
 			fmt.Sprintf("short_window_minutes (%d) cannot exceed long_window_minutes (%d); the severity gate compares a short window against a longer one.",
 				m.ShortWindowMinutes.ValueInt64(), m.LongWindowMinutes.ValueInt64()))
 	}
+}
+
+// warnSelfHealingWindows checks short <= long against the MERGED pair, which
+// the PLAN carries: a threshold dropped from configuration is Optional+Computed
+// with UseStateForUnknown, so the plan fills it from prior state — the same
+// value the API will merge the write into. That catches the case
+// validateSelfHealingConfig cannot see, where a configuration raises one window
+// past a stored value it never mentions.
+//
+// It WARNS rather than errors, on purpose. The merged value is only as current
+// as the last refresh, and a plan run with -refresh=false can carry a stale one
+// — so an error here could block an apply the API would have accepted, and
+// nothing at plan time can tell a stale value from a current one. A warning
+// surfaces the problem before the apply without standing in front of a valid
+// one, which is how this provider handles the rest of its can't-be-certain
+// cases. When BOTH windows are configured there is no staleness question and
+// validateSelfHealingConfig still errors.
+func warnSelfHealingWindows(ctx context.Context, configBlock, planBlock types.Object, diags *diag.Diagnostics) {
+	if configBlock.IsNull() || configBlock.IsUnknown() || planBlock.IsNull() || planBlock.IsUnknown() {
+		return
+	}
+	var cfg, planned selfHealingModel
+	diags.Append(configBlock.As(ctx, &cfg, objectAsOptions)...)
+	diags.Append(planBlock.As(ctx, &planned, objectAsOptions)...)
+	if diags.HasError() {
+		return
+	}
+	configured := func(v types.Int64) bool { return !v.IsNull() && !v.IsUnknown() }
+	shortSet, longSet := configured(cfg.ShortWindowMinutes), configured(cfg.LongWindowMinutes)
+	// Both configured is already an error; neither configured changes nothing.
+	if shortSet == longSet {
+		return
+	}
+	if !configured(planned.ShortWindowMinutes) || !configured(planned.LongWindowMinutes) {
+		return
+	}
+	shortW, longW := planned.ShortWindowMinutes.ValueInt64(), planned.LongWindowMinutes.ValueInt64()
+	if shortW <= longW {
+		return
+	}
+	held, from := "long_window_minutes", "short_window_minutes"
+	if longSet {
+		held, from = "short_window_minutes", "long_window_minutes"
+	}
+	diags.AddAttributeWarning(path.Root("self_healing").AtName(from), "Self-healing burn-rate windows will not be coherent",
+		fmt.Sprintf("This configuration sets %s, and the project's stored %s is %d against a short window of %d. "+
+			"The API checks the pair against the merged result, not against what a write names, so it will refuse "+
+			"this with a 422 during apply.\n\n"+
+			"Set both windows in configuration, or leave %s where the stored value allows. This is a warning rather "+
+			"than an error because the stored value comes from the last refresh: if it changed since, the apply may "+
+			"well succeed.", from, held, longW, shortW, from))
 }
 
 // selfHealingToObject maps the API's resolved config into the block.

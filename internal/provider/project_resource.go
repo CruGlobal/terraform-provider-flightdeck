@@ -24,6 +24,7 @@ var (
 	_ resource.ResourceWithConfigure      = &projectResource{}
 	_ resource.ResourceWithImportState    = &projectResource{}
 	_ resource.ResourceWithValidateConfig = &projectResource{}
+	_ resource.ResourceWithModifyPlan     = &projectResource{}
 )
 
 // NewProjectResource returns the flightdeck_project resource.
@@ -137,6 +138,23 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"slack_channel": slackChannelSchema(),
 		},
 	}
+}
+
+// ModifyPlan checks what ValidateConfig cannot: the self-healing burn-rate
+// windows as the API will MERGE them, which needs the prior values the plan
+// carries for thresholds the configuration no longer mentions.
+func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	// Nothing merged to check while creating (no prior) or destroying (no plan).
+	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+	var config, plan projectModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	warnSelfHealingWindows(ctx, config.SelfHealing, plan.SelfHealing, &resp.Diagnostics)
 }
 
 func (r *projectResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {

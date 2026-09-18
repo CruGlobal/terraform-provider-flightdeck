@@ -92,11 +92,12 @@ func (d *projectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				Computed:            true,
 			},
 			"self_healing": schema.SingleNestedAttribute{
-				MarkdownDescription: "Resolved self-healing control-loop configuration (armed flag and thresholds), read from " +
-					"the project's `self-healing` API resource. Null unless the token's user is a workspace admin and " +
-					"the Flightdeck version exposes the endpoint.",
+				MarkdownDescription: "Resolved self-healing control-loop configuration (the feature switch, the armed flag " +
+					"and the thresholds), read from the project's `self-healing` API resource. Null unless the token's " +
+					"user is a workspace admin and the Flightdeck version exposes the endpoint.",
 				Computed: true,
 				Attributes: map[string]schema.Attribute{
+					"feature_enabled":         schema.BoolAttribute{MarkdownDescription: "Whether the control loop runs at all, in shadow mode or armed.", Computed: true},
 					"armed":                   schema.BoolAttribute{MarkdownDescription: "Whether live rollback is armed.", Computed: true},
 					"bake_minutes":            schema.Int64Attribute{MarkdownDescription: "Eligibility window after a deploy, in minutes.", Computed: true},
 					"baseline_multiplier":     schema.Float64Attribute{MarkdownDescription: "Required multiple of the baseline error rate.", Computed: true},

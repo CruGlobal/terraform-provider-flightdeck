@@ -15,6 +15,10 @@ type SelfHealing struct {
 	GloballyDisarmed bool              `json:"globally_disarmed"`
 	Config           SelfHealingConfig `json:"config"`
 	LockVersion      int64             `json:"lock_version"`
+	// WritableSettings is the endpoint's own list of what it accepts on a
+	// write. It is reported so the provider's idea of that set can be checked
+	// against the API's rather than only asserted in a comment.
+	WritableSettings []string `json:"writable_settings"`
 }
 
 // SelfHealingConfig is the API's resolved self-healing config, the values
@@ -35,8 +39,10 @@ type SelfHealingConfig struct {
 	RecoveryWindowMinutes int64   `json:"recovery_window_minutes"`
 }
 
-// SelfHealingThresholdKeys are the writable self_healing settings, in the order
-// the API documents them. "armed" is deliberately absent.
+// SelfHealingThresholdKeys are the writable threshold settings, in the order
+// the API documents them. "armed" is deliberately absent, and "feature_enabled"
+// is writable but is not a threshold, so the endpoint's full writable set is
+// this list plus that one key.
 var SelfHealingThresholdKeys = []string{
 	"bake_minutes", "baseline_multiplier", "absolute_floor", "long_window_minutes",
 	"short_window_minutes", "burn_rate", "sustain_count", "consecutive_error_limit",
@@ -55,8 +61,15 @@ func (c *Client) GetSelfHealing(ctx context.Context, projectID int64) (*SelfHeal
 	return GetResource[*SelfHealing](ctx, c, selfHealingPath(projectID), selfHealingRoot)
 }
 
-// UpdateSelfHealing PATCHes threshold settings (the keys of Config, never
-// `armed`) under an If-Match carrying the PROJECT's lock_version.
+// UpdateSelfHealing PATCHes writable settings (the thresholds and
+// `feature_enabled`, never `armed`) under an If-Match carrying the PROJECT's
+// lock_version.
+//
+// The endpoint MERGES: a key that is absent keeps its stored value, so a write
+// only ever changes what it names. A threshold sent as JSON null drops the
+// project's override and restores the documented default — the only way to
+// spell "unset", since a default is not otherwise writable. `feature_enabled`
+// sent as null is a no-op rather than a reset.
 func (c *Client) UpdateSelfHealing(ctx context.Context, projectID int64, settings Fields, projectLockVersion int64) (*SelfHealing, error) {
 	return PatchResource[*SelfHealing](ctx, c, selfHealingPath(projectID), selfHealingRoot, settings, &projectLockVersion)
 }

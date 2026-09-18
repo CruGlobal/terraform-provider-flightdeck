@@ -49,9 +49,9 @@ func (p *flightdeckProvider) Metadata(_ context.Context, _ provider.MetadataRequ
 func (p *flightdeckProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "The `flightdeck` provider manages a Flightdeck workspace's project configuration " +
-			"— projects (including their self-healing rollback thresholds), workflow states, labels, members, " +
-			"GitHub repository links, ingestion tokens, error alert rules and outbound webhooks — through its REST " +
-			"API, so that configuration can live in " +
+			"— projects (including their self-healing rollback configuration), workflow states, labels, members, " +
+			"GitHub repository links, ingestion tokens, error and incident alert rules, Events API routing keys, " +
+			"PagerDuty links and outbound webhooks — through its REST API, so that configuration can live in " +
 			"Terraform alongside the rest of an application's infrastructure. Flightdeck is a project-management " +
 			"application (workspaces, projects, work items) with built-in error tracking and incident management.\n\n" +
 			"## Authentication\n\n" +
@@ -145,8 +145,11 @@ func (p *flightdeckProvider) Resources(_ context.Context) []func() resource.Reso
 		NewProjectMemberResource,
 		NewIngestionTokenResource,
 		NewErrorAlertRuleResource,
+		NewIncidentAlertRuleResource,
 		NewWebhookResource,
 		NewGithubIntegrationResource,
+		NewRoutingKeyResource,
+		NewPagerDutyIntegrationResource,
 	}
 }
 

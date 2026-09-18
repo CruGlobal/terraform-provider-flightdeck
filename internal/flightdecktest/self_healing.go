@@ -91,8 +91,22 @@ var selfHealingLimits = map[string]selfHealingLimit{
 func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, string, string) {
 	resolved := resolveSelfHealing(p.SelfHealing)
 	for k := range submitted {
-		if _, known := selfHealingLimits[k]; !known && k != "armed" && k != "lock_version" {
+		if _, known := selfHealingLimits[k]; !known && k != "armed" && k != "feature_enabled" && k != "lock_version" {
 			return http.StatusUnprocessableEntity, "invalid_attribute", "unknown self-healing setting: " + k
+		}
+	}
+	// feature_enabled is the twelfth writable setting. It lives on the
+	// project's feature map, not among the thresholds, and a null is a no-op
+	// rather than a reset.
+	if v, has := submitted["feature_enabled"]; has && v != nil {
+		switch v.(type) {
+		case bool, string:
+			if p.Features == nil {
+				p.Features = map[string]bool{}
+			}
+			p.Features["self_healing"] = truthy(v)
+		default:
+			return http.StatusUnprocessableEntity, "invalid_attribute", "feature_enabled must be true or false"
 		}
 	}
 	if v, has := submitted["armed"]; has && v != nil {
@@ -106,7 +120,7 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 		next[k] = v
 	}
 	for k, v := range submitted {
-		if k == "armed" || k == "lock_version" {
+		if k == "armed" || k == "feature_enabled" || k == "lock_version" {
 			continue
 		}
 		if v == nil {
@@ -137,7 +151,11 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 	shortW, _ := asFloat64(after["short_window_minutes"])
 	longW, _ := asFloat64(after["long_window_minutes"])
 	if shortW > longW {
-		return http.StatusUnprocessableEntity, "invalid_attribute", "short_window_minutes cannot exceed long_window_minutes"
+		// The API names both values, and it compares the MERGED pair — so a
+		// write naming only one window can be refused by the other's stored
+		// value. Tests match on this shape, so keep it close to the API's.
+		return http.StatusUnprocessableEntity, "invalid_attribute",
+			"short_window_minutes (" + asString(int64(shortW)) + ") cannot exceed long_window_minutes (" + asString(int64(longW)) + ")"
 	}
 	p.SelfHealing = next
 	return 0, "", ""
@@ -152,10 +170,11 @@ func (s *Server) serializeSelfHealing(p *Project) map[string]any {
 	for k, v := range p.SelfHealing {
 		overrides[k] = v
 	}
-	writable := make([]string, 0, len(selfHealingLimits))
+	writable := make([]string, 0, len(selfHealingLimits)+1)
 	for k := range selfHealingLimits {
 		writable = append(writable, k)
 	}
+	writable = append(writable, "feature_enabled")
 	return map[string]any{
 		"project_id": p.ID, "feature_enabled": enabled, "globally_disarmed": false,
 		"config": resolveSelfHealing(p.SelfHealing), "overrides": overrides,
@@ -210,10 +229,16 @@ func (s *Server) updateSelfHealing(w http.ResponseWriter, r *http.Request) {
 	if !checkIfMatch(w, r, p.LockVersion) {
 		return
 	}
+	// A struct copy shares the maps, and applySelfHealing writes to both, so
+	// deep-copy each: a rejected write must leave the project untouched.
 	candidate := *p
 	candidate.SelfHealing = map[string]any{}
 	for k, v := range p.SelfHealing {
 		candidate.SelfHealing[k] = v
+	}
+	candidate.Features = map[string]bool{}
+	for k, v := range p.Features {
+		candidate.Features[k] = v
 	}
 	if status, code, msg := s.applySelfHealing(&candidate, attrs); status != 0 {
 		writeError(w, status, code, msg)

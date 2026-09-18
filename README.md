@@ -14,8 +14,10 @@ built-in error tracking and incident management; this provider covers
 the settings that
 define how an application's project is set up — the project itself, its
 workflow states and labels, who has access, error-ingestion tokens,
-alert rules and outbound webhooks — can live in Terraform next to the
-rest of that application's infrastructure.
+error and incident alert rules, the Events API routing keys external
+monitors use to open incidents, where incidents page, and outbound
+webhooks — can live in Terraform next to the rest of that application's
+infrastructure.
 
 It deliberately does **not** manage runtime planning data (work items,
 sprints, modules, comments). Those belong to the people using the
@@ -25,12 +27,15 @@ project, not to infrastructure code.
 
 | Resource | Manages |
 | --- | --- |
-| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing thresholds, Slack channel configuration; reports the (read-only) GitHub repository link. |
+| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing configuration, Slack channel configuration; reports the (read-only) GitHub repository link. |
 | `flightdeck_state` | A workflow state within a project (name, group, color, default, position). |
 | `flightdeck_label` | A label within a project. |
 | `flightdeck_project_member` | A user's membership of a project (by membership id) and their role. |
 | `flightdeck_ingestion_token` | An error-ingestion token for a project (the secret is returned once, on create). |
 | `flightdeck_error_alert_rule` | A trigger → conditions → action error alert rule. |
+| `flightdeck_incident_alert_rule` | The incident-lifecycle sibling: a trigger → conditions → action rule on `incident_opened` or `incident_repeated`, with the priority it gives what it files. |
+| `flightdeck_routing_key` | An Events API routing key: the credential an external monitor presents to open a Flightdeck incident. Independent of paging. |
+| `flightdeck_pagerduty_integration` | A project's link to a PagerDuty service, forwarding signals to PagerDuty's Events API v2. One per project; the credential is a write-only argument. |
 | `flightdeck_webhook` | An outbound webhook, workspace-wide or scoped to one project. |
 | `flightdeck_github_integration` | A project's link to a GitHub repository, with Flightdeck registering the repository webhook or the caller supplying the shared secret, and what a failed workflow run files. |
 
@@ -53,6 +58,8 @@ release includes.
 ## Requirements
 
 - [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.13
+  (`flightdeck_pagerduty_integration.routing_key` is a write-only
+  argument, which needs >= 1.11 — already below this floor)
 - A Flightdeck deployment whose `/api/v1` includes the project
   configuration endpoints, and a personal access token for the
   workspace you want to manage
@@ -124,8 +131,10 @@ Full reference docs (generated from the provider schema) live in
 
 Projects import by numeric id or by identifier; states, labels, webhooks
 and GitHub integrations by their own numeric id; project members,
-ingestion tokens and error alert rules by `<project_id>/<id>` (members
-also by `<project_id>/user:<user_id>`):
+ingestion tokens, error alert rules, incident alert rules and routing
+keys by `<project_id>/<id>` (members also by
+`<project_id>/user:<user_id>`); the PagerDuty link by the project id
+alone, since there is one per project:
 
 ```sh
 terraform import flightdeck_project.app 42
@@ -133,6 +142,8 @@ terraform import flightdeck_project.app APP
 terraform import flightdeck_state.done 17
 terraform import flightdeck_project_member.deploy_bot 42/user:7
 terraform import flightdeck_error_alert_rule.new_errors 42/12
+terraform import flightdeck_incident_alert_rule.opened 42/13
+terraform import flightdeck_pagerduty_integration.app 42
 ```
 
 Each resource's documentation page shows its import command.

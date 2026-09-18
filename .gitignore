@@ -20,3 +20,9 @@ example.tf
 .idea/
 .vscode/
 *.swp
+
+# Local credentials for acceptance tests
+.env
+.env.local
+.env.test
+.env.*.local

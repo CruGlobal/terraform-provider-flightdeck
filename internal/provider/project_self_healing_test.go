@@ -495,17 +495,34 @@ func TestProjectSelfHealing_mergedWindowWarning(t *testing.T) {
 	null := types.Int64Null()
 
 	for _, tc := range []struct {
-		name          string
-		config, plan  types.Object
-		expectWarning bool
+		name         string
+		config, plan types.Object
+		// wantDetail is every substring the warning must contain. Counting
+		// warnings is not enough: the sentence names two windows and two
+		// numbers, and pairing them wrongly is the failure this guards.
+		wantDetail []string
 	}{
 		{
 			// The review's reproduction: long dropped from configuration,
 			// short raised past the value the server still holds.
-			name:          "one configured, merged pair incoherent",
-			config:        object(types.Int64Value(60), null),
-			plan:          object(types.Int64Value(60), types.Int64Value(10)),
-			expectWarning: true,
+			name:   "short configured, merged pair incoherent",
+			config: object(types.Int64Value(60), null),
+			plan:   object(types.Int64Value(60), types.Int64Value(10)),
+			wantDetail: []string{
+				"sets short_window_minutes to 60",
+				"stored long_window_minutes is 10",
+			},
+		},
+		{
+			// The mirror: long is lowered below a short window the
+			// configuration never mentions. Same hazard, other side.
+			name:   "long configured, merged pair incoherent",
+			config: object(null, types.Int64Value(10)),
+			plan:   object(types.Int64Value(30), types.Int64Value(10)),
+			wantDetail: []string{
+				"sets long_window_minutes to 10",
+				"stored short_window_minutes is 30",
+			},
 		},
 		{
 			name:   "one configured, merged pair coherent",
@@ -532,8 +549,20 @@ func TestProjectSelfHealing_mergedWindowWarning(t *testing.T) {
 			if diags.HasError() {
 				t.Fatalf("expected no errors, got %v", diags.Errors())
 			}
-			if got := diags.WarningsCount() > 0; got != tc.expectWarning {
-				t.Fatalf("warning = %v, want %v (diags: %v)", got, tc.expectWarning, diags)
+			if len(tc.wantDetail) == 0 {
+				if diags.WarningsCount() != 0 {
+					t.Fatalf("expected no warning, got %v", diags.Warnings())
+				}
+				return
+			}
+			if diags.WarningsCount() != 1 {
+				t.Fatalf("expected exactly one warning, got %v", diags.Warnings())
+			}
+			detail := diags.Warnings()[0].Detail()
+			for _, want := range tc.wantDetail {
+				if !strings.Contains(detail, want) {
+					t.Fatalf("warning does not say %q:\n%s", want, detail)
+				}
 			}
 		})
 	}

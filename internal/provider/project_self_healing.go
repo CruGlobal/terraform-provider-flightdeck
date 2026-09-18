@@ -244,17 +244,22 @@ func warnSelfHealingWindows(ctx context.Context, configBlock, planBlock types.Ob
 	if shortW <= longW {
 		return
 	}
-	held, from := "long_window_minutes", "short_window_minutes"
+	// Each name is carried with its own value. Swapping labels while the
+	// values stayed in positional order is exactly how this sentence came to
+	// report the wrong number for the stored window.
+	from, fromValue := "short_window_minutes", shortW
+	held, heldValue := "long_window_minutes", longW
 	if longSet {
-		held, from = "short_window_minutes", "long_window_minutes"
+		from, fromValue = "long_window_minutes", longW
+		held, heldValue = "short_window_minutes", shortW
 	}
 	diags.AddAttributeWarning(path.Root("self_healing").AtName(from), "Self-healing burn-rate windows will not be coherent",
-		fmt.Sprintf("This configuration sets %s, and the project's stored %s is %d against a short window of %d. "+
-			"The API checks the pair against the merged result, not against what a write names, so it will refuse "+
-			"this with a 422 during apply.\n\n"+
+		fmt.Sprintf("This configuration sets %s to %d, and the project's stored %s is %d. A short window may not "+
+			"exceed a long one, and the API checks that against the merged pair rather than against what a write "+
+			"names, so it will refuse this with a 422 during apply.\n\n"+
 			"Set both windows in configuration, or leave %s where the stored value allows. This is a warning rather "+
 			"than an error because the stored value comes from the last refresh: if it changed since, the apply may "+
-			"well succeed.", from, held, longW, shortW, from))
+			"well succeed.", from, fromValue, held, heldValue, from))
 }
 
 // selfHealingToObject maps the API's resolved config into the block.

@@ -147,6 +147,10 @@ func (r *incidentAlertRuleResource) Schema(_ context.Context, _ resource.SchemaR
 			"`condition` and `action` are sent whole and **replace** what the API has stored, so the configuration is " +
 			"authoritative for both. Every other attribute keeps its current value when you leave it out — see " +
 			"`enabled`.\n\n" +
+			"Two rules declared identically in one project collapse into a single API rule — a create is made " +
+			"idempotent with a key derived from the request body, so identical bodies are one create — and both " +
+			"resources then manage that one row, with destroying either stranding the other. Duplicate rules serve " +
+			"no purpose, so give each one a distinguishing `name`.\n\n" +
 			"Import with `<project_id>/<rule_id>`: `terraform import flightdeck_incident_alert_rule.paged 42/12`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{

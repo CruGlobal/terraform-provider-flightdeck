@@ -6,6 +6,7 @@ description: |-
   Manages an incident alert rule in a Flightdeck project: when an incident trigger fires for an incident that satisfies the conditions, run the enabled actions. It is the incident-lifecycle sibling of flightdeck_error_alert_rule and does not share its vocabulary — the triggers are incident_opened and incident_repeated, the condition gates on min_severity rather than an error level, and the action has no open_incident or escalation_policy_id (the incident already exists).
   At least one action must be enabled. notify_webhook requires webhook_url. Creating a rule requires the project's incidents feature to be enabled; the gate is on create only, so an existing rule keeps working if the feature is later switched off.
   condition and action are sent whole and replace what the API has stored, so the configuration is authoritative for both. Every other attribute keeps its current value when you leave it out — see enabled.
+  Two rules declared identically in one project collapse into a single API rule — a create is made idempotent with a key derived from the request body, so identical bodies are one create — and both resources then manage that one row, with destroying either stranding the other. Duplicate rules serve no purpose, so give each one a distinguishing name.
   Import with <project_id>/<rule_id>: terraform import flightdeck_incident_alert_rule.paged 42/12.
 ---
 
@@ -16,6 +17,8 @@ Manages an incident alert rule in a Flightdeck project: when an incident *trigge
 At least one action must be enabled. `notify_webhook` requires `webhook_url`. Creating a rule requires the project's `incidents` feature to be enabled; the gate is on create only, so an existing rule keeps working if the feature is later switched off.
 
 `condition` and `action` are sent whole and **replace** what the API has stored, so the configuration is authoritative for both. Every other attribute keeps its current value when you leave it out — see `enabled`.
+
+Two rules declared identically in one project collapse into a single API rule — a create is made idempotent with a key derived from the request body, so identical bodies are one create — and both resources then manage that one row, with destroying either stranding the other. Duplicate rules serve no purpose, so give each one a distinguishing `name`.
 
 Import with `<project_id>/<rule_id>`: `terraform import flightdeck_incident_alert_rule.paged 42/12`.
 

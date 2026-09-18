@@ -317,6 +317,25 @@ func TestPagerDutyIntegration_validation(t *testing.T) {
 				Config:      pagerDutyConfig(env, identifier, `  routing_key = ""`),
 				ExpectError: regexMust(`(?s)string length must be at least 1`),
 			},
+			{
+				// The API stores a display label trimmed, and maps blank to
+				// null. service_id is Optional without being Computed, so the
+				// stored value has to equal the configured one — a value the
+				// API would normalise has to be refused at plan, or the apply
+				// dies with "inconsistent result after apply", which says
+				// nothing about what to change. "" is what a variable with an
+				// empty default hands you.
+				Config: pagerDutyConfig(env, identifier, fmt.Sprintf(`
+  routing_key = %q
+  service_id  = ""`, pdKeyA)),
+				ExpectError: regexMust(`(?s)must\s+not\s+be\s+empty\s+or\s+have\s+leading\s+or\s+trailing`),
+			},
+			{
+				Config: pagerDutyConfig(env, identifier, fmt.Sprintf(`
+  routing_key = %q
+  service_id  = " PABC123 "`, pdKeyA)),
+				ExpectError: regexMust(`(?s)must\s+not\s+be\s+empty\s+or\s+have\s+leading\s+or\s+trailing`),
+			},
 		},
 	})
 }

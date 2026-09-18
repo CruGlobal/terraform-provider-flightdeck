@@ -76,29 +76,49 @@ func (c *Client) GetRoutingKey(ctx context.Context, projectID, id int64) (*Routi
 // fresh Idempotency-Key; the stable key is never re-sent. See
 // CreateSecretResource.
 //
-// retiredID reports the row that had to be revoked to get here, or 0. The
-// caller needs to know, because the Idempotency-Key is derived from the
-// payload and nothing else: an earlier attempt at THIS declaration and a
-// DIFFERENT declaration sending an identical payload are indistinguishable
-// from here. The first is a retry recovering itself; the second means a
-// sibling's live credential was just retired. Only the caller can tell them
+// retiredID reports the row this create actually revoked to get here, or 0.
+// The caller needs to know, because two declarations sending an identical body
+// send an identical Idempotency-Key: an earlier attempt at THIS declaration
+// and a DIFFERENT declaration with the same name are indistinguishable by
+// payload alone. The first is a retry recovering itself; the second means a
+// sibling's live credential was just retired. Only the caller can tell those
 // apart, and only if it is told a row went.
+//
+// One case IS distinguishable from here, and is handled rather than reported:
+// `name` is editable in place, but the cached create is keyed on the body that
+// carried the ORIGINAL name, and the API honours that key for 24 hours. So a
+// row renamed since can be named by a create that has nothing to do with it —
+// somebody freed a name and somebody else reused it. A row whose CURRENT name
+// is not the one just sent is demonstrably not this create's earlier attempt,
+// so it is left alone; the caller then mints under a fresh key and the new
+// declaration gets its own credential, with nothing destroyed.
 func (c *Client) CreateRoutingKey(ctx context.Context, projectID int64, fields Fields, idempotencyKey string) (key *RoutingKey, retiredID int64, err error) {
+	sentName, named := fields["name"].(string)
 	created, err := CreateSecretResource(ctx, c, routingKeysPath(projectID), routingKeyRoot, fields, idempotencyKey,
 		VerifyByGet(func(ctx context.Context, id int64) (*RoutingKey, error) {
 			return c.GetRoutingKey(ctx, projectID, id)
 		}),
 		func(ctx context.Context, replayed *RoutingKey) error {
 			// The replayed body carries the lock_version at creation time; the
-			// row may have moved on, so revoke against the CURRENT version.
+			// row may have moved on, so read the CURRENT one.
 			current, err := c.GetRoutingKey(ctx, projectID, replayed.ID)
 			if err != nil {
 				return err
 			}
-			retiredID = current.ID
+			// Already gone: nothing to retire, and nothing to tell the caller.
+			// This is the ordinary rotation path, where the destroy revoked
+			// the row before the create replayed.
 			if current.IsRevoked() {
 				return nil
 			}
+			// Renamed since it was created, so this replay is not ours.
+			if named && current.Name != sentName {
+				return nil
+			}
+			// Set before the revoke, not after: if the revoke or the re-mint
+			// that follows it fails, which row went is exactly what the
+			// caller most needs to be told.
+			retiredID = current.ID
 			return c.RevokeRoutingKey(ctx, projectID, current.ID, current.LockVersion)
 		})
 	return created, retiredID, err

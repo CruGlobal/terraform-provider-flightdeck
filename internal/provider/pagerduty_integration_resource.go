@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -182,8 +183,11 @@ func (r *pagerDutyIntegrationResource) Schema(_ context.Context, _ resource.Sche
 			},
 			"service_id": schema.StringAttribute{
 				MarkdownDescription: "PagerDuty service id, recorded for display only — Flightdeck does not call " +
-					"PagerDuty's REST API with it. Removing it from configuration clears it.",
-				Optional: true,
+					"PagerDuty's REST API with it. Removing it from configuration clears it; it cannot be set to an " +
+					"empty or space-padded value, because the API stores those normalised and the stored value has " +
+					"to match what you wrote.",
+				Optional:   true,
+				Validators: []validator.String{stringvalidator.RegexMatches(unpaddedPattern, "must not be empty or have leading or trailing whitespace")},
 			},
 			"service_url": schema.StringAttribute{
 				MarkdownDescription: "Link to the PagerDuty service, recorded for display only. Must be an http(s) URL. " +
@@ -201,6 +205,12 @@ func (r *pagerDutyIntegrationResource) Schema(_ context.Context, _ resource.Sche
 		},
 	}
 }
+
+// unpaddedPattern matches a non-empty string with no leading or trailing
+// whitespace — the form the API stores a display label in. An attribute that
+// is Optional without being Computed has to come back exactly as configured,
+// so a value the API would normalise has to be refused at plan instead.
+var unpaddedPattern = regexp.MustCompile(`^\S(.*\S)?$`)
 
 // lastFour returns the trailing four characters of a key, the only part of it
 // the API ever reports back.

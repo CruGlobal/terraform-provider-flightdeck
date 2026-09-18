@@ -86,7 +86,7 @@ resource "flightdeck_pagerduty_integration" "app" {
 - `enabled` (Boolean) Whether signals are forwarded. A new link is enabled. `false` keeps the stored credential and forwards nothing. When unset, the current value is kept — including one changed in the console — so set it explicitly for Terraform to own it.
 - `min_severity` (String) Forward only signals at or above this severity: one of `critical`, `error`, `warning`, `info`. Defaults to `error` on a new link. When unset, the current value is kept, so set it explicitly for Terraform to own it.
 - `routing_key_version` (String) An arbitrary value you change to force the routing key to be re-sent. Needed only when a rotation is invisible to the last-four comparison — a new key ending in the same four characters as the old one. Any value works; a date or an incrementing number is usual.
-- `service_id` (String) PagerDuty service id, recorded for display only — Flightdeck does not call PagerDuty's REST API with it. Removing it from configuration clears it.
+- `service_id` (String) PagerDuty service id, recorded for display only — Flightdeck does not call PagerDuty's REST API with it. Removing it from configuration clears it; it cannot be set to an empty or space-padded value, because the API stores those normalised and the stored value has to match what you wrote.
 - `service_url` (String) Link to the PagerDuty service, recorded for display only. Must be an http(s) URL. Removing it from configuration clears it.
 
 ### Read-Only

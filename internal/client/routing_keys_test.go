@@ -43,10 +43,18 @@ func newRoutingKeyServer(t *testing.T) (*routingKeyServer, *Client) {
 			writeTestJSON(w, http.StatusCreated, body)
 			return
 		}
+		// The row stores the name it was created with, as the API does — the
+		// rename path depends on that being real rather than hardcoded.
+		var sent map[string]map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&sent)
+		name, _ := sent["routing_key"]["name"].(string)
+		if name == "" {
+			name = "Routing key"
+		}
 		s.next++
 		id := s.next
 		row := map[string]any{
-			"id": id, "project_id": 1, "name": "k", "last_four": "aaaa",
+			"id": id, "project_id": 1, "name": name, "last_four": "aaaa",
 			"masked": "fd_evt_…aaaa", "revoked": false, "lock_version": 0,
 		}
 		s.rows[id] = row
@@ -68,6 +76,22 @@ func newRoutingKeyServer(t *testing.T) (*routingKeyServer, *Client) {
 		if !ok {
 			writeTestJSON(w, http.StatusNotFound, map[string]any{"error": "Not found", "code": "not_found"})
 			return
+		}
+		writeTestJSON(w, http.StatusOK, row)
+	})
+	mux.HandleFunc("PATCH /api/v1/projects/{pid}/routing-keys/{id}", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		row, ok := s.rows[id]
+		if !ok {
+			writeTestJSON(w, http.StatusNotFound, map[string]any{"error": "Not found", "code": "not_found"})
+			return
+		}
+		var body map[string]map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if name, present := body["routing_key"]["name"]; present {
+			row["name"] = name
 		}
 		writeTestJSON(w, http.StatusOK, row)
 	})
@@ -160,5 +184,83 @@ func TestPayloadKey_sameBodySameKeyDifferentNameDiffers(t *testing.T) {
 	}
 	if !strings.HasPrefix(same, "tf-") {
 		t.Fatalf("unexpected key shape %q", same)
+	}
+}
+
+// A key renamed in place leaves its ORIGINAL name claimed in the API's
+// idempotency cache for 24 hours, because the cached create was keyed on the
+// body that carried that name. Declaring a new key with the freed-up name
+// therefore replays that create — and the row it names is live, and belongs to
+// somebody else. Revoking it is the same harm as the sibling collision,
+// reached by a sequence the schema invites: `name` is editable in place, and
+// freeing a name to reuse it is a normal thing to do.
+func TestCreateRoutingKey_renamedRowIsNotRevokedByAReusedName(t *testing.T) {
+	s, c := newRoutingKeyServer(t)
+	ctx := context.Background()
+	original := Fields{"name": "Uptime monitor"}
+	stable := PayloadKey("routing_key", "1", original)
+
+	first, _, err := c.CreateRoutingKey(ctx, 1, original, stable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Renamed in place: same row, same live secret, different label.
+	if _, err := c.UpdateRoutingKey(ctx, 1, first.ID, Fields{"name": "Uptime monitor (eu)"}, first.LockVersion); err != nil {
+		t.Fatal(err)
+	}
+
+	// A different monitor now takes the name the first one gave up.
+	reused, retiredID, err := c.CreateRoutingKey(ctx, 1, original, stable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.ID == first.ID {
+		t.Fatalf("the replay was returned instead of a fresh key: %+v", reused)
+	}
+	if len(s.revoked) != 0 {
+		t.Fatalf("revoked %v — row %d is live and owned by another resource; a reused name must not take it", s.revoked, first.ID)
+	}
+	if retiredID != 0 {
+		t.Fatalf("retiredID = %d, want 0: nothing was retired", retiredID)
+	}
+	// And the renamed row is still usable.
+	still, err := c.GetRoutingKey(ctx, 1, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if still.IsRevoked() {
+		t.Fatalf("row %d was revoked", first.ID)
+	}
+}
+
+// A replay of a create whose row is ALREADY revoked retires nothing, so the
+// caller must not be told a row went. This is the path `terraform apply
+// -replace` takes — the rotation the docs recommend — and a warning that fires
+// on the happy path is one people learn to skip past.
+func TestCreateRoutingKey_alreadyRevokedRowIsNotReportedAsRetired(t *testing.T) {
+	s, c := newRoutingKeyServer(t)
+	ctx := context.Background()
+	fields := Fields{"name": "Rotating"}
+	stable := PayloadKey("routing_key", "1", fields)
+
+	first, _, err := c.CreateRoutingKey(ctx, 1, fields, stable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The destroy half of a replacement.
+	if err := c.RevokeRoutingKey(ctx, 1, first.ID, first.LockVersion); err != nil {
+		t.Fatal(err)
+	}
+	before := len(s.revoked)
+
+	_, retiredID, err := c.CreateRoutingKey(ctx, 1, fields, stable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retiredID != 0 {
+		t.Fatalf("retiredID = %d, want 0: row %d was already revoked, so this create retired nothing", retiredID, first.ID)
+	}
+	if len(s.revoked) != before {
+		t.Fatalf("revoked %v: nothing more should have been revoked", s.revoked)
 	}
 }

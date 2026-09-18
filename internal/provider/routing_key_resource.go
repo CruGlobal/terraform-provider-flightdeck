@@ -117,20 +117,16 @@ func (r *routingKeyResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			},
 			"name": schema.StringAttribute{
 				MarkdownDescription: "Label shown in the project's routing-key list — the monitor's name, usually. " +
-					"Editable in place.\n\n" +
-					"**Give every routing key in a project a distinct name.** A create is made idempotent with a key " +
-					"derived from the request body, and `name` is the only thing in that body, so two keys in one " +
-					"project declared with the same name are one create as far as the API is concerned: the second " +
-					"replays the first, and because a replay never returns the secret the provider retires that row " +
-					"and mints a fresh key. The second declaration ends up holding a working key and the first is left " +
-					"pointing at a revoked one.\n\n" +
-					"Requiring a name removes the accidental version of this — two keys declared with no name at all — " +
-					"but a deliberate duplicate name is still reachable. Neither the API nor the provider can prevent " +
-					"it: at the point the collision is detectable, a replay that means *another resource just lost its " +
-					"key* is indistinguishable from one that means *an earlier attempt at this same resource is " +
-					"recovering*, and the second must keep working. So the provider warns rather than failing, the " +
-					"resource left holding a revoked key is dropped from state on the next refresh and recreated, and " +
-					"distinct names avoid the whole thing.",
+					"Editable in place. **Give every routing key in a project a distinct name:** a create is made " +
+					"idempotent with a key derived from the request body, and `name` is the only thing in that body, " +
+					"so two keys declared in one project with the same name are one create as far as the API is " +
+					"concerned. The second replays the first, and because a replay never returns the secret the " +
+					"provider retires that row and mints a fresh key — leaving the first declaration pointing at a " +
+					"revoked one until the next apply re-mints it. The provider warns when that happens; it cannot " +
+					"prevent it, because at the point it is detectable a sibling colliding and an earlier attempt of " +
+					"the same resource recovering itself look identical, and the second has to keep working. Reusing " +
+					"a name a key was *renamed away from* is safe: the provider checks the stored name before " +
+					"retiring anything.",
 				Required:   true,
 				Validators: []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
@@ -154,12 +150,12 @@ func (r *routingKeyResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			"escalation_policy_id": schema.Int64Attribute{
 				MarkdownDescription: "Escalation policy that events on this key page, or null for a key that records " +
 					"incidents without paging anyone — which is the default, and the point of a routing key being " +
-					"separate from paging.\n\n" +
-					"**Read-only here.** Flightdeck's escalation policies and on-call schedules have no API and are " +
-					"deliberately not managed by this provider: on-call belongs in PagerDuty (see " +
-					"`flightdeck_pagerduty_integration`), and Terraforming a second on-call system is what that split " +
-					"exists to avoid. Attach a policy from the Flightdeck console if you want one; this attribute " +
-					"reports what is attached so the state of the world is visible, and a value here is never written.",
+					"separate from paging. **Read-only here:** Flightdeck's escalation policies and on-call schedules " +
+					"have no API and are deliberately not managed by this provider, because on-call belongs in " +
+					"PagerDuty (see `flightdeck_pagerduty_integration`) and Terraforming a second on-call system is " +
+					"what that split exists to avoid. Attach a policy from the Flightdeck console if you want one; " +
+					"this attribute reports what is attached so the state of the world is visible, and a value here " +
+					"is never written.",
 				Computed:      true,
 				Validators:    []validator.Int64{readOnlyAttribute("escalation policies are attached from the Flightdeck console and have no API")},
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
@@ -182,6 +178,16 @@ func (r *routingKeyResource) Create(ctx context.Context, req resource.CreateRequ
 	fields := client.Fields{"name": plan.Name.ValueString()}
 	created, retiredID, err := r.client.CreateRoutingKey(ctx, projectID, fields, client.PayloadKey("routing_key", strconv.FormatInt(projectID, 10), fields))
 	if err != nil {
+		// A retired row is reported on the failure path too. The revoke
+		// happens before the re-mint, so a create that fails after it has
+		// already taken a key away — and an operator staring at a generic
+		// create error is exactly who needs to be told which one.
+		if retiredID != 0 {
+			resp.Diagnostics.AddWarning("A routing key was revoked before this create failed",
+				fmt.Sprintf("Routing key %d was revoked while recovering a replayed create, and the replacement did not "+
+					"complete. That key is gone: anything still presenting it will be rejected. Re-apply to mint a new "+
+					"one, and check whether another resource in project %d was relying on it.", retiredID, projectID))
+		}
 		addAPIError(&resp.Diagnostics, "Error creating Flightdeck routing key", err)
 		return
 	}

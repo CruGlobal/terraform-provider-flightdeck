@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.3.0...v0.4.0) (2026-09-18)
+
+
+### Added
+
+* expose ci_failure_action on flightdeck_github_integration ([#20](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/20)) ([5db6aac](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/5db6aac24f790ba09bf2fb77af7290eef7083539))
+* incident alert rules, Events API routing keys and a per-project PagerDuty link ([#23](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/23)) ([68bd8b7](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/68bd8b7cd45f1e6fd4fd56111c952e339f662ad7))
+
 ## [0.3.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.2.0...v0.3.0) (2026-09-10)
 
 

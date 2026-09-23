@@ -190,7 +190,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	block, lockVersion := writeSelfHealing(ctx, r.client, created.ID, config.SelfHealing, created.LockVersion, &resp.Diagnostics)
 	state.SelfHealing = block
 	slack, lockVersion := writeSlackChannel(ctx, r.client, created.ID, config.SlackChannel, plan.SlackChannel,
-		types.ObjectNull(slackChannelAttrTypes), lockVersion, &resp.Diagnostics)
+		types.ObjectNull(slackChannelAttrTypes), lockVersion, slackChannelOnCreate, &resp.Diagnostics)
 	state.SlackChannel = slack
 	state.LockVersion = types.Int64Value(lockVersion)
 	// The project is created even if a block's write failed; record it so the
@@ -260,7 +260,7 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	block, lockVersion := writeSelfHealing(ctx, r.client, id, config.SelfHealing, updated.LockVersion, &resp.Diagnostics)
 	newState.SelfHealing = block
 	slack, lockVersion := writeSlackChannel(ctx, r.client, id, config.SlackChannel, plan.SlackChannel,
-		state.SlackChannel, lockVersion, &resp.Diagnostics)
+		state.SlackChannel, lockVersion, slackChannelOnUpdate, &resp.Diagnostics)
 	newState.SlackChannel = slack
 	newState.LockVersion = types.Int64Value(lockVersion)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)

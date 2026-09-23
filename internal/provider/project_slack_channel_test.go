@@ -9,11 +9,19 @@ import (
 	"testing"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
+	"github.com/CruGlobal/terraform-provider-flightdeck/internal/flightdecktest"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
 // Enabling a project's Slack channel asks Flightdeck to create a channel in
@@ -566,10 +574,19 @@ func TestProjectSlackChannel_insufficientScopes(t *testing.T) {
 }
 
 func TestProjectSlackChannel_warningsForTheNoProvisionStates(t *testing.T) {
+	failed, linked := "failed", "linked"
+	note := "Invite @example-bot to #example-channel"
+	blank := "  "
+	healthy := client.SlackChannel{ChannelEnabled: true, ChannelAvailable: true, ScopesSufficient: true}
+	withStatus := func(sc client.SlackChannel, status, note *string) client.SlackChannel {
+		sc.ProvisionStatus, sc.ProvisionNote = status, note
+		return sc
+	}
 	cases := []struct {
 		name    string
 		channel client.SlackChannel
 		want    string
+		detail  string
 	}{
 		{
 			name:    "no integration",
@@ -583,7 +600,29 @@ func TestProjectSlackChannel_warningsForTheNoProvisionStates(t *testing.T) {
 		},
 		{
 			name:    "healthy",
-			channel: client.SlackChannel{ChannelEnabled: true, ChannelAvailable: true, ScopesSufficient: true},
+			channel: healthy,
+		},
+		{
+			name:    "linked",
+			channel: withStatus(healthy, &linked, nil),
+		},
+		{
+			name:    "provision failed",
+			channel: withStatus(healthy, &failed, &note),
+			want:    "provisioning failed",
+			detail:  note,
+		},
+		{
+			name:    "provision failed without a note",
+			channel: withStatus(healthy, &failed, &blank),
+			want:    "provisioning failed",
+			detail:  "did not say why",
+		},
+		{
+			// A failure left over from before the channel was switched off is
+			// not worth a warning.
+			name:    "failed, but the channel is off",
+			channel: withStatus(client.SlackChannel{ChannelAvailable: true, ScopesSufficient: true}, &failed, &note),
 		},
 		{
 			name:    "channel off",
@@ -609,6 +648,9 @@ func TestProjectSlackChannel_warningsForTheNoProvisionStates(t *testing.T) {
 			}
 			if !strings.Contains(warnings[0].Summary(), tc.want) {
 				t.Errorf("warning %q does not mention %q", warnings[0].Summary(), tc.want)
+			}
+			if !strings.Contains(warnings[0].Detail(), tc.detail) {
+				t.Errorf("warning detail does not carry %q:\n%s", tc.detail, warnings[0].Detail())
 			}
 		})
 	}
@@ -660,6 +702,446 @@ func TestProjectSlackChannel_endpointAbsent(t *testing.T) {
 			},
 		},
 	})
+}
+
+// A channel that exists but that Flightdeck cannot post to is refused before
+// anything is saved. On an update the apply fails with the API's message, the
+// next plan still shows the change, and once the bot is invited the same
+// apply works.
+func TestProjectSlackChannel_unusableChannelOnUpdateIsAnErrorUntilFixed(t *testing.T) {
+	env := newTestEnv(t, "slack_channel")
+	env.requireFake(t) // enabling asks Slack for a real channel
+	env.fake.SetSlackChannelUnusable("example-channel", true)
+	identifier := randIdentifier()
+	enabled := projectConfig(env, identifier, `
+  name = "Slack unusable"
+  slack_channel = {
+    enabled = true
+    name    = "example-channel"
+  }`)
+	var id string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// Naming the channel without enabling it checks nothing.
+				Config: projectConfig(env, identifier, `
+  name = "Slack unusable"
+  slack_channel = {
+    name = "example-channel"
+  }`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					captureAttr(projectRes, "id", &id),
+					resource.TestCheckResourceAttr(projectRes, "slack_channel.enabled", "false"),
+					resource.TestCheckResourceAttr(projectRes, "lock_version", "1"),
+				),
+			},
+			{
+				// Enabling it runs the check, which refuses the channel. The API's
+				// message names the channel and the bot to invite.
+				Config: enabled,
+				ExpectError: regexMust(`(?s)Slack channel cannot be used.*Invite\s+` + flightdecktest.SlackBotHandle +
+					`\s+to\s+#example-channel.*saved\s+none`),
+			},
+			{
+				// Nothing was saved, so the change is still pending. The project
+				// PATCH that runs before the block's write bumped lock_version to 2;
+				// the refused write left it there.
+				PreConfig: func() {
+					p := env.fake.Project(mustInt(id))
+					if p.SlackChannelEnabled || p.SlackProvisionStatus != "" || p.LockVersion != 2 {
+						t.Errorf("a refused write must save nothing: enabled=%t status=%q lock_version=%d",
+							p.SlackChannelEnabled, p.SlackProvisionStatus, p.LockVersion)
+					}
+				},
+				Config:             enabled,
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: true,
+			},
+			{
+				// The bot is invited. The same configuration now applies in place.
+				PreConfig: func() { env.fake.SetSlackChannelUnusable("example-channel", false) },
+				Config:    enabled,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(projectRes, plancheck.ResourceActionUpdate),
+						plancheck.ExpectKnownValue(projectRes,
+							tfjsonpath.New("slack_channel").AtMapKey("enabled"), knownvalue.Bool(true)),
+					},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "slack_channel.enabled", "true"),
+					resource.TestCheckResourceAttr(projectRes, "slack_channel.basename", "example-channel"),
+					resource.TestCheckResourceAttr(projectRes, "slack_channel.provision_status", "queued"),
+					// Project PATCH (3), then the Slack channel PATCH (4).
+					resource.TestCheckResourceAttr(projectRes, "lock_version", "4"),
+				),
+			},
+			{
+				Config:   enabled,
+				PlanOnly: true,
+			},
+		},
+	})
+}
+
+// On the apply that creates the project, the same refusal is a warning: an
+// error would taint the new project, and the next apply would replace it. The
+// project is kept, the next plan shows the Slack change again, and once the
+// bot is invited that plan applies as an ordinary update.
+func TestProjectSlackChannel_unusableChannelOnCreateWarnsAndRetries(t *testing.T) {
+	env := newTestEnv(t, "slack_channel")
+	env.requireFake(t) // enabling asks Slack for a real channel
+	env.fake.SetSlackChannelUnusable("example-channel", true)
+	identifier := randIdentifier()
+	enabled := projectConfig(env, identifier, `
+  name = "Slack create"
+  slack_channel = {
+    enabled = true
+    name    = "example-channel"
+  }`)
+	var id string
+	recorded := runTestRecordingApplyDiagnostics(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// No error, so the project is created and kept. The plan after
+				// the apply is not empty: its refresh reads back what Flightdeck
+				// saved for the block, which is nothing.
+				Config:             enabled,
+				ExpectNonEmptyPlan: true,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					captureAttr(projectRes, "id", &id),
+					checkNotTainted(projectRes),
+				),
+			},
+			{
+				// Nothing was saved, so the change is still pending.
+				PreConfig: func() {
+					p := env.fake.Project(mustInt(id))
+					if p.SlackChannelEnabled || p.SlackChannelName != "" || p.LockVersion != 0 {
+						t.Errorf("a refused write must save nothing: enabled=%t name=%q lock_version=%d",
+							p.SlackChannelEnabled, p.SlackChannelName, p.LockVersion)
+					}
+				},
+				Config:             enabled,
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: true,
+			},
+			{
+				// The bot is invited. The retry is an in-place update of the same
+				// project; a tainted one would plan a replace instead.
+				PreConfig: func() { env.fake.SetSlackChannelUnusable("example-channel", false) },
+				Config:    enabled,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(projectRes, plancheck.ResourceActionUpdate),
+						plancheck.ExpectKnownValue(projectRes,
+							tfjsonpath.New("slack_channel").AtMapKey("enabled"), knownvalue.Bool(true)),
+					},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					func(*terraform.State) error {
+						if got := env.fake.AllProjectIDs(); len(got) != 1 {
+							return fmt.Errorf("expected the one project to be kept, the fake has %v", got)
+						}
+						return nil
+					},
+					resource.TestCheckResourceAttrPtr(projectRes, "id", &id),
+					resource.TestCheckResourceAttr(projectRes, "slack_channel.enabled", "true"),
+					resource.TestCheckResourceAttr(projectRes, "slack_channel.name", "example-channel"),
+					resource.TestCheckResourceAttr(projectRes, "slack_channel.basename", "example-channel"),
+					resource.TestCheckResourceAttr(projectRes, "slack_channel.provision_status", "queued"),
+					// Project PATCH (1), then the Slack channel PATCH (2).
+					resource.TestCheckResourceAttr(projectRes, "lock_version", "2"),
+				),
+			},
+			{
+				Config:   enabled,
+				PlanOnly: true,
+			},
+		},
+	})
+
+	if errs := recorded.bySeverity(tfprotov6.DiagnosticSeverityError); len(errs) != 0 {
+		t.Errorf("no apply may fail, got %d error(s): %s", len(errs), errs[0].Summary)
+	}
+	warnings := recorded.bySeverity(tfprotov6.DiagnosticSeverityWarning)
+	if len(warnings) != 1 {
+		t.Fatalf("expected exactly one warning, from the create, got %d", len(warnings))
+	}
+	warning := warnings[0]
+	if warning.Summary != "Slack channel cannot be used" {
+		t.Errorf("summary = %q", warning.Summary)
+	}
+	for _, want := range []string{"Invite " + flightdecktest.SlackBotHandle + " to #example-channel", "The project was created"} {
+		if !strings.Contains(warning.Detail, want) {
+			t.Errorf("warning detail does not carry %q:\n%s", want, warning.Detail)
+		}
+	}
+	if want := tftypes.NewAttributePath().WithAttributeName("slack_channel").WithAttributeName("name"); !warning.Attribute.Equal(want) {
+		t.Errorf("warning should point at %s, got %s", want, warning.Attribute)
+	}
+}
+
+// checkNotTainted fails when Terraform has marked a resource for replacement.
+func checkNotTainted(res string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[res]
+		if !ok {
+			return fmt.Errorf("%s not in state", res)
+		}
+		if rs.Primary.Tainted {
+			return fmt.Errorf("%s is tainted, so the next apply would replace it", res)
+		}
+		return nil
+	}
+}
+
+// slackChannelBlock builds a slack_channel object with the given attributes
+// set and everything else null, the way a configuration that sets only those
+// attributes decodes.
+func slackChannelBlock(t *testing.T, set map[string]attr.Value) types.Object {
+	t.Helper()
+	ctx := t.Context()
+	attrs := map[string]attr.Value{}
+	for name, typ := range slackChannelAttrTypes {
+		null, err := typ.ValueFromTerraform(ctx, tftypes.NewValue(typ.TerraformType(ctx), nil))
+		if err != nil {
+			t.Fatalf("null %s: %v", name, err)
+		}
+		attrs[name] = null
+	}
+	for name, value := range set {
+		attrs[name] = value
+	}
+	obj, diags := types.ObjectValue(slackChannelAttrTypes, attrs)
+	if diags.HasError() {
+		t.Fatalf("building a slack_channel block: %v", diags.Errors())
+	}
+	return obj
+}
+
+func slackChannelTestProject(t *testing.T, env *testEnv, name string) (*client.Client, int64) {
+	t.Helper()
+	c, err := client.New(env.fake.URL, env.fake.Token())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := client.Fields{"name": name, "identifier": randIdentifier()}
+	p, err := c.CreateProject(t.Context(), fields, client.PayloadKey("project", "", fields))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, p.ID
+}
+
+// The refusal as writeSlackChannel reports it on an update: an error on the
+// attribute that picked the channel, the API's message as the detail, and
+// nothing recorded for the block, since nothing was saved.
+func TestWriteSlackChannel_unusableChannelOnUpdateRecordsNothing(t *testing.T) {
+	cases := []struct {
+		name    string
+		config  map[string]attr.Value
+		channel string
+		at      path.Path
+	}{
+		{
+			name: "named channel",
+			config: map[string]attr.Value{
+				"enabled": types.BoolValue(true),
+				"name":    slackChannelNameValue{StringValue: types.StringValue("example-channel")},
+			},
+			channel: "example-channel",
+			at:      path.Root("slack_channel").AtName("name"),
+		},
+		{
+			// No name: the channel comes from the project name, so the error
+			// points at the block rather than at an attribute nobody set.
+			name:    "project-name default",
+			config:  map[string]attr.Value{"enabled": types.BoolValue(true)},
+			channel: "fd-slack-default",
+			at:      path.Root("slack_channel"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t, "slack_channel")
+			env.requireFake(t)
+			env.fake.SetSlackChannelUnusable(tc.channel, true)
+			c, id := slackChannelTestProject(t, env, "Slack default")
+			ctx := t.Context()
+
+			var diags diag.Diagnostics
+			prior := readSlackChannel(ctx, c, id, types.MapNull(types.BoolType), slackEventsManaged, &diags)
+			if diags.HasError() {
+				t.Fatalf("reading the block: %v", diags.Errors())
+			}
+			block, lockVersion := writeSlackChannel(ctx, c, id, slackChannelBlock(t, tc.config),
+				types.ObjectUnknown(slackChannelAttrTypes), prior, 0, slackChannelOnUpdate, &diags)
+
+			if !block.IsNull() {
+				t.Errorf("a refused write must not record the block, got %s", block)
+			}
+			if lockVersion != 0 {
+				t.Errorf("a refused write saves nothing, so lock_version must stay 0, got %d", lockVersion)
+			}
+			if len(diags.Warnings()) != 0 {
+				t.Errorf("expected no warnings, got %v", diags.Warnings())
+			}
+			errs := diags.Errors()
+			if len(errs) != 1 {
+				t.Fatalf("expected exactly one error, got %v", errs)
+			}
+			withPath, ok := errs[0].(diag.DiagnosticWithPath)
+			if !ok || !withPath.Path().Equal(tc.at) {
+				t.Errorf("error should point at %s, got %#v", tc.at, errs[0])
+			}
+			if got := errs[0].Summary(); got != "Slack channel cannot be used" {
+				t.Errorf("summary = %q", got)
+			}
+			detail := errs[0].Detail()
+			for _, want := range []string{"Invite " + flightdecktest.SlackBotHandle + " to #" + tc.channel, "saved none"} {
+				if !strings.Contains(detail, want) {
+					t.Errorf("detail does not carry %q:\n%s", want, detail)
+				}
+			}
+			if p := env.fake.Project(id); p.SlackChannelEnabled || p.LockVersion != 0 {
+				t.Errorf("the fake saved a refused write: enabled=%t lock_version=%d", p.SlackChannelEnabled, p.LockVersion)
+			}
+		})
+	}
+}
+
+// On a create the refusal is a warning, and the block keeps every value the
+// plan knew (Terraform requires that of an apply without errors), with the
+// unknowns filled from a fresh read, or null when there is nothing to read.
+func TestWriteSlackChannel_unusableChannelOnCreateKeepsThePlan(t *testing.T) {
+	for _, readable := range []bool{true, false} {
+		t.Run(fmt.Sprintf("read after the refusal works: %t", readable), func(t *testing.T) {
+			env := newTestEnv(t, "slack_channel")
+			env.requireFake(t)
+			env.fake.SetSlackChannelUnusable("example-channel", true)
+			c, id := slackChannelTestProject(t, env, "Slack create")
+			ctx := t.Context()
+			if !readable {
+				route := fmt.Sprintf("/api/v1/projects/%d/slack-channel", id)
+				env.fake.OnNextRequest("GET", route, func() { env.fake.SetSlackChannelEndpoint(false) })
+			}
+
+			configured := map[string]attr.Value{
+				"enabled": types.BoolValue(true),
+				"name":    slackChannelNameValue{StringValue: types.StringValue("example-channel")},
+			}
+			// What a create plans: the configured values, and unknown for the rest.
+			planned := map[string]attr.Value{}
+			for name, typ := range slackChannelAttrTypes {
+				unknown, err := typ.ValueFromTerraform(ctx, tftypes.NewValue(typ.TerraformType(ctx), tftypes.UnknownValue))
+				if err != nil {
+					t.Fatal(err)
+				}
+				planned[name] = unknown
+			}
+			for name, value := range configured {
+				planned[name] = value
+			}
+
+			var diags diag.Diagnostics
+			block, lockVersion := writeSlackChannel(ctx, c, id, slackChannelBlock(t, configured),
+				slackChannelBlock(t, planned), types.ObjectNull(slackChannelAttrTypes), 0, slackChannelOnCreate, &diags)
+
+			if diags.HasError() {
+				t.Fatalf("a create must not fail over the channel: %v", diags.Errors())
+			}
+			warnings := diags.Warnings()
+			if len(warnings) != 1 {
+				t.Fatalf("expected exactly one warning, got %v", warnings)
+			}
+			withPath, ok := warnings[0].(diag.DiagnosticWithPath)
+			if !ok || !withPath.Path().Equal(path.Root("slack_channel").AtName("name")) {
+				t.Errorf("warning should point at slack_channel.name, got %#v", warnings[0])
+			}
+			if got := warnings[0].Summary(); got != "Slack channel cannot be used" {
+				t.Errorf("summary = %q", got)
+			}
+			if !strings.Contains(warnings[0].Detail(), "Invite "+flightdecktest.SlackBotHandle+" to #example-channel") {
+				t.Errorf("detail does not carry the API's message:\n%s", warnings[0].Detail())
+			}
+			if lockVersion != 0 {
+				t.Errorf("a refused write saves nothing, so lock_version must stay 0, got %d", lockVersion)
+			}
+			if block.IsNull() || block.IsUnknown() {
+				t.Fatalf("the create must record the block, got %s", block)
+			}
+			attrs := block.Attributes()
+			for name, value := range configured {
+				if !attrs[name].Equal(value) {
+					t.Errorf("%s = %s, want the planned %s", name, attrs[name], value)
+				}
+			}
+			for name, value := range attrs {
+				if value.IsUnknown() {
+					t.Errorf("%s is still unknown after the apply", name)
+				}
+			}
+			basename := attrs["basename"]
+			switch {
+			case readable && !basename.Equal(types.StringValue("fd-slack-create")):
+				t.Errorf("basename = %s, want the project-name default Flightdeck still has", basename)
+			case !readable && !basename.IsNull():
+				t.Errorf("basename = %s, want null when nothing could be read", basename)
+			}
+			if p := env.fake.Project(id); p.SlackChannelEnabled || p.SlackChannelName != "" || p.LockVersion != 0 {
+				t.Errorf("the fake saved a refused write: enabled=%t name=%q lock_version=%d",
+					p.SlackChannelEnabled, p.SlackChannelName, p.LockVersion)
+			}
+		})
+	}
+}
+
+// A write that comes back with provision_status `failed` is saved, so it is
+// recorded and warned about, never turned into an error.
+func TestWriteSlackChannel_failedProvisionWarns(t *testing.T) {
+	env := newTestEnv(t, "slack_channel")
+	env.requireFake(t)
+	c, id := slackChannelTestProject(t, env, "Slack failed")
+	ctx := t.Context()
+	enabled, err := c.UpdateSlackChannel(ctx, id, client.Fields{"slack_channel_enabled": true}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const note = "Could not post to #fd-slack-failed. Invite " + flightdecktest.SlackBotHandle + " to the channel."
+	env.fake.FailSlackProvision(id, note)
+
+	// The block was never read (state null), so it is written even though the
+	// project already has it enabled. The API saves nothing new and answers
+	// with the job's failure.
+	var diags diag.Diagnostics
+	block, lockVersion := writeSlackChannel(ctx, c, id,
+		slackChannelBlock(t, map[string]attr.Value{"enabled": types.BoolValue(true)}),
+		types.ObjectUnknown(slackChannelAttrTypes), types.ObjectNull(slackChannelAttrTypes), enabled.LockVersion,
+		slackChannelOnUpdate, &diags)
+
+	if diags.HasError() {
+		t.Fatalf("a saved configuration must not be an error: %v", diags.Errors())
+	}
+	warnings := diags.Warnings()
+	if len(warnings) != 1 {
+		t.Fatalf("expected exactly one warning, got %v", warnings)
+	}
+	if !strings.Contains(warnings[0].Summary(), "provisioning failed") {
+		t.Errorf("summary = %q", warnings[0].Summary())
+	}
+	if !strings.Contains(warnings[0].Detail(), note) {
+		t.Errorf("detail does not carry the provision note:\n%s", warnings[0].Detail())
+	}
+	if lockVersion != enabled.LockVersion {
+		t.Errorf("lock_version = %d, want %d", lockVersion, enabled.LockVersion)
+	}
+	if block.IsNull() {
+		t.Fatal("the saved block must be recorded")
+	}
+	if got := block.Attributes()["provision_status"]; !got.Equal(types.StringValue("failed")) {
+		t.Errorf("provision_status = %s, want failed", got)
+	}
 }
 
 func TestSlackChannelNameDerivesToNothing(t *testing.T) {

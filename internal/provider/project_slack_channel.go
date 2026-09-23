@@ -38,7 +38,16 @@ import (
 //     afterwards. Everything the job reports (channel_id, provision_status,
 //     provision_note, linked, invites_skipped) is therefore Computed and never
 //     Optional — the resource converges on configuration, not on the channel
-//     existing, and a refresh picks the outcome up whenever it lands.
+//     existing, and a refresh picks the outcome up whenever it lands. The one
+//     synchronous part is a check the API makes before saving a write that
+//     leaves the channel enabled and not yet linked: a channel that exists
+//     but cannot be posted to is refused with a 422 (slack_channel_unusable)
+//     and nothing is saved. On an update that is an error, because there is
+//     nothing to converge on. On the apply that creates the project it is a
+//     warning, so the new project is not tainted and replaced over a Slack
+//     problem; the refresh before the next plan shows the change again. A job
+//     that fails later is only a warning, because by then the configuration
+//     is saved and an error would desync state.
 //   - THE EVENT FILTER MERGES server-side, unlike every other object on this
 //     API: only the categories a write names change. So event_filter declares
 //     OVERRIDES, not the full set — dropping a category from the map stops
@@ -106,11 +115,23 @@ func slackChannelSchema() schema.Attribute {
 			"resource. Reading and writing it requires the token's user to be an **admin of this project** (a workspace " +
 			"owner or admin qualifies); for other tokens, and on a Flightdeck version without the endpoint, the block is " +
 			"null.\n\n" +
-			"**Provisioning is asynchronous.** Enabling the channel saves the configuration and enqueues a job that " +
-			"creates the channel, links it and invites the project's members; `channel_id`, `linked`, `provision_status` " +
-			"and `provision_note` are filled in afterwards and a later refresh picks them up. An apply that ends with " +
-			"`provision_status` at `queued` has succeeded — it does not wait for Slack, and the pending values never " +
-			"produce a diff.\n\n" +
+			"**Provisioning is asynchronous, after one synchronous check.** When a write leaves the channel enabled " +
+			"and not yet linked, Flightdeck first looks the channel up in Slack. If it exists but Flightdeck cannot " +
+			"post to it (a private channel the Flightdeck bot is not a member of, or an archived channel), the API " +
+			"answers HTTP 422 (`slack_channel_unusable`) and saves nothing. On an update the apply fails with " +
+			"Flightdeck's message, which names the channel and the bot to invite, and the next plan still shows the " +
+			"change: invite the bot, or choose a different `name`, and apply again. On the apply that creates the " +
+			"project, the provider gives the same message as a warning instead, so the new project is kept as " +
+			"created; the next plan shows the Slack change again, and the next apply retries the channel. A channel " +
+			"that does not exist yet passes the check, since Flightdeck can create it. If Slack is rate limiting or " +
+			"unavailable, the check is skipped and the write goes ahead.\n\n" +
+			"Once the check passes, Flightdeck saves the configuration and enqueues a job that creates the channel " +
+			"if needed, links it and invites the project's members. The write may come back already `linked`, but " +
+			"usually `channel_id`, `linked`, `provision_status` and `provision_note` are filled in afterwards and a " +
+			"later refresh picks them up. An apply that ends with `provision_status` at `queued` has succeeded: it " +
+			"does not wait for Slack, and the pending values never produce a diff. If the write comes back with " +
+			"`provision_status` at `failed`, the provider warns and passes `provision_note` along rather than " +
+			"failing, since the configuration is saved.\n\n" +
 			"Nothing provisions at all when `available` is false (the workspace has no connected Slack integration) or " +
 			"`scopes_sufficient` is false (the connection predates the channel scopes). Both are fixed by re-authorizing " +
 			"Slack under Settings → Integrations, which the API cannot do; the provider warns rather than failing, since " +
@@ -126,8 +147,8 @@ func slackChannelSchema() schema.Attribute {
 		Attributes: map[string]schema.Attribute{
 			"enabled": schema.BoolAttribute{
 				MarkdownDescription: "Whether this project gets its own Slack channel. When unset, the project's current " +
-					"value is kept. Turning it on enqueues provisioning; turning it off stops future posts but never " +
-					"deletes the channel on Slack.",
+					"value is kept. Turning it on enqueues provisioning once Flightdeck has checked that it can post to " +
+					"the channel (see above); turning it off stops future posts but never deletes the channel on Slack.",
 				Optional:      true,
 				Computed:      true,
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
@@ -405,6 +426,21 @@ func readSlackChannel(ctx context.Context, c *client.Client, projectID int64, pr
 	return slackChannelToObject(ctx, sc, prior, scope, diags)
 }
 
+// slackChannelApply says which kind of project apply a Slack channel write
+// belongs to. The two answer a slack_channel_unusable refusal differently.
+type slackChannelApply int
+
+const (
+	// slackChannelOnUpdate: the refusal is an error. A failed update leaves
+	// the project in state as it was, so nothing is lost by failing.
+	slackChannelOnUpdate slackChannelApply = iota
+	// slackChannelOnCreate: the refusal is a warning. Any error during a
+	// create makes Terraform taint the new project, and the next apply would
+	// replace it, which is far worse than a channel that still needs its bot
+	// invited.
+	slackChannelOnCreate
+)
+
 // writeSlackChannel brings the project's Slack channel configuration in line
 // with the configured block and returns the block plus the project's
 // lock_version.
@@ -413,13 +449,23 @@ func readSlackChannel(ctx context.Context, c *client.Client, projectID int64, pr
 // not already have: every write re-enqueues provisioning, which puts
 // provision_status back to `queued` on a channel that is merely waiting to be
 // linked, so an apply that changes nothing here must not make one.
-func writeSlackChannel(ctx context.Context, c *client.Client, projectID int64, config, planned, state types.Object, lockVersion int64, diags *diag.Diagnostics) (types.Object, int64) {
+func writeSlackChannel(ctx context.Context, c *client.Client, projectID int64, config, planned, state types.Object, lockVersion int64, apply slackChannelApply, diags *diag.Diagnostics) (types.Object, int64) {
 	if slackChannelWriteNeeded(ctx, config, state, diags) {
 		settings := slackChannelFields(ctx, config, diags)
 		if diags.HasError() {
 			return types.ObjectNull(slackChannelAttrTypes), lockVersion
 		}
 		sc, err := c.UpdateSlackChannel(ctx, projectID, settings, lockVersion)
+		if err != nil && apply == slackChannelOnCreate && client.HasCode(err, client.CodeSlackChannelUnusable) {
+			addSlackChannelUnusable(ctx, config, err, apply, diags)
+			// A create that returns no error must hand back what it planned, so
+			// the configured values are kept even though Flightdeck saved none
+			// of them, and only the unknowns are filled from a fresh read. The
+			// refresh before the next plan reads the real values back, so that
+			// plan shows the Slack change again, as an update.
+			fresh := readSlackChannel(ctx, c, projectID, slackEventFilterOf(ctx, config, diags), slackEventsManaged, diags)
+			return slackChannelKeepPlan(ctx, planned, fresh, diags), lockVersion
+		}
 		if err != nil {
 			switch {
 			case client.IsNotFound(err):
@@ -429,11 +475,20 @@ func writeSlackChannel(ctx context.Context, c *client.Client, projectID int64, c
 			case client.IsForbidden(err):
 				diags.AddAttributeError(path.Root("slack_channel"), "Slack channel configuration requires a project admin",
 					"Only an admin of this project (or a workspace owner or admin) may read or write its Slack channel configuration. "+apiMessage(err))
+			case client.HasCode(err, client.CodeSlackChannelUnusable):
+				// Always an error here: the create's warning is handled above,
+				// because a warning needs the planned block, not the null below.
+				addSlackChannelUnusable(ctx, config, err, slackChannelOnUpdate, diags)
 			case client.IsStale(err):
 				addStaleError(diags, "Project Slack channel configuration", lockVersion, nil, err)
 			default:
 				addAPIError(diags, "Error updating Flightdeck Slack channel configuration", err)
 			}
+			// Null, like every failed sub-block write: the refresh before the
+			// next plan reads the block back, and after a slack_channel_unusable
+			// refusal that read is the project as it was, since nothing was saved
+			// and lock_version did not move. So the change shows in the next plan
+			// again, and applies once the channel can be used.
 			return types.ObjectNull(slackChannelAttrTypes), lockVersion
 		}
 		slackChannelProvisioningWarnings(sc, diags)
@@ -507,9 +562,69 @@ func slackChannelResolveUnknowns(planned, fresh, state types.Object, diags *diag
 	return obj
 }
 
+// slackChannelKeepPlan is the block a create records after a refusal: every
+// value the plan already knows, as promised, and the unknowns from a fresh
+// read. Anything the read could not supply becomes null, since an apply that
+// succeeds may not leave a value unknown.
+func slackChannelKeepPlan(ctx context.Context, planned, fresh types.Object, diags *diag.Diagnostics) types.Object {
+	resolved := slackChannelResolveUnknowns(planned, fresh, types.ObjectNull(slackChannelAttrTypes), diags)
+	if resolved.IsNull() || resolved.IsUnknown() {
+		return types.ObjectNull(slackChannelAttrTypes)
+	}
+	attrs := map[string]attr.Value{}
+	for name, value := range resolved.Attributes() {
+		attrs[name] = value
+		if !value.IsUnknown() {
+			continue
+		}
+		typ := slackChannelAttrTypes[name]
+		null, err := typ.ValueFromTerraform(ctx, tftypes.NewValue(typ.TerraformType(ctx), nil))
+		if err != nil {
+			diags.AddError("Error building the Slack channel block", err.Error())
+			return resolved
+		}
+		attrs[name] = null
+	}
+	obj, d := types.ObjectValue(slackChannelAttrTypes, attrs)
+	diags.Append(d...)
+	return obj
+}
+
+// addSlackChannelUnusable reports the API's refusal of a channel that exists
+// but that Flightdeck cannot post to: an error on an update, a warning on the
+// apply that creates the project (see slackChannelApply). The API's own
+// message leads the detail, because it names the channel and the bot to
+// invite, and neither is known here. The diagnostic points at `name` when the
+// configuration sets one, since that is the channel the check looked up;
+// otherwise the channel comes from the project name, and it points at the
+// block.
+func addSlackChannelUnusable(ctx context.Context, config types.Object, err error, apply slackChannelApply, diags *diag.Diagnostics) {
+	at := path.Root("slack_channel")
+	var cfg slackChannelModel
+	if !config.IsNull() && !config.IsUnknown() && !config.As(ctx, &cfg, objectAsOptions).HasError() &&
+		!cfg.Name.IsNull() && !cfg.Name.IsUnknown() && strings.TrimSpace(cfg.Name.ValueString()) != "" {
+		at = at.AtName("name")
+	}
+	const summary = "Slack channel cannot be used"
+	if apply == slackChannelOnCreate {
+		diags.AddAttributeWarning(at, summary,
+			apiMessage(err)+"\n\n"+
+				"The project was created, but Flightdeck checked the channel before saving and saved none of this "+
+				"block's changes. The next plan shows them again, and the next apply tries the channel again, so fix "+
+				"the channel in Slack, or choose a different `name`, before then.")
+		return
+	}
+	diags.AddAttributeError(at, summary,
+		apiMessage(err)+"\n\n"+
+			"Flightdeck checked the channel before saving and saved none of this block's changes, so the next plan "+
+			"still shows them. Fix the channel in Slack, or choose a different `name`, then apply again.")
+}
+
 // slackChannelProvisioningWarnings flags the two states that look like success
-// and provision nothing. The configuration is stored either way, so this is a
-// warning: the fix is an interactive OAuth flow the API cannot perform.
+// and provision nothing, and a provision that has already failed. The
+// configuration is stored in every case, so these are warnings: the first two
+// need an interactive OAuth flow the API cannot perform, and an error for the
+// third would leave state out of step with what Flightdeck saved.
 func slackChannelProvisioningWarnings(sc *client.SlackChannel, diags *diag.Diagnostics) {
 	if !sc.ChannelEnabled {
 		return
@@ -527,6 +642,17 @@ func slackChannelProvisioningWarnings(sc *client.SlackChannel, diags *diag.Diagn
 			"The configuration is stored, but provisioning will fail: this workspace's Slack connection predates the "+
 				"scopes needed to create channels and invite members. Re-authorize Slack under Settings → Integrations — "+
 				"an interactive authorization the API cannot perform — then re-apply.")
+	case sc.ProvisionStatus != nil && *sc.ProvisionStatus == "failed":
+		note := "Flightdeck did not say why."
+		if sc.ProvisionNote != nil && strings.TrimSpace(*sc.ProvisionNote) != "" {
+			note = "Flightdeck said: " + strings.TrimSpace(*sc.ProvisionNote)
+		}
+		diags.AddAttributeWarning(path.Root("slack_channel").AtName("enabled"),
+			"Slack channel enabled, but provisioning failed",
+			note+"\n\n"+
+				"The configuration is saved, so this apply still succeeded, and `provision_status` stays `failed` until "+
+				"the channel is provisioned. Once the cause is fixed, provisioning runs again the next time this block "+
+				"changes, or from the project's settings page.")
 	}
 }
 

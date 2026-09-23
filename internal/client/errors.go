@@ -38,6 +38,11 @@ const (
 	// PagerDuty: one credential per project, so a second POST is refused (422)
 	// rather than replacing the stored key.
 	CodePagerDutyAlreadyConfigured = "pagerduty_already_configured"
+	// Slack channel: the write would leave the channel enabled and unlinked,
+	// and the channel exists but Flightdeck cannot post to it (a private
+	// channel its bot is not in, or an archived one). 422, and nothing is
+	// saved. The message names the channel and the bot to invite.
+	CodeSlackChannelUnusable = "slack_channel_unusable"
 )
 
 // HasCode reports whether err is an API error carrying the given code.

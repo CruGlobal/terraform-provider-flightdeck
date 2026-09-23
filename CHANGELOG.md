@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.4.0...v0.5.0) (2026-09-23)
+
+
+### Added
+
+* report a Slack channel Flightdeck cannot post to, and warn when provisioning fails ([#24](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/24)) ([33317c0](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/33317c0037a657b8780ba33de8a3935cf88dbe35))
+
 ## [0.4.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.3.0...v0.4.0) (2026-09-18)
 
 

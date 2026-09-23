@@ -10,10 +10,14 @@ import (
 // lives on the project row, so LockVersion is the PROJECT's lock_version: the
 // same token PATCH /api/v1/projects/:id uses, and a write here bumps it.
 //
-// Provisioning is asynchronous. A write saves the configuration and enqueues
-// the job; ChannelID, ProvisionStatus and ProvisionNote are filled in
-// afterwards, so the write's response reports the enqueue, never a finished
-// channel.
+// Provisioning is mostly asynchronous. A write that leaves the channel enabled
+// and not yet linked is first checked against Slack: a channel that exists but
+// cannot be posted to is refused with a 422 (CodeSlackChannelUnusable) and
+// nothing is saved. Otherwise the write saves the configuration and enqueues
+// the job, so its response may already be linked but is usually queued, with
+// ChannelID, ProvisionStatus and ProvisionNote filled in afterwards. When
+// Slack cannot be reached for the check, the write is saved and queued as if
+// it had passed.
 type SlackChannel struct {
 	ProjectID int64 `json:"project_id"`
 	// ChannelAvailable is false when the workspace has no connected Slack
@@ -61,7 +65,8 @@ func (c *Client) GetSlackChannel(ctx context.Context, projectID int64) (*SlackCh
 }
 
 // UpdateSlackChannel PATCHes the writable keys under an If-Match carrying the
-// PROJECT's lock_version. Only the submitted keys change.
+// PROJECT's lock_version. Only the submitted keys change. A channel Flightdeck
+// cannot post to comes back as an *Error with CodeSlackChannelUnusable.
 func (c *Client) UpdateSlackChannel(ctx context.Context, projectID int64, settings Fields, projectLockVersion int64) (*SlackChannel, error) {
 	return PatchResource[*SlackChannel](ctx, c, slackChannelPath(projectID), slackChannelRoot, settings, &projectLockVersion)
 }

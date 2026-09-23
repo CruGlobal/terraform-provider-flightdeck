@@ -8,7 +8,10 @@ import (
 
 func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
-		s.stores["slack_channel"] = &slackChannelStore{enabled: true, available: true, scopesSufficient: true}
+		s.stores["slack_channel"] = &slackChannelStore{
+			enabled: true, available: true, scopesSufficient: true,
+			unusable: map[string]bool{},
+		}
 		mux.HandleFunc("GET /api/v1/projects/{project_id}/slack-channel", s.showSlackChannel)
 		mux.HandleFunc("PATCH /api/v1/projects/{project_id}/slack-channel", s.updateSlackChannel)
 	})
@@ -27,6 +30,10 @@ type slackChannelStore struct {
 	scopesSufficient bool
 	// notAdmin=true withholds :administer_project from the token's user.
 	notAdmin bool
+	// unusable holds the channels, by derived name, that exist in Slack but
+	// that Flightdeck cannot post to: private with the bot not a member, or
+	// archived.
+	unusable map[string]bool
 }
 
 func (s *Server) slackChannelStore() *slackChannelStore {
@@ -58,6 +65,41 @@ func (s *Server) SetProjectAdmin(admin bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.slackChannelStore().notAdmin = !admin
+}
+
+// SlackBotHandle is how the fake's messages name the Flightdeck bot a user
+// has to invite into a channel.
+const SlackBotHandle = "@example-bot"
+
+// SetSlackChannelUnusable marks a channel as one that exists in Slack but that
+// Flightdeck cannot post to (private with the bot not a member, or archived).
+// A write that would leave a project's channel enabled on it and not yet
+// linked is then refused with 422 slack_channel_unusable, and nothing is
+// saved. The name is matched after the API's normalization, so "Example
+// Channel" and "example-channel" are one channel. Passing false makes the
+// channel usable again, the way inviting the bot would.
+func (s *Server) SetSlackChannelUnusable(name string, unusable bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.slackChannelStore()
+	if unusable {
+		st.unusable[normalizeSlackChannelName(name)] = true
+	} else {
+		delete(st.unusable, normalizeSlackChannelName(name))
+	}
+}
+
+// FailSlackProvision stands in for the provision job failing: it records the
+// failure and its note the way the worker would, and leaves the channel
+// unlinked.
+func (s *Server) FailSlackProvision(projectID int64, note string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.projects().byID[projectID]; p != nil {
+		p.SlackChannelID = ""
+		p.SlackProvisionStatus = "failed"
+		p.SlackProvisionNote = note
+	}
 }
 
 // CompleteSlackProvision stands in for the provision job finishing: it links
@@ -288,6 +330,27 @@ func slackChannelChanged(before, after *Project) bool {
 	return false
 }
 
+// checkSlackChannel mirrors the API's synchronous check. A write that leaves
+// the channel enabled and not yet linked looks the channel up in Slack first,
+// and one that exists but cannot be posted to is refused before anything is
+// saved. A channel that does not exist yet passes, since the job can create
+// it. Without a connection that can see channels there is nothing to check
+// with, so the write goes through as it did before the check existed; the API
+// does the same when Slack is rate limiting or down.
+func (s *Server) checkSlackChannel(p *Project) (int, string, string) {
+	st := s.slackChannelStore()
+	if !p.SlackChannelEnabled || p.SlackChannelID != "" || !st.available || !st.scopesSufficient {
+		return 0, "", ""
+	}
+	name := slackChannelBasename(p)
+	if !st.unusable[name] {
+		return 0, "", ""
+	}
+	return http.StatusUnprocessableEntity, "slack_channel_unusable",
+		"#" + name + " is a private channel and " + SlackBotHandle + " is not a member, so Flightdeck cannot post to it. " +
+			"Invite " + SlackBotHandle + " to #" + name + " in Slack, or choose a different channel, then try again."
+}
+
 // enqueueSlackProvision mirrors the model's enqueue: it no-ops when the
 // channel is off or the workspace has no live integration, and otherwise
 // reports a queued job rather than a finished channel.
@@ -416,6 +479,12 @@ func (s *Server) updateSlackChannel(w http.ResponseWriter, r *http.Request) {
 		candidate.SlackEventFilter[k] = v
 	}
 	if status, code, msg := s.applySlackChannel(&candidate, attrs); status != 0 {
+		writeError(w, status, code, msg)
+		return
+	}
+	// Checked on the candidate, so a refused write leaves the project exactly
+	// as it was: no saved keys, no lock_version bump, no enqueue.
+	if status, code, msg := s.checkSlackChannel(&candidate); status != 0 {
 		writeError(w, status, code, msg)
 		return
 	}

@@ -87,6 +87,10 @@ func (d *projectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				MarkdownDescription: "Project visibility, `public_project` or `private_project`.",
 				Computed:            true,
 			},
+			"app": schema.StringAttribute{
+				MarkdownDescription: "The deployed app the project belongs to, as the deploy pipeline's release events name it, if any.",
+				Computed:            true,
+			},
 			"lock_version": schema.Int64Attribute{
 				MarkdownDescription: "Optimistic-locking version the API bumps on every change.",
 				Computed:            true,

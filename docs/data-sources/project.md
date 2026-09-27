@@ -38,6 +38,7 @@ output "app_project_id" {
 
 ### Read-Only
 
+- `app` (String) The deployed app the project belongs to, as the deploy pipeline's release events name it, if any.
 - `archived` (Boolean) Whether the project is archived.
 - `description` (String) Free-text description.
 - `emoji` (String) Emoji shown next to the project name.

@@ -29,6 +29,10 @@ resource "flightdeck_project" "app" {
   emoji       = "📱"
   network     = "private_project" # explicit members only; new projects are public
 
+  # The deployed app this project belongs to (needs a workspace owner or admin
+  # token). Optional: the first release event that names an app binds it.
+  app = "mobile-app"
+
   # Only the feature keys listed here are managed; others keep their value.
   features = {
     intake = true
@@ -83,6 +87,7 @@ resource "flightdeck_project" "support" {
 
 ### Optional
 
+- `app` (String) The deployed app this project belongs to, as the deploy pipeline's release events name it: the app's GitHub repository name, 1 to 100 letters, digits, `.`, `_` or `-`. One project is one app, and within a workspace an app belongs to at most one project (compared ignoring case), so an app another project already has fails the apply (`app_taken`). Setting or changing it needs a **workspace owner or admin** token, even where the token could otherwise update the project. When unset, the project's current app is kept: the first release event that names an app binds the project to it, so leaving this unset leaves the binding to the pipeline. The API can set or change `app` but never clear it (a workspace admin can, in Flightdeck's project settings), so removing it from configuration does not unbind the project. That first binding bumps the project's `lock_version`, so an apply racing it fails once with a lock conflict; run `terraform plan` again and re-apply.
 - `archived` (Boolean) Whether the project is archived. New projects are not archived. When unset, the project's current value is kept (so importing an archived project does not unarchive it).
 - `description` (String) Free-text description. Removing it from configuration clears it.
 - `emoji` (String) Emoji shown next to the project name. Defaults to the server's default (📁).
@@ -108,7 +113,7 @@ A write here bumps the project's `lock_version`. Attributes map onto the API's k
 ### Read-Only
 
 - `id` (Number) Numeric id of the project.
-- `lock_version` (Number) Optimistic-locking version the API bumps on every change (including self-healing and Slack channel writes). Sent as `If-Match` on updates.
+- `lock_version` (Number) Optimistic-locking version the API bumps on every change (including self-healing and Slack channel writes, and the deploy pipeline binding the project's `app`). Sent as `If-Match` on updates.
 
 <a id="nestedatt--self_healing"></a>
 ### Nested Schema for `self_healing`

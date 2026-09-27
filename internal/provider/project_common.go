@@ -33,6 +33,13 @@ var renamedFeatures = map[string]string{
 	"modules": "epics",
 }
 
+// appNamePattern is the API's rule for an app name, which is the app's GitHub
+// repository name: 1 to 100 letters, digits, '.', '_' or '-'. Checking it at
+// plan time also keeps a blank or space-padded value out of the write, where
+// the API would read it as "no opinion" (or trim it) and the apply would end
+// in an inconsistent result instead of an error.
+var appNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+
 // identifierPattern mirrors the model validation (1–10 uppercase
 // letters/digits, starting with a letter). The API upcases input, so the
 // provider requires the canonical form to avoid a perpetual diff.
@@ -51,6 +58,7 @@ type projectModel struct {
 	GithubRepoFullName types.String `tfsdk:"github_repo_full_name"`
 	LeadID             types.Int64  `tfsdk:"lead_id"`
 	Network            types.String `tfsdk:"network"`
+	App                types.String `tfsdk:"app"`
 	LockVersion        types.Int64  `tfsdk:"lock_version"`
 	SelfHealing        types.Object `tfsdk:"self_healing"`
 	SlackChannel       types.Object `tfsdk:"slack_channel"`
@@ -88,6 +96,7 @@ func projectToModel(ctx context.Context, p *client.Project, prior *projectModel,
 		GithubRepoFullName: stringPointerValue(p.GithubRepoFullName),
 		LeadID:             types.Int64Null(),
 		Network:            types.StringNull(),
+		App:                stringPointerValue(p.App),
 		LockVersion:        types.Int64Value(p.LockVersion),
 		SelfHealing:        types.ObjectNull(selfHealingAttrTypes),
 		SlackChannel:       types.ObjectNull(slackChannelAttrTypes),
@@ -153,6 +162,13 @@ func stringPointerValue(s *string) types.String {
 // only when configured. github_repo_full_name is read-only over the API and
 // never sent; the self_healing block travels on its own endpoint.
 //
+// app is sent only when the plan sets or changes it. An unset app plans the
+// prior value (UseStateForUnknown), so it is never sent and the binding the
+// deploy pipeline makes on its first release survives an apply; a configured
+// app equal to the stored one has nothing to say either. That also keeps a
+// token that may not change the app from ever naming it on an unrelated
+// update, although re-sending the stored value would be accepted.
+//
 // network is sent when configured and, on an update (prior != nil), only when
 // it differs from the prior state: re-sending private_project re-runs the
 // server's lock-out guard (it re-creates the actor's and lead's admin
@@ -177,6 +193,11 @@ func projectFields(ctx context.Context, plan, prior *projectModel, diags *diag.D
 	if !plan.Network.IsNull() && !plan.Network.IsUnknown() {
 		if prior == nil || !plan.Network.Equal(prior.Network) {
 			fields["network"] = plan.Network.ValueString()
+		}
+	}
+	if !plan.App.IsNull() && !plan.App.IsUnknown() {
+		if prior == nil || !plan.App.Equal(prior.App) {
+			fields["app"] = plan.App.ValueString()
 		}
 	}
 	if !plan.Features.IsNull() && !plan.Features.IsUnknown() {

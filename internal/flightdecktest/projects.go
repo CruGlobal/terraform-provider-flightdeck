@@ -34,6 +34,9 @@ var featuresElsewhere = map[string]string{
 
 var identifierFormat = regexp.MustCompile(`^[A-Z][A-Z0-9]{0,9}$`)
 
+// appFormat is the API's rule for an app name (its GitHub repository name).
+var appFormat = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+
 // Project is the fake's stored project.
 type Project struct {
 	ID                 int64
@@ -47,6 +50,8 @@ type Project struct {
 	LockVersion        int64
 	LeadID             int64
 	Network            string
+	// App is the deployed app the project belongs to; empty is unset.
+	App string
 	// SelfHealing holds the stored jsonb overrides; reads resolve defaults.
 	SelfHealing map[string]any
 	// Slack channel configuration, all on the project row (see
@@ -125,6 +130,17 @@ func (s *Server) SetNetwork(projectID int64, network string) {
 	}
 }
 
+// BindApp sets a project's app the way the deploy pipeline's first release
+// event naming one does: only while it is unset, bumping lock_version.
+func (s *Server) BindApp(projectID int64, app string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.projects().byID[projectID]; p != nil && p.App == "" {
+		p.App = app
+		p.LockVersion++
+	}
+}
+
 // AllProjectIDs returns every stored project id, deleting ones included.
 func (s *Server) AllProjectIDs() []int64 {
 	s.mu.Lock()
@@ -194,7 +210,7 @@ func (s *Server) serializeProject(p *Project, detail bool) map[string]any {
 		"id": p.ID, "name": p.Name, "identifier": p.Identifier,
 		"description": p.Description, "emoji": p.Emoji, "archived": p.Archived,
 		"features": features, "github_repo_full_name": p.GithubRepoFullName,
-		"lead_id": p.LeadID, "network": p.Network,
+		"lead_id": p.LeadID, "network": p.Network, "app": nullableString(p.App),
 		"lock_version": p.LockVersion,
 		"created_at":   iso(p.CreatedAt), "updated_at": iso(p.UpdatedAt),
 	}
@@ -257,6 +273,29 @@ func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, strin
 			return http.StatusUnprocessableEntity, "invalid_attribute", "network must be one of: private_project, public_project (got " + asString(v) + ")"
 		}
 		p.Network = token
+	}
+	// app: a blank is "no opinion", so it can be set or changed but never
+	// cleared. Re-sending the stored value is always fine; a change needs a
+	// workspace admin, and an app another project has (ignoring case) is taken.
+	// A taken app is app_taken only when nothing else in the write fails; with
+	// another failure the answer is validation_failed listing both.
+	var appTaken string
+	if v, ok := attrs["app"]; ok && v != nil && strings.TrimSpace(asString(v)) != "" {
+		app := strings.TrimSpace(asString(v))
+		if !appFormat.MatchString(app) {
+			return http.StatusUnprocessableEntity, "invalid_attribute", "app must be 1 to 100 letters, digits, '.', '_' or '-' (got " + asString(v) + ")"
+		}
+		if app != p.App {
+			if !s.workspaceAdmin {
+				return http.StatusForbidden, "forbidden", "Only a workspace owner or admin can set or change a project's app."
+			}
+			for _, other := range s.projects().byID {
+				if other.ID != p.ID && !other.Deleting && strings.EqualFold(other.App, app) {
+					appTaken = "App " + app + " already belongs to the " + other.Name + " project in this workspace"
+				}
+			}
+			p.App = app
+		}
 	}
 	if v, ok := attrs["lead_id"]; ok {
 		if v == nil {
@@ -330,16 +369,25 @@ func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, strin
 		}
 	}
 	// Model validations.
+	var failed []string
 	if strings.TrimSpace(p.Name) == "" {
-		return http.StatusUnprocessableEntity, "validation_failed", "Name can't be blank"
+		failed = append(failed, "Name can't be blank")
 	}
 	if !identifierFormat.MatchString(p.Identifier) {
-		return http.StatusUnprocessableEntity, "validation_failed", "Identifier must be 1-10 uppercase letters/numbers"
+		failed = append(failed, "Identifier must be 1-10 uppercase letters/numbers")
 	}
 	for _, other := range s.projects().byID {
 		if other.ID != p.ID && !other.Deleting && other.Identifier == p.Identifier {
-			return http.StatusUnprocessableEntity, "validation_failed", "Identifier has already been taken"
+			failed = append(failed, "Identifier has already been taken")
 		}
+	}
+	switch {
+	case len(failed) > 0 && appTaken != "":
+		return http.StatusUnprocessableEntity, "validation_failed", strings.Join(append(failed, appTaken), ", ")
+	case len(failed) > 0:
+		return http.StatusUnprocessableEntity, "validation_failed", failed[0]
+	case appTaken != "":
+		return http.StatusUnprocessableEntity, "app_taken", appTaken + "."
 	}
 	return 0, "", ""
 }
@@ -435,6 +483,13 @@ func (s *Server) destroyProject(w http.ResponseWriter, r *http.Request) {
 		"id": id, "status": "deleting",
 		"message": "Project marked for deletion and hidden immediately; its rows are being torn down in the background. It is already unreachable through the API.",
 	})
+}
+
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func contains(list []string, v string) bool {

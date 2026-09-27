@@ -16,19 +16,39 @@ import (
 )
 
 // applyDiagnostics collects the diagnostics every ApplyResourceChange call
-// returned during a test. The testing framework only surfaces errors (via
-// ExpectError), so this is how a test asserts a warning an apply produced.
+// returned during a test, and separately those of every plan and refresh. The
+// testing framework only surfaces errors (via ExpectError), so this is how a
+// test asserts a warning the provider produced.
 type applyDiagnostics struct {
 	mu    sync.Mutex
 	diags []*tfprotov6.Diagnostic
+	// plans and reads are what PlanResourceChange and ReadResource returned.
+	// Terraform plans and refreshes more than once per test step, so assert
+	// that a diagnostic is there rather than how many times.
+	plans []*tfprotov6.Diagnostic
+	reads []*tfprotov6.Diagnostic
 }
 
-// bySeverity returns the recorded diagnostics of one severity.
+// bySeverity returns the recorded apply diagnostics of one severity.
 func (a *applyDiagnostics) bySeverity(severity tfprotov6.DiagnosticSeverity) []*tfprotov6.Diagnostic {
+	return a.filter(func(a *applyDiagnostics) []*tfprotov6.Diagnostic { return a.diags }, severity)
+}
+
+// planWarnings returns the warnings any plan returned.
+func (a *applyDiagnostics) planWarnings() []*tfprotov6.Diagnostic {
+	return a.filter(func(a *applyDiagnostics) []*tfprotov6.Diagnostic { return a.plans }, tfprotov6.DiagnosticSeverityWarning)
+}
+
+// readWarnings returns the warnings any refresh returned.
+func (a *applyDiagnostics) readWarnings() []*tfprotov6.Diagnostic {
+	return a.filter(func(a *applyDiagnostics) []*tfprotov6.Diagnostic { return a.reads }, tfprotov6.DiagnosticSeverityWarning)
+}
+
+func (a *applyDiagnostics) filter(from func(*applyDiagnostics) []*tfprotov6.Diagnostic, severity tfprotov6.DiagnosticSeverity) []*tfprotov6.Diagnostic {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var out []*tfprotov6.Diagnostic
-	for _, d := range a.diags {
+	for _, d := range from(a) {
 		if d.Severity == severity {
 			out = append(out, d)
 		}
@@ -36,8 +56,14 @@ func (a *applyDiagnostics) bySeverity(severity tfprotov6.DiagnosticSeverity) []*
 	return out
 }
 
+func (a *applyDiagnostics) record(into *[]*tfprotov6.Diagnostic, diags []*tfprotov6.Diagnostic) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	*into = append(*into, diags...)
+}
+
 // diagnosticRecordingServer passes every call through to the provider and
-// keeps a copy of what each apply returned.
+// keeps a copy of what each apply, plan and refresh returned.
 type diagnosticRecordingServer struct {
 	tfprotov6.ProviderServer
 	into *applyDiagnostics
@@ -46,15 +72,29 @@ type diagnosticRecordingServer struct {
 func (s diagnosticRecordingServer) ApplyResourceChange(ctx context.Context, req *tfprotov6.ApplyResourceChangeRequest) (*tfprotov6.ApplyResourceChangeResponse, error) {
 	resp, err := s.ProviderServer.ApplyResourceChange(ctx, req)
 	if resp != nil {
-		s.into.mu.Lock()
-		s.into.diags = append(s.into.diags, resp.Diagnostics...)
-		s.into.mu.Unlock()
+		s.into.record(&s.into.diags, resp.Diagnostics)
 	}
 	return resp, err
 }
 
-// runTestRecordingApplyDiagnostics is runTest with every apply's diagnostics
-// recorded, for tests that need to see a warning.
+func (s diagnosticRecordingServer) PlanResourceChange(ctx context.Context, req *tfprotov6.PlanResourceChangeRequest) (*tfprotov6.PlanResourceChangeResponse, error) {
+	resp, err := s.ProviderServer.PlanResourceChange(ctx, req)
+	if resp != nil {
+		s.into.record(&s.into.plans, resp.Diagnostics)
+	}
+	return resp, err
+}
+
+func (s diagnosticRecordingServer) ReadResource(ctx context.Context, req *tfprotov6.ReadResourceRequest) (*tfprotov6.ReadResourceResponse, error) {
+	resp, err := s.ProviderServer.ReadResource(ctx, req)
+	if resp != nil {
+		s.into.record(&s.into.reads, resp.Diagnostics)
+	}
+	return resp, err
+}
+
+// runTestRecordingApplyDiagnostics is runTest with every apply's, plan's and
+// refresh's diagnostics recorded, for tests that need to see a warning.
 func runTestRecordingApplyDiagnostics(t *testing.T, tc resource.TestCase) *applyDiagnostics {
 	t.Helper()
 	recorded := &applyDiagnostics{}

@@ -12,13 +12,16 @@ resource "flightdeck_project" "app" {
   }
 }
 
-# Self-healing thresholds (workspace admins only). `armed` is read-only:
-# arming a project stays a console operation.
+# Self-healing (workspace admins only). `rollback` is the loop's mode:
+# "report" notes what it would do and never touches production, and "auto"
+# lets Flightdeck roll production back by itself when every check passes.
 resource "flightdeck_project" "payments" {
   name       = "Payments"
   identifier = "PAY"
 
   self_healing = {
+    feature_enabled        = true
+    rollback               = "report"
     bake_minutes           = 30
     burn_rate              = 10.0
     max_rollbacks_per_hour = 2

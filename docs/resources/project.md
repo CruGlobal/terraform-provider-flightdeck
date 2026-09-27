@@ -36,13 +36,16 @@ resource "flightdeck_project" "app" {
   }
 }
 
-# Self-healing thresholds (workspace admins only). `armed` is read-only:
-# arming a project stays a console operation.
+# Self-healing (workspace admins only). `rollback` is the loop's mode:
+# "report" notes what it would do and never touches production, and "auto"
+# lets Flightdeck roll production back by itself when every check passes.
 resource "flightdeck_project" "payments" {
   name       = "Payments"
   identifier = "PAY"
 
   self_healing = {
+    feature_enabled        = true
+    rollback               = "report"
     bake_minutes           = 30
     burn_rate              = 10.0
     max_rollbacks_per_hour = 2
@@ -89,7 +92,7 @@ resource "flightdeck_project" "support" {
 - `network` (String) Project visibility: `public_project` (every workspace member can see it) or `private_project` (explicit members only). New projects are public. When unset, the current value is kept. Making a project private also gives the token's user and the project lead admin memberships so nobody is locked out; members who lose implicit access are not notified.
 - `self_healing` (Attributes) Self-healing (automated rollback) control-loop configuration, managed through the project's `self-healing` API resource. Reading and writing it requires the token's user to be a **workspace admin**; for other tokens, and on a Flightdeck version without the endpoint, the block is null.
 
-There are two switches, and they are not the same one. `feature_enabled` turns the loop on in **shadow mode** — decisions are computed and logged, nothing acts — and is settable here. `armed` is what lets it act, and is **read-only**: arming a project is a console-only operation and the API refuses a write that would change it.
+Two settings decide whether the loop acts, and both are settable here. `feature_enabled` puts the project in front of the loop at all. `rollback` is its mode: `"report"` (**report only**: it notes what it would do and never touches production) or `"auto"` (**auto-rollback**: it rolls production back by itself when every check passes, and pages a person when it can't). The loop acts only when `feature_enabled` is on, `rollback` is `"auto"`, and Flightdeck's global kill switch is off. A plan that turns auto-rollback on carries a warning saying so, and while `rollback` is `"auto"` each thing that would stop it right now is shown as a warning on refresh and after apply. `armed` is the old name for the mode, kept read-only and deprecated.
 
 The endpoint merges, so this block only ever sends what you configure: a threshold you leave unset keeps whatever the project has (the server's documented default, until someone overrides it), and a setting you never name is never disturbed — including one changed in the console. `short_window_minutes` must not exceed `long_window_minutes`, and the API checks that against the merged result — so a write naming only one of them can still be refused by the other's stored value. Setting both incoherently fails the plan; raising one past a stored value the configuration does not mention is a plan-time **warning**, since the stored value is only as current as the last refresh. A write here bumps the project's `lock_version`. The `self_healing` key is refused in `features`; it is spelled `feature_enabled` here. (see [below for nested schema](#nestedatt--self_healing))
 - `slack_channel` (Attributes) Per-project Slack channel configuration, managed through the project's `slack-channel` API resource. Reading and writing it requires the token's user to be an **admin of this project** (a workspace owner or admin qualifies); for other tokens, and on a Flightdeck version without the endpoint, the block is null.
@@ -118,18 +121,18 @@ Optional:
 - `burn_rate` (Number) Multi-window burn rate that counts as severe (default 14.4). Must be greater than 0 and at most 1000; the API refuses non-positive values because the engine treats them as "no limit".
 - `consecutive_error_limit` (Number) Metrics-query failures tolerated before a decision is inconclusive (default 3). Must be between 1 and 100; the API refuses non-positive values because the engine treats them as "no limit".
 - `cooldown_minutes` (Number) No action on the same app within this window, in minutes (default 30). Must be between 1 and 1440; the API refuses non-positive values because the engine treats them as "no limit".
-- `feature_enabled` (Boolean) Whether the self-healing control loop runs for this project at all. Enabling it puts the project in **shadow mode**: decisions are computed and logged, and nothing acts. Acting additionally requires `armed`, which is not settable here. Turning this on therefore starts the observation, not the automation.
-
-When unset, the project's current value is kept, so a switch flipped in the console survives an apply. Set it explicitly — even to `false` — for Terraform to own it.
+- `count_browser_errors` (Boolean) Whether errors sent with a browser token count toward the error rate the loop acts on, and toward the baseline a release is compared against. The server's default is `false`, so only errors sent with a server token count: a browser token ships inside every page, so anyone can read it and post fake errors to push the rate over the trigger. Browser errors still file work and alert either way. When unset, the project's current value is kept. Null on a Flightdeck that predates the setting, where a configured value fails the apply.
+- `feature_enabled` (Boolean) Whether the self-healing control loop runs for this project at all. With `rollback` at `"report"` (report only), turning this on starts the observation, not the automation: the loop notes what it would do and never touches production, although it can still notify people and file work. With `rollback` at `"auto"`, turning this on is going live, and Flightdeck refuses it unless the same apply sets `rollback`, so a project stored as auto-rollback needs `rollback` in configuration before this can turn it on. Setting this to `false` pauses the loop and leaves `rollback` where it is. When unset, the project's current value is kept, so a switch flipped in the console survives an apply; set it explicitly, even to `false`, for Terraform to own it.
 - `long_window_minutes` (Number) Long burn-rate window in minutes (default 60). Must be between 1 and 1440; the API refuses non-positive values because the engine treats them as "no limit".
 - `max_rollbacks_per_hour` (Number) Per-app blast-radius cap (default 1). Must be between 1 and 100; the API refuses non-positive values because the engine treats them as "no limit".
 - `recovery_window_minutes` (Number) Grace period after a rollback before a still-severe signal escalates, in minutes (default 15). Must be between 1 and 1440; the API refuses non-positive values because the engine treats them as "no limit".
+- `rollback` (String) The loop's mode: `"report"` for **report only**, where it notes what it would do and never touches production, or `"auto"` for **auto-rollback**, where Flightdeck rolls production back by itself when every check passes and pages a person when it can't. It acts only while `feature_enabled` is on. A plan that moves this to `"auto"` carries a warning saying so. While it is `"auto"`, each thing that would stop auto-rollback right now (the API's `rollback_blockers`, such as a release that is not marked safe to roll back) is shown as a warning on refresh and after apply rather than stored, because it changes with every deploy. `"auto"` is accepted even while something blocks it. When unset, the project's current mode is kept, so a mode changed in the console survives an apply; set it explicitly for Terraform to own it. Needs a Flightdeck that supports the setting; an older one reports the mode through `armed` only, and a configured value fails the apply.
 - `short_window_minutes` (Number) Short burn-rate window in minutes (default 5). Must be between 1 and 1440; the API refuses non-positive values because the engine treats them as "no limit".
 - `sustain_count` (Number) Consecutive trips required before acting (default 3). Must be between 1 and 100; the API refuses non-positive values because the engine treats them as "no limit".
 
 Read-Only:
 
-- `armed` (Boolean) Whether live rollback (as opposed to shadow mode) is armed for this project. Read-only; set from the console.
+- `armed` (Boolean, Deprecated) Whether auto-rollback is on: the API's `armed` flag, true exactly when `rollback` is `"auto"`. Read-only. Deprecated: read and set `rollback` instead.
 
 
 <a id="nestedatt--slack_channel"></a>

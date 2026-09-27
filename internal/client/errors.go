@@ -29,7 +29,9 @@ const (
 	CodeStateInUse     = "state_in_use"
 	CodeStateIsDefault = "state_is_default"
 	CodeLastState      = "last_state"
-	// Self-healing: a write that would change `armed` (422).
+	// Self-healing: turning `feature_enabled` on for a project stored as
+	// auto-rollback, without `rollback` in the same write to say which mode to
+	// go live in (422).
 	CodeArmingRefused = "arming_refused"
 	// GitHub integrations: the GitHub App cannot reach the repository (no row
 	// created), and one enabled integration per repository per workspace.

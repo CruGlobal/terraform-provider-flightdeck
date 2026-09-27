@@ -57,7 +57,7 @@ resource "flightdeck_webhook" "app_intake" {
 
 ### Required
 
-- `events` (Set of String) Events to subscribe to; at least one. Known events: `work_item.created`, `work_item.updated`, `work_item.deleted`, `work_item.state_changed`, `work_item.assigned`, `work_item.unassigned`, `comment.created`, `comment.updated`, `comment.deleted`, `cycle.created`, `cycle.updated`, `cycle.deleted`, `module.created`, `module.updated`, `module.deleted`, `intake.created`, `intake.accepted`, `intake.declined`, `project.created`, `project.updated`.
+- `events` (Set of String) Events to subscribe to; at least one. Known events: `work_item.created`, `work_item.updated`, `work_item.deleted`, `work_item.state_changed`, `work_item.assigned`, `work_item.unassigned`, `comment.created`, `comment.updated`, `comment.deleted`, `cycle.created`, `cycle.updated`, `cycle.deleted`, `epic.created`, `epic.updated`, `epic.deleted`, `intake.created`, `intake.accepted`, `intake.declined`, `project.created`, `project.updated`. The `module.*` events are now `epic.*`, and the old names are refused with the new one.
 - `url` (String) http(s) endpoint to deliver to. Internal and private addresses are rejected by the API.
 
 ### Optional

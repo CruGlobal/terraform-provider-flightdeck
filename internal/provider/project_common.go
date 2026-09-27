@@ -13,14 +13,24 @@ import (
 )
 
 // toggleableFeatures are the project feature keys the API accepts on write —
-// the same allowlist the settings UI uses.
+// the same allowlist the settings UI uses. `epics` was `modules` until epics
+// replaced modules; see renamedFeatures.
 // self_healing and slack are reported on read but are not settable here: both
 // are managed on their own endpoint, self-healing through the `self_healing`
 // block and the Slack notifications master switch as
 // `slack_channel.notifications_enabled`.
 var toggleableFeatures = []string{
-	"cycles", "modules", "milestones", "views", "pages", "meeting_notes",
+	"cycles", "epics", "milestones", "views", "pages", "meeting_notes",
 	"decisions", "intake", "errors", "incidents", "estimates",
+}
+
+// renamedFeatures maps an old feature key to the one that replaced it. A
+// configuration may still name the old key: it is validated with a
+// deprecation warning, sent under the new key, and kept in state under the
+// old one (filled from the new key's value), so it neither diffs forever nor
+// depends on the API's alias for the old name, which is to be removed.
+var renamedFeatures = map[string]string{
+	"modules": "epics",
 }
 
 // identifierPattern mirrors the model validation (1–10 uppercase
@@ -115,6 +125,14 @@ func projectToModel(ctx context.Context, p *client.Project, prior *projectModel,
 			selected[k] = v
 		}
 	}
+	// A renamed key the prior state kept (only featuresFromPrior can have
+	// one) takes its value from the key that replaced it, which is the one
+	// the API reports.
+	for oldKey, newKey := range renamedFeatures {
+		if v, reported := p.Features[newKey]; keep[oldKey] && reported {
+			selected[oldKey] = v
+		}
+	}
 	features, d := types.MapValueFrom(ctx, types.BoolType, selected)
 	diags.Append(d...)
 	m.Features = features
@@ -164,6 +182,14 @@ func projectFields(ctx context.Context, plan, prior *projectModel, diags *diag.D
 	if !plan.Features.IsNull() && !plan.Features.IsUnknown() {
 		var features map[string]bool
 		diags.Append(plan.Features.ElementsAs(ctx, &features, false)...)
+		// A renamed key goes out under its new name. Validation refuses a
+		// configuration that names both.
+		for oldKey, newKey := range renamedFeatures {
+			if v, named := features[oldKey]; named {
+				delete(features, oldKey)
+				features[newKey] = v
+			}
+		}
 		fields["features"] = features
 	}
 	return fields

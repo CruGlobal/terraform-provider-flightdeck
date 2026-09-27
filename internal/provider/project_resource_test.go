@@ -185,6 +185,91 @@ func TestProject_validation(t *testing.T) {
 	})
 }
 
+// Epics replaced modules, and the feature key followed. The old key still
+// works (with a deprecation warning): it is sent as epics and kept in state
+// under its own name, so a configuration naming it plans nothing once applied.
+func TestProject_epicsFeature(t *testing.T) {
+	env := newTestEnv(t, "project")
+	identifier := randIdentifier()
+	var id string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// Naming the old key and its replacement is refused at plan time.
+				Config: projectConfig(env, identifier, `
+  name = "Epics"
+  features = {
+    modules = true
+    epics   = true
+  }`),
+				ExpectError: regexMust(`Feature named twice`),
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name = "Epics"
+  features = {
+    modules = false
+  }`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					captureAttr(projectRes, "id", &id),
+					resource.TestCheckResourceAttr(projectRes, "features.%", "1"),
+					resource.TestCheckResourceAttr(projectRes, "features.modules", "false"),
+				),
+			},
+			{
+				// The old key does not diff against a read that only has epics.
+				Config: projectConfig(env, identifier, `
+  name = "Epics"
+  features = {
+    modules = false
+  }`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+			},
+			{
+				// Renaming the key carries the value across; epics is now false.
+				Config: projectConfig(env, identifier, `
+  name = "Epics"
+  features = {
+    epics = false
+  }`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "features.%", "1"),
+					resource.TestCheckResourceAttr(projectRes, "features.epics", "false"),
+				),
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name = "Epics"
+  features = {
+    epics = true
+  }`),
+				Check: resource.TestCheckResourceAttr(projectRes, "features.epics", "true"),
+			},
+			{
+				Config: projectConfig(env, identifier, `
+  name = "Epics"
+  features = {
+    epics = true
+  }`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+			},
+		},
+	})
+	if env.fake == nil {
+		return
+	}
+	// The provider never relies on the API's alias: modules goes out as epics.
+	for _, r := range env.fake.Requests() {
+		if strings.Contains(string(r.Body), `"modules"`) {
+			t.Fatalf("%s %s sent the old feature key: %s", r.Method, r.Path, r.Body)
+		}
+	}
+}
+
 func TestProject_duplicateIdentifierIsAServerValidationError(t *testing.T) {
 	env := newTestEnv(t, "project")
 	identifier := randIdentifier()

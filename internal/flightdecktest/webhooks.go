@@ -14,7 +14,7 @@ var WebhookEvents = []string{
 	"work_item.state_changed", "work_item.assigned", "work_item.unassigned",
 	"comment.created", "comment.updated", "comment.deleted",
 	"cycle.created", "cycle.updated", "cycle.deleted",
-	"module.created", "module.updated", "module.deleted",
+	"epic.created", "epic.updated", "epic.deleted",
 	"intake.created", "intake.accepted", "intake.declined",
 	"project.created", "project.updated",
 }
@@ -140,7 +140,13 @@ func (s *Server) applyWebhookAttrs(h *Webhook, attrs map[string]any) (int, strin
 		}
 		h.Events = nil
 		for _, e := range list {
-			h.Events = append(h.Events, asString(e))
+			event := asString(e)
+			// module.* events are the old names of epic.*: still accepted on
+			// a write, stored and reported under the new name.
+			if strings.HasPrefix(event, "module.") {
+				event = "epic." + strings.TrimPrefix(event, "module.")
+			}
+			h.Events = append(h.Events, event)
 		}
 	}
 	if v, has := attrs["active"]; has {

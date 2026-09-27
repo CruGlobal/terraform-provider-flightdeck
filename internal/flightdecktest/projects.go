@@ -11,7 +11,7 @@ import (
 // DefaultFeatures are the API's feature defaults — what a read reports for
 // a key the project has never stored.
 var DefaultFeatures = map[string]bool{
-	"cycles": true, "modules": true, "milestones": true, "views": true, "pages": true,
+	"cycles": true, "epics": true, "milestones": true, "views": true, "pages": true,
 	"meeting_notes": true, "decisions": true, "intake": false, "estimates": true,
 	"errors": false, "incidents": false, "self_healing": false, "slack": true,
 }
@@ -20,7 +20,7 @@ var DefaultFeatures = map[string]bool{
 // self_healing and slack are deliberately absent: both are settable, each on
 // its own endpoint (see self_healing.go and slack_channel.go).
 var ToggleableFeatures = []string{
-	"cycles", "modules", "milestones", "views", "pages", "meeting_notes",
+	"cycles", "epics", "milestones", "views", "pages", "meeting_notes",
 	"decisions", "intake", "errors", "incidents", "estimates",
 }
 
@@ -291,6 +291,14 @@ func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, strin
 		submitted, isMap := v.(map[string]any)
 		if !isMap {
 			return http.StatusUnprocessableEntity, "invalid_attribute", "features must be an object of key => boolean"
+		}
+		// modules is the old name of epics: still accepted on a write, never
+		// read back, and epics wins when both are sent.
+		if v, old := submitted["modules"]; old {
+			if _, both := submitted["epics"]; !both {
+				submitted["epics"] = v
+			}
+			delete(submitted, "modules")
 		}
 		var unknown, elsewhere []string
 		for k := range submitted {

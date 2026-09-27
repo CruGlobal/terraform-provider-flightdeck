@@ -189,8 +189,10 @@ func TestProjectSelfHealing_goingLiveNeedsRollbackInTheSameWrite(t *testing.T) {
 	if !anyDiagnostic(recorded.planWarnings(), "Flightdeck will refuse this apply for project "+identifier+" unless rollback is set") {
 		t.Fatalf("no refusal warning for going live without rollback; plan warnings: %s", describe(recorded.planWarnings()))
 	}
-	if !anyDiagnostic(recorded.planWarnings(), "This apply turns on auto-rollback for project "+identifier,
-		"Flightdeck will roll production back by itself when every check passes, and page a person when it can't.") {
+	// Matched on the going-live opening: the paused warning from step 1 shares
+	// the summary and the closing sentence.
+	if !anyDiagnostic(recorded.planWarnings(), "This apply turns on auto-rollback for project "+identifier+
+		". Flightdeck will roll production back by itself when every check passes, and page a person when it can't.") {
 		t.Fatalf("no going-live warning; plan warnings: %s", describe(recorded.planWarnings()))
 	}
 }
@@ -357,6 +359,45 @@ func TestProjectSelfHealing_olderFlightdeck(t *testing.T) {
 	})
 }
 
+// On a Flightdeck from before the rollback setting there is no go-live guard:
+// turning the feature on over a console-armed project goes live, and the plan
+// warning says that is what happens there.
+func TestProjectSelfHealing_olderFlightdeckHasNoGoLiveGuard(t *testing.T) {
+	env := newTestEnv(t, "self_healing")
+	env.requireFake(t)
+	env.fake.SetSelfHealingLegacy(true)
+	identifier := randIdentifier()
+	var id string
+	recorded := runTestRecordingApplyDiagnostics(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `
+  name = "Older go-live"
+  self_healing = {
+    feature_enabled = false
+  }`),
+				Check: captureAttr(projectRes, "id", &id),
+			},
+			{
+				PreConfig: func() { env.fake.ArmSelfHealing(mustInt(id), true) },
+				Config: projectConfig(env, identifier, `
+  name = "Older go-live"
+  self_healing = {
+    feature_enabled = true
+  }`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "self_healing.feature_enabled", "true"),
+					resource.TestCheckResourceAttr(projectRes, "self_healing.rollback", "auto"),
+				),
+			},
+		},
+	})
+	if !anyDiagnostic(recorded.planWarnings(), "Flightdeck will refuse this apply for project "+identifier,
+		"A Flightdeck from before the rollback setting has no such guard: there this apply turns on auto-rollback") {
+		t.Fatalf("no warning covering an older Flightdeck; plan warnings: %s", describe(recorded.planWarnings()))
+	}
+}
+
 // A write refused for some other reason while naming rollback is not blamed
 // on the server's age.
 func TestProjectSelfHealing_otherRefusalIsNotCalledTooOld(t *testing.T) {
@@ -521,12 +562,16 @@ func TestWarnAutoRollback(t *testing.T) {
 				t.Fatalf("expected one warning, got %v", diags.Warnings())
 			}
 			w := diags.Warnings()[0]
-			if w.Summary() != tc.wantSummary || !strings.Contains(w.Detail(), tc.wantDetail) || !strings.Contains(w.Detail(), "project APP") {
+			if w.Summary() != tc.wantSummary || !strings.Contains(w.Detail(), tc.wantDetail) || !strings.Contains(strings.ToLower(w.Detail()), "project app") {
 				t.Fatalf("warning is not %q saying %q for project APP:\n%s\n%s", tc.wantSummary, tc.wantDetail, w.Summary(), w.Detail())
 			}
-			// The refusal must not also promise rollbacks.
-			if tc.wantSummary == refused && strings.Contains(w.Detail(), live) {
-				t.Fatalf("the refusal warning promises rollbacks:\n%s", w.Detail())
+			// The refusal promises rollbacks only for a Flightdeck without the
+			// guard, and says so.
+			if tc.wantSummary == refused {
+				current, older, _ := strings.Cut(w.Detail(), "A Flightdeck from before the rollback setting has no such guard")
+				if !strings.HasPrefix(w.Detail(), "Project APP is stored as auto-rollback") || strings.Contains(current, live) || !strings.Contains(older, live) {
+					t.Fatalf("the refusal warning should promise rollbacks only for an older Flightdeck:\n%s", w.Detail())
+				}
 			}
 		})
 	}

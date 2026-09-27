@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/float64validator"
@@ -397,12 +398,17 @@ func warnAutoRollback(ctx context.Context, identifier types.String, configBlock,
 	case goingLive && !modeToAuto && cfg.Rollback.IsNull():
 		// The write names feature_enabled but not rollback, over a stored
 		// "auto": the API's go-live guard refuses it.
+		// A Flightdeck from before `rollback` has no such guard and takes
+		// the write, so the warning says what happens there too.
 		diags.AddAttributeWarning(path.Root("self_healing").AtName("feature_enabled"),
 			"Flightdeck will refuse this apply for "+project+" unless rollback is set",
 			fmt.Sprintf("%s is stored as auto-rollback, and this apply turns feature_enabled on without naming "+
 				"rollback. That would start live rollbacks without anyone saying so, and Flightdeck refuses it. Set "+
 				"self_healing.rollback to \"auto\" to go live with auto-rollback, or \"report\" to start in report "+
-				"only. This is a warning rather than an error because the stored mode comes from the last refresh.", project))
+				"only. This is a warning rather than an error because the stored mode comes from the last refresh.\n\n"+
+				"A Flightdeck from before the rollback setting has no such guard: there this apply turns on "+
+				"auto-rollback, and %s To start in report only there, leave feature_enabled off and change the "+
+				"mode in the console first.", capitalize(project), acts))
 	case liveAfter:
 		diags.AddAttributeWarning(at, "This apply turns on auto-rollback for "+project,
 			fmt.Sprintf("This apply turns on auto-rollback for %s. %s", project, acts))
@@ -618,4 +624,12 @@ func addUnsupportedSettingError(ctx context.Context, c *client.Client, projectID
 		added = true
 	}
 	return added
+}
+
+// capitalize upper-cases the first letter, for a phrase that opens a sentence.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

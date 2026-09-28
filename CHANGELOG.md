@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.5.0...v0.6.0) (2026-09-28)
+
+
+### Added
+
+* manage the deployed app a project belongs to (flightdeck_project.app) ([#26](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/26)) ([b575e1a](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/b575e1aad3d52e72c47a6e1e1edd546f89c597d5))
+* set auto-rollback with self_healing.rollback ("report" | "auto") ([#27](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/27)) ([bab00f9](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/bab00f9712f908002a60395a4c5a801d33980f38))
+
+
+### Fixed
+
+* manage the epics feature and webhook events, which replaced modules ([#28](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/28)) ([52c54af](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/52c54aff4d617a0d83d36470eb72f953b2725781))
+
 ## [0.5.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.4.0...v0.5.0) (2026-09-23)
 
 

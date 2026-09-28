@@ -252,7 +252,7 @@ func TestProjectSlackChannel_notificationsSwitchIsTheSlackFeature(t *testing.T) 
   features = {
     slack = false
   }`),
-				ExpectError: regexMust(`value must be one of`),
+				ExpectError: regexMust(`(?s)Feature not settable in features.*slack_channel\.notifications_enabled`),
 			},
 			{
 				Config: projectConfig(env, identifier, `

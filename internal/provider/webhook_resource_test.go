@@ -145,7 +145,15 @@ func TestWebhook_validation(t *testing.T) {
 				Config: webhookConfig(env, `
   url    = "https://ci.example.com"
   events = ["project.exploded"]`),
-				ExpectError: regexMust(`value must be one of`),
+				ExpectError: regexMust(`(?s)Invalid webhook event.*"project\.exploded" is not a webhook event`),
+			},
+			{
+				// Module events are epic events now; the old name is refused
+				// with the new one.
+				Config: webhookConfig(env, `
+  url    = "https://ci.example.com"
+  events = ["module.created"]`),
+				ExpectError: regexMust(`(?s)Webhook event renamed.*"module\.created"\s+event\s+is\s+now\s+"epic\.created"`),
 			},
 			{
 				// Internal targets are refused by the API's SSRF screen.

@@ -11,7 +11,7 @@ var WebhookEvents = []string{
 	"work_item.state_changed", "work_item.assigned", "work_item.unassigned",
 	"comment.created", "comment.updated", "comment.deleted",
 	"cycle.created", "cycle.updated", "cycle.deleted",
-	"module.created", "module.updated", "module.deleted",
+	"epic.created", "epic.updated", "epic.deleted",
 	"intake.created", "intake.accepted", "intake.declined",
 	"project.created", "project.updated",
 }

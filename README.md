@@ -20,7 +20,7 @@ webhooks — can live in Terraform next to the rest of that application's
 infrastructure.
 
 It deliberately does **not** manage runtime planning data (work items,
-sprints, modules, comments). Those belong to the people using the
+sprints, epics, comments). Those belong to the people using the
 project, not to infrastructure code.
 
 ## Resources and data sources

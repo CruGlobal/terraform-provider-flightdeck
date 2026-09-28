@@ -139,12 +139,13 @@ func (r *webhookResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				},
 			},
 			"events": schema.SetAttribute{
-				MarkdownDescription: "Events to subscribe to; at least one. Known events: `" + joinBackticked(client.WebhookEvents) + "`.",
-				ElementType:         types.StringType,
-				Required:            true,
+				MarkdownDescription: "Events to subscribe to; at least one. Known events: `" + joinBackticked(client.WebhookEvents) + "`. " +
+					"The `module.*` events are now `epic.*`, and the old names are refused with the new one.",
+				ElementType: types.StringType,
+				Required:    true,
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
-					setvalidator.ValueStringsAre(stringvalidator.OneOf(client.WebhookEvents...)),
+					webhookEvents{},
 				},
 			},
 			"secret": schema.StringAttribute{

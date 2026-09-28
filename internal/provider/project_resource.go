@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
-	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -91,15 +90,14 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"features": schema.MapAttribute{
 				MarkdownDescription: "Feature toggles to manage, as a map of feature key to boolean. Only the keys listed here " +
 					"are managed; keys you leave out keep whatever value the project has. Settable keys: `" +
-					strings.Join(toggleableFeatures, "`, `") + "`. `self_healing` and `slack` are reported by the " +
+					strings.Join(toggleableFeatures, "`, `") + "`. `modules` is the old name of `epics`: it still works, " +
+					"with a deprecation warning, and is sent as `epics`; rename it. `self_healing` and `slack` are reported by the " +
 					"`flightdeck_project` data source and refused here, because each is settable on its own endpoint: " +
 					"self-healing through the `self_healing` block, and `slack` — the Slack notifications master switch — " +
 					"as `slack_channel.notifications_enabled`.",
 				ElementType: types.BoolType,
 				Optional:    true,
-				Validators: []validator.Map{
-					mapvalidator.KeysAre(stringvalidator.OneOf(toggleableFeatures...)),
-				},
+				Validators:  []validator.Map{featureKeys{}},
 			},
 			"lead_id": schema.Int64Attribute{
 				MarkdownDescription: "User id of the project lead; must be a workspace member, and a " +

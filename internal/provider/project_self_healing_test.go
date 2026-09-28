@@ -43,8 +43,10 @@ func TestProjectSelfHealing_thresholdsWithServerDefaults(t *testing.T) {
 					resource.TestCheckResourceAttr(projectRes, "self_healing.baseline_multiplier", "5"),
 					resource.TestCheckResourceAttr(projectRes, "self_healing.cooldown_minutes", "30"),
 					resource.TestCheckResourceAttr(projectRes, "self_healing.recovery_window_minutes", "15"),
-					// Arming is console-only and reads false on a fresh project.
+					// A fresh project is in report only, and browser errors do not count.
+					resource.TestCheckResourceAttr(projectRes, "self_healing.rollback", "report"),
 					resource.TestCheckResourceAttr(projectRes, "self_healing.armed", "false"),
+					resource.TestCheckResourceAttr(projectRes, "self_healing.count_browser_errors", "false"),
 				),
 			},
 			{
@@ -101,7 +103,7 @@ func TestProjectSelfHealing_armedIsReadOnly(t *testing.T) {
 	})
 }
 
-func TestProjectSelfHealing_reflectsConsoleArming(t *testing.T) {
+func TestProjectSelfHealing_reflectsConsoleModeChange(t *testing.T) {
 	env := newTestEnv(t, "self_healing")
 	env.requireFake(t)
 	identifier := randIdentifier()
@@ -116,12 +118,14 @@ func TestProjectSelfHealing_reflectsConsoleArming(t *testing.T) {
   }`),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					captureAttr(projectRes, "id", &id),
+					resource.TestCheckResourceAttr(projectRes, "self_healing.rollback", "report"),
 					resource.TestCheckResourceAttr(projectRes, "self_healing.armed", "false"),
 				),
 			},
 			{
-				// Armed from the console: the refresh picks it up as a computed
-				// change and the plan stays empty (nothing to reconcile).
+				// Auto-rollback turned on from the console: rollback is unset in
+				// configuration, so the refresh picks it up and the plan stays
+				// empty (nothing to reconcile).
 				PreConfig: func() { env.fake.ArmSelfHealing(mustInt(id), true) },
 				Config: projectConfig(env, identifier, `
   name = "Armed elsewhere"
@@ -131,7 +135,10 @@ func TestProjectSelfHealing_reflectsConsoleArming(t *testing.T) {
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
 				},
-				Check: resource.TestCheckResourceAttr(projectRes, "self_healing.armed", "true"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "self_healing.rollback", "auto"),
+					resource.TestCheckResourceAttr(projectRes, "self_healing.armed", "true"),
+				),
 			},
 		},
 	})
@@ -182,7 +189,9 @@ data "flightdeck_project" "x" {
 `, identifier),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("data.flightdeck_project.x", "self_healing.bake_minutes", "25"),
+					resource.TestCheckResourceAttr("data.flightdeck_project.x", "self_healing.rollback", "report"),
 					resource.TestCheckResourceAttr("data.flightdeck_project.x", "self_healing.armed", "false"),
+					resource.TestCheckResourceAttr("data.flightdeck_project.x", "self_healing.count_browser_errors", "false"),
 					resource.TestCheckResourceAttr("data.flightdeck_project.x", "self_healing.burn_rate", "14.4"),
 				),
 			},
@@ -287,8 +296,8 @@ func TestProjectSelfHealing_writesGoToTheOwnEndpointWithTheProjectLockVersion(t 
 		t.Errorf("self-healing PATCH body = %s", shPatches[0].Body)
 	}
 	for k := range settings {
-		if k == "armed" || k == "config" || k == "feature_enabled" {
-			t.Errorf("self-healing PATCH must send threshold keys only, got %q", k)
+		if k == "armed" || k == "config" || k == "feature_enabled" || k == "rollback" || k == "count_browser_errors" {
+			t.Errorf("self-healing PATCH must send the configured threshold keys only, got %q", k)
 		}
 	}
 	if shPatches[0].Header.Get("If-Match") != `"0"` || shPatches[1].Header.Get("If-Match") != `"2"` {
@@ -366,7 +375,7 @@ func TestProjectSelfHealing_featureEnabledRoundTrips(t *testing.T) {
 			{
 				// A fresh project has the loop switched off.
 				Config: projectConfig(env, identifier, `
-  name = "Shadow"
+  name = "Report only"
   self_healing = {
     feature_enabled = false
   }`),
@@ -377,9 +386,10 @@ func TestProjectSelfHealing_featureEnabledRoundTrips(t *testing.T) {
 				),
 			},
 			{
-				// True puts it in shadow mode; arming is a separate, console-only step.
+				// True starts the loop in report only; auto-rollback is a separate
+				// setting, rollback, which this configuration leaves alone.
 				Config: projectConfig(env, identifier, `
-  name = "Shadow"
+  name = "Report only"
   self_healing = {
     feature_enabled = true
   }`),
@@ -389,13 +399,14 @@ func TestProjectSelfHealing_featureEnabledRoundTrips(t *testing.T) {
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttrPtr(projectRes, "id", &id),
 					resource.TestCheckResourceAttr(projectRes, "self_healing.feature_enabled", "true"),
+					resource.TestCheckResourceAttr(projectRes, "self_healing.rollback", "report"),
 					resource.TestCheckResourceAttr(projectRes, "self_healing.armed", "false"),
 				),
 			},
 			{
 				// ...and back off again.
 				Config: projectConfig(env, identifier, `
-  name = "Shadow"
+  name = "Report only"
   self_healing = {
     feature_enabled = false
   }`),
@@ -598,16 +609,19 @@ func TestProjectSelfHealing_mergedWindowStillFailsAtApply(t *testing.T) {
 	})
 }
 
-// SelfHealingThresholdKeys documents the endpoint's writable threshold set,
-// but selfHealingFields writes its own list by hand — so the two can drift
-// apart silently, and both are exported, which puts them out of reach of the
-// unused-symbol linters. These two tests are what hold the invariant: one
-// against the write path, one against the API's own answer.
+// SelfHealingThresholdKeys and SelfHealingSwitchKeys document the endpoint's
+// writable set, but selfHealingFields writes its own list by hand — so they
+// can drift apart silently, and all are exported, which puts them out of
+// reach of the unused-symbol linters. These two tests are what hold the
+// invariant: one against the write path, one against the API's own answer.
 func TestProjectSelfHealing_writePathMatchesThresholdKeys(t *testing.T) {
 	ctx := context.Background()
-	// Every threshold set, so selfHealingFields emits all of them.
+	// Every setting set, so selfHealingFields emits all of them.
 	block, d := types.ObjectValueFrom(ctx, selfHealingAttrTypes, selfHealingModel{
 		FeatureEnabled:        types.BoolValue(true),
+		Rollback:              types.StringValue("report"),
+		CountBrowserErrors:    types.BoolValue(false),
+		Armed:                 types.BoolValue(false),
 		BakeMinutes:           types.Int64Value(20),
 		BaselineMultiplier:    types.Float64Value(5),
 		AbsoluteFloor:         types.Float64Value(5),
@@ -629,7 +643,7 @@ func TestProjectSelfHealing_writePathMatchesThresholdKeys(t *testing.T) {
 		t.Fatalf("selfHealingFields: %v", diags.Errors())
 	}
 
-	want := append(append([]string{}, client.SelfHealingThresholdKeys...), "feature_enabled")
+	want := append(append([]string{}, client.SelfHealingThresholdKeys...), client.SelfHealingSwitchKeys...)
 	got := make([]string, 0, len(fields))
 	for k := range fields {
 		got = append(got, k)
@@ -637,11 +651,11 @@ func TestProjectSelfHealing_writePathMatchesThresholdKeys(t *testing.T) {
 	sort.Strings(want)
 	sort.Strings(got)
 	if strings.Join(want, ",") != strings.Join(got, ",") {
-		t.Fatalf("the write path and SelfHealingThresholdKeys have drifted:\n  sends: %v\n   list: %v", got, want)
+		t.Fatalf("the write path and the writable-key lists have drifted:\n  sends: %v\n   list: %v", got, want)
 	}
-	// `armed` is the one thing that must never be written.
+	// `armed` is the one thing that must never be written, even when state has it.
 	if _, sent := fields["armed"]; sent {
-		t.Fatal("selfHealingFields sent `armed`; arming is console-only")
+		t.Fatal("selfHealingFields sent `armed`; the mode is set through `rollback`")
 	}
 }
 
@@ -667,16 +681,16 @@ func TestProjectSelfHealing_thresholdKeysMatchTheAPI(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					want := append(append([]string{}, client.SelfHealingThresholdKeys...), "feature_enabled")
+					want := append(append([]string{}, client.SelfHealingThresholdKeys...), client.SelfHealingSwitchKeys...)
 					got := append([]string{}, sh.WritableSettings...)
 					sort.Strings(want)
 					sort.Strings(got)
 					if strings.Join(want, ",") != strings.Join(got, ",") {
-						return fmt.Errorf("SelfHealingThresholdKeys no longer mirrors the API:\n  API: %v\n list: %v", got, want)
+						return fmt.Errorf("SelfHealingThresholdKeys and SelfHealingSwitchKeys no longer mirror the API:\n  API: %v\n list: %v", got, want)
 					}
 					for _, k := range got {
 						if k == "armed" {
-							return fmt.Errorf("the API now reports `armed` as writable; arming is meant to be console-only")
+							return fmt.Errorf("the API now reports `armed` as writable; the mode is meant to be set through `rollback` only")
 						}
 					}
 					return nil

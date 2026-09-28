@@ -92,13 +92,25 @@ func (d *projectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				Computed:            true,
 			},
 			"self_healing": schema.SingleNestedAttribute{
-				MarkdownDescription: "Resolved self-healing control-loop configuration (the feature switch, the armed flag " +
-					"and the thresholds), read from the project's `self-healing` API resource. Null unless the token's " +
+				MarkdownDescription: "Resolved self-healing control-loop configuration (the feature switch, the mode and " +
+					"the thresholds), read from the project's `self-healing` API resource. Null unless the token's " +
 					"user is a workspace admin and the Flightdeck version exposes the endpoint.",
 				Computed: true,
 				Attributes: map[string]schema.Attribute{
-					"feature_enabled":         schema.BoolAttribute{MarkdownDescription: "Whether the control loop runs at all, in shadow mode or armed.", Computed: true},
-					"armed":                   schema.BoolAttribute{MarkdownDescription: "Whether live rollback is armed.", Computed: true},
+					"feature_enabled": schema.BoolAttribute{MarkdownDescription: "Whether the control loop runs at all, in report only or auto-rollback.", Computed: true},
+					"rollback": schema.StringAttribute{
+						MarkdownDescription: "The loop's mode: `\"report\"` (report only) or `\"auto\"` (auto-rollback). Derived from `armed` on a Flightdeck that predates the setting.",
+						Computed:            true,
+					},
+					"count_browser_errors": schema.BoolAttribute{
+						MarkdownDescription: "Whether errors sent with a browser token count toward the error rate the loop acts on. Null on a Flightdeck that predates the setting.",
+						Computed:            true,
+					},
+					"armed": schema.BoolAttribute{
+						MarkdownDescription: "Whether auto-rollback is on (the API's `armed` flag), true exactly when `rollback` is `\"auto\"`. Deprecated: read `rollback` instead.",
+						DeprecationMessage:  "Use `rollback` instead. `armed` is true exactly when `rollback` is \"auto\".",
+						Computed:            true,
+					},
 					"bake_minutes":            schema.Int64Attribute{MarkdownDescription: "Eligibility window after a deploy, in minutes.", Computed: true},
 					"baseline_multiplier":     schema.Float64Attribute{MarkdownDescription: "Required multiple of the baseline error rate.", Computed: true},
 					"absolute_floor":          schema.Float64Attribute{MarkdownDescription: "Required errors per minute floor.", Computed: true},
@@ -139,7 +151,8 @@ func (d *projectDataSource) Read(ctx context.Context, req datasource.ReadRequest
 	}
 
 	state := projectToModel(ctx, p, nil, featuresAll, &resp.Diagnostics)
-	state.SelfHealing = readSelfHealing(ctx, d.client, p.ID, &resp.Diagnostics)
+	// Rollback blockers are the managing resource's to report, not a lookup's.
+	state.SelfHealing, _ = readSelfHealing(ctx, d.client, p.ID, &resp.Diagnostics)
 	state.SlackChannel = readSlackChannel(ctx, d.client, p.ID, types.MapNull(types.BoolType), slackEventsAll, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }

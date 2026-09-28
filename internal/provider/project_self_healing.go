@@ -3,10 +3,12 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/float64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -16,6 +18,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
@@ -24,18 +27,26 @@ import (
 // /api/v1/projects/:project_id/self-healing, workspace-admin for both. It is
 // modelled as a block on flightdeck_project because it configures that
 // project, but its transport is separate: the read nests the resolved values
-// under `config` with `feature_enabled` alongside it, the write takes the
-// writable keys flat, and the If-Match is the PROJECT's lock_version (the
-// jsonb lives on the project row, so a write here bumps it). `armed` is
-// read-only: the API refuses a write that would change it with code
-// arming_refused. Reversing that is a two-line change here (make `armed`
-// Optional and include it in selfHealingFields) and is deliberately not done:
-// arming lets a machine roll production back with no human in the loop, so it
-// stays a console decision that a merged pull request cannot grant.
+// under `config` with `feature_enabled` and `rollback` alongside it, the write
+// takes the writable keys flat, and the If-Match is the PROJECT's lock_version
+// (the jsonb lives on the project row, so a write here bumps it).
 //
-// `feature_enabled` is a different thing and IS settable. It puts the project
-// in shadow mode, where decisions are computed and logged and nothing acts;
-// acting needs `armed` as well. Exposing the first does not weaken the second.
+// Two settings decide whether the loop acts, and both are settable here.
+// `feature_enabled` puts the project in front of the loop at all. `rollback`
+// is its mode: "report" (report only: it notes what it would do and never
+// touches production) or "auto" (auto-rollback: it rolls production back by
+// itself when every check passes, and hands the problem to a person when one
+// fails). The loop acts only when both say so and Flightdeck's global kill
+// switch, which nothing on the API can move, is off. `armed` is the API's
+// old name for the mode and stays a computed, deprecated mirror of it: a
+// change sent through `armed` is refused, and the provider never sends it.
+// On a Flightdeck that predates `rollback`, the mode is derived from
+// config.armed instead.
+//
+// Turning auto-rollback on is a plan-time warning, and the API's
+// `rollback_blockers` (what would stop auto-rollback right now) are warnings
+// on every refresh and apply while the mode is "auto", never state: they
+// change with every deploy, so storing them would churn.
 //
 // The endpoint MERGES: an absent key keeps its stored value, so only the
 // configured settings are ever sent and an unmanaged threshold is never
@@ -48,6 +59,8 @@ import (
 // plus the `feature_enabled` switch that rides beside it.
 type selfHealingModel struct {
 	FeatureEnabled        types.Bool    `tfsdk:"feature_enabled"`
+	Rollback              types.String  `tfsdk:"rollback"`
+	CountBrowserErrors    types.Bool    `tfsdk:"count_browser_errors"`
 	Armed                 types.Bool    `tfsdk:"armed"`
 	BakeMinutes           types.Int64   `tfsdk:"bake_minutes"`
 	BaselineMultiplier    types.Float64 `tfsdk:"baseline_multiplier"`
@@ -64,6 +77,8 @@ type selfHealingModel struct {
 
 var selfHealingAttrTypes = map[string]attr.Type{
 	"feature_enabled":         types.BoolType,
+	"rollback":                types.StringType,
+	"count_browser_errors":    types.BoolType,
 	"armed":                   types.BoolType,
 	"bake_minutes":            types.Int64Type,
 	"baseline_multiplier":     types.Float64Type,
@@ -88,9 +103,9 @@ const (
 	maxFloor   = 100000
 )
 
-// selfHealingSchema is the resource attribute. Every threshold and the feature
-// switch are optional and computed (the server supplies the documented default
-// when unset); `armed` is computed only. None of them carries a framework
+// selfHealingSchema is the resource attribute. Every threshold and switch is
+// optional and computed (the server supplies the documented default when
+// unset); `armed` is computed only. None of them carries a framework
 // default: a default would manufacture a value for an unset attribute and
 // write it, which on a merging endpoint silently overrides whatever the
 // project already had.
@@ -117,10 +132,14 @@ func selfHealingSchema() schema.Attribute {
 		MarkdownDescription: "Self-healing (automated rollback) control-loop configuration, managed through the project's " +
 			"`self-healing` API resource. Reading and writing it requires the token's user to be a **workspace admin**; " +
 			"for other tokens, and on a Flightdeck version without the endpoint, the block is null.\n\n" +
-			"There are two switches, and they are not the same one. `feature_enabled` turns the loop on in **shadow " +
-			"mode** — decisions are computed and logged, nothing acts — and is settable here. `armed` is what lets it " +
-			"act, and is **read-only**: arming a project is a console-only operation and the API refuses a write that " +
-			"would change it.\n\n" +
+			"Two settings decide whether the loop acts, and both are settable here. `feature_enabled` puts the project " +
+			"in front of the loop at all. `rollback` is its mode: `\"report\"` (**report only**: it notes what it would " +
+			"do and never touches production) or `\"auto\"` (**auto-rollback**: it rolls production back by itself when " +
+			"every check passes, and pages a person when it can't). The loop acts only when `feature_enabled` is on, " +
+			"`rollback` is `\"auto\"`, and Flightdeck's global kill switch is off. A plan that turns auto-rollback on " +
+			"carries a warning saying so, and while `rollback` is `\"auto\"` each thing that would stop it right now " +
+			"is shown as a warning on refresh and after apply. `armed` is the old name for the mode, kept read-only " +
+			"and deprecated.\n\n" +
 			"The endpoint merges, so this block only ever sends what you configure: a threshold you leave unset keeps " +
 			"whatever the project has (the server's documented default, until someone overrides it), and a setting you " +
 			"never name is never disturbed — including one changed in the console. `short_window_minutes` must not " +
@@ -136,19 +155,51 @@ func selfHealingSchema() schema.Attribute {
 		},
 		Attributes: map[string]schema.Attribute{
 			"feature_enabled": schema.BoolAttribute{
-				MarkdownDescription: "Whether the self-healing control loop runs for this project at all. Enabling it puts the " +
-					"project in **shadow mode**: decisions are computed and logged, and nothing acts. Acting additionally " +
-					"requires `armed`, which is not settable here. Turning this on therefore starts the observation, not " +
-					"the automation.\n\nWhen unset, the project's current value is kept, so a switch flipped in the " +
-					"console survives an apply. Set it explicitly — even to `false` — for Terraform to own it.",
+				MarkdownDescription: "Whether the self-healing control loop runs for this project at all. With `rollback` at " +
+					"`\"report\"` (report only), turning this on starts the observation, not the automation: the loop notes " +
+					"what it would do and never touches production, although it can still notify people and file work. " +
+					"With `rollback` at `\"auto\"`, turning this on is going live, and Flightdeck refuses it unless the same " +
+					"apply sets `rollback`, so a project stored as auto-rollback needs `rollback` in configuration before " +
+					"this can turn it on. Setting this to `false` pauses the loop and leaves `rollback` where it is. When " +
+					"unset, the project's current value is kept, so a switch flipped in the console survives an apply; set " +
+					"it explicitly, even to `false`, for Terraform to own it.",
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"rollback": schema.StringAttribute{
+				MarkdownDescription: "The loop's mode: `\"report\"` for **report only**, where it notes what it would do and " +
+					"never touches production, or `\"auto\"` for **auto-rollback**, where Flightdeck rolls production back " +
+					"by itself when every check passes and pages a person when it can't. It acts only while " +
+					"`feature_enabled` is on. A plan that moves this to `\"auto\"` carries a warning saying so. While it is " +
+					"`\"auto\"`, each thing that would stop auto-rollback right now (the API's `rollback_blockers`, such as " +
+					"a release that is not marked safe to roll back) is shown as a warning on refresh and after apply rather " +
+					"than stored, because it changes with every deploy. `\"auto\"` is accepted even while something blocks " +
+					"it. When unset, the project's current mode is kept, so a mode changed in the console survives an " +
+					"apply; set it explicitly for Terraform to own it. Needs a Flightdeck that supports the setting; an " +
+					"older one reports the mode through `armed` only, and a configured value fails the apply.",
+				Optional:      true,
+				Computed:      true,
+				Validators:    []validator.String{stringvalidator.OneOf(client.RollbackModes...)},
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+			},
+			"count_browser_errors": schema.BoolAttribute{
+				MarkdownDescription: "Whether errors sent with a browser token count toward the error rate the loop acts on, " +
+					"and toward the baseline a release is compared against. The server's default is `false`, so only " +
+					"errors sent with a server token count: a browser token ships inside every page, so anyone can read it " +
+					"and post fake errors to push the rate over the trigger. Browser errors still file work and alert " +
+					"either way. When unset, the project's current value is kept. Null on a Flightdeck that predates the " +
+					"setting, where a configured value fails the apply.",
 				Optional:      true,
 				Computed:      true,
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"armed": schema.BoolAttribute{
-				MarkdownDescription: "Whether live rollback (as opposed to shadow mode) is armed for this project. Read-only; set from the console.",
-				Computed:            true,
-				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+				MarkdownDescription: "Whether auto-rollback is on: the API's `armed` flag, true exactly when `rollback` is " +
+					"`\"auto\"`. Read-only. Deprecated: read and set `rollback` instead.",
+				DeprecationMessage: "Use `rollback` instead. `armed` is true exactly when `rollback` is \"auto\", and the mode is set through `rollback`.",
+				Computed:           true,
+				PlanModifiers:      []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"bake_minutes":            intThreshold("Eligibility window after a deploy, in minutes (default 20).", maxMinutes),
 			"baseline_multiplier":     floatThreshold("Post-deploy error rate must be at least this multiple of the baseline (default 5.0).", maxRatio),
@@ -262,6 +313,138 @@ func warnSelfHealingWindows(ctx context.Context, configBlock, planBlock types.Ob
 			"well succeed.", from, fromValue, held, heldValue, from))
 }
 
+// planArmed keeps the deprecated `armed` in step with `rollback` in a plan.
+// `armed` is computed with UseStateForUnknown, so a plan that changes the mode
+// would otherwise promise the prior `armed` and the apply would end in an
+// inconsistent result. The API documents `armed` as true exactly when
+// `rollback` is "auto", so a known planned mode decides it, and a mode not
+// known until apply makes it unknown too: UseStateForUnknown will already have
+// filled it with the prior value, which the apply may not keep.
+func planArmed(ctx context.Context, planBlock types.Object, diags *diag.Diagnostics) types.Object {
+	if planBlock.IsNull() || planBlock.IsUnknown() {
+		return planBlock
+	}
+	var m selfHealingModel
+	diags.Append(planBlock.As(ctx, &m, objectAsOptions)...)
+	if diags.HasError() || m.Rollback.IsNull() {
+		return planBlock
+	}
+	if m.Rollback.IsUnknown() {
+		m.Armed = types.BoolUnknown()
+	} else {
+		m.Armed = types.BoolValue(m.Rollback.ValueString() == client.RollbackAuto)
+	}
+	obj, d := types.ObjectValueFrom(ctx, selfHealingAttrTypes, m)
+	diags.Append(d...)
+	return obj
+}
+
+// warnAutoRollback is the plan-time warning for an apply that turns
+// auto-rollback on: one that moves `rollback` to "auto", or one that turns
+// `feature_enabled` on while `rollback` is or becomes "auto" (going live).
+// priorBlock is null on create. Each summary names the project, because
+// Terraform folds warnings that share a summary into one.
+//
+// Three cases get their own words. Going live over a stored "auto" without
+// `rollback` in configuration is a write Flightdeck refuses, so the warning
+// says that instead of promising rollbacks. A `rollback` configured from a
+// value not known until apply MAY turn it on. And a mode moved to "auto"
+// while the feature is not known to be on does not act yet.
+func warnAutoRollback(ctx context.Context, identifier types.String, configBlock, priorBlock, planBlock types.Object, diags *diag.Diagnostics) {
+	if planBlock.IsNull() || planBlock.IsUnknown() {
+		return
+	}
+	var cfg, planned, prior selfHealingModel
+	diags.Append(planBlock.As(ctx, &planned, objectAsOptions)...)
+	if !priorBlock.IsNull() && !priorBlock.IsUnknown() {
+		diags.Append(priorBlock.As(ctx, &prior, objectAsOptions)...)
+	}
+	if !configBlock.IsNull() && !configBlock.IsUnknown() {
+		diags.Append(configBlock.As(ctx, &cfg, objectAsOptions)...)
+	}
+	if diags.HasError() {
+		return
+	}
+	isAuto := func(v types.String) bool {
+		return !v.IsNull() && !v.IsUnknown() && v.ValueString() == client.RollbackAuto
+	}
+	isOn := func(v types.Bool) bool { return !v.IsNull() && !v.IsUnknown() && v.ValueBool() }
+	liveBefore := isAuto(prior.Rollback) && isOn(prior.FeatureEnabled)
+
+	project := "this project"
+	if !identifier.IsNull() && !identifier.IsUnknown() {
+		project = "project " + identifier.ValueString()
+	}
+	at := path.Root("self_healing").AtName("rollback")
+	const acts = "Flightdeck will roll production back by itself when every check passes, and page a person when it can't."
+
+	// Configured, but from a value the plan cannot see. (An unset rollback
+	// is unknown on create too, and that means the server's default, report.)
+	if cfg.Rollback.IsUnknown() {
+		if !liveBefore {
+			diags.AddAttributeWarning(at, "This apply may turn on auto-rollback for "+project,
+				fmt.Sprintf("self_healing.rollback for %s is not known until apply. If it is \"auto\" and feature_enabled "+
+					"is on, this apply turns on auto-rollback: %s", project, acts))
+		}
+		return
+	}
+
+	modeToAuto := isAuto(planned.Rollback) && !isAuto(prior.Rollback)
+	liveAfter := isAuto(planned.Rollback) && isOn(planned.FeatureEnabled)
+	goingLive := liveAfter && !liveBefore
+	switch {
+	case !modeToAuto && !goingLive:
+		return
+	case goingLive && !modeToAuto && cfg.Rollback.IsNull():
+		// The write names feature_enabled but not rollback, over a stored
+		// "auto": the API's go-live guard refuses it.
+		// A Flightdeck from before `rollback` has no such guard and takes
+		// the write, so the warning says what happens there too.
+		diags.AddAttributeWarning(path.Root("self_healing").AtName("feature_enabled"),
+			"Flightdeck will refuse this apply for "+project+" unless rollback is set",
+			fmt.Sprintf("%s is stored as auto-rollback, and this apply turns feature_enabled on without naming "+
+				"rollback. That would start live rollbacks without anyone saying so, and Flightdeck refuses it. Set "+
+				"self_healing.rollback to \"auto\" to go live with auto-rollback, or \"report\" to start in report "+
+				"only. This is a warning rather than an error because the stored mode comes from the last refresh.\n\n"+
+				"A Flightdeck from before the rollback setting has no such guard: there this apply turns on "+
+				"auto-rollback, and %s To start in report only there, leave feature_enabled off and change the "+
+				"mode in the console first.", capitalize(project), acts))
+	case liveAfter:
+		diags.AddAttributeWarning(at, "This apply turns on auto-rollback for "+project,
+			fmt.Sprintf("This apply turns on auto-rollback for %s. %s", project, acts))
+	case planned.FeatureEnabled.IsUnknown():
+		diags.AddAttributeWarning(at, "This apply turns on auto-rollback for "+project,
+			fmt.Sprintf("This apply sets %s to auto-rollback. It acts only while feature_enabled is on, which this plan "+
+				"cannot show yet; once it is on, %s", project, acts))
+	default:
+		diags.AddAttributeWarning(at, "This apply turns on auto-rollback for "+project,
+			fmt.Sprintf("This apply sets %s to auto-rollback. Nothing acts while feature_enabled is off; once it is on, %s", project, acts))
+	}
+}
+
+// warnRollbackBlockers reports, one warning each, what would stop
+// auto-rollback on a project whose mode is "auto" right now. They are
+// warnings rather than state because they change with every deploy. Each
+// summary names the project and the blocker's code: Terraform folds warnings
+// that share a summary into one, which would hide every message but the first.
+func warnRollbackBlockers(sh *client.SelfHealing, identifier string, diags *diag.Diagnostics) {
+	if sh == nil || sh.RollbackMode() != client.RollbackAuto {
+		return
+	}
+	seen := map[string]int{}
+	for _, b := range sh.RollbackBlockers {
+		seen[b.Code]++
+		summary := fmt.Sprintf("Auto-rollback cannot act on project %s right now: %s", identifier, b.Code)
+		if n := seen[b.Code]; n > 1 {
+			summary += fmt.Sprintf(" (%d)", n)
+		}
+		diags.AddAttributeWarning(path.Root("self_healing").AtName("rollback"), summary,
+			b.Message+"\n\nThis project is set to auto-rollback, and this is one of the things that would stop it "+
+				"acting now. Flightdeck checks again with every deploy, so this is reported on each refresh and "+
+				"apply rather than stored in state.")
+	}
+}
+
 // selfHealingToObject maps the API's resolved config into the block.
 func selfHealingToObject(sh *client.SelfHealing, diags *diag.Diagnostics) types.Object {
 	if sh == nil {
@@ -269,8 +452,11 @@ func selfHealingToObject(sh *client.SelfHealing, diags *diag.Diagnostics) types.
 	}
 	cfg := sh.Config
 	obj, d := types.ObjectValue(selfHealingAttrTypes, map[string]attr.Value{
-		// feature_enabled rides alongside `config` in the response, not inside it.
+		// feature_enabled and rollback ride alongside `config` in the response,
+		// not inside it; rollback falls back to config.armed on an older server.
 		"feature_enabled":         types.BoolValue(sh.FeatureEnabled),
+		"rollback":                types.StringValue(sh.RollbackMode()),
+		"count_browser_errors":    types.BoolPointerValue(cfg.CountBrowserErrors),
 		"armed":                   types.BoolValue(cfg.Armed),
 		"bake_minutes":            types.Int64Value(cfg.BakeMinutes),
 		"baseline_multiplier":     types.Float64Value(cfg.BaselineMultiplier),
@@ -291,6 +477,8 @@ func selfHealingToObject(sh *client.SelfHealing, diags *diag.Diagnostics) types.
 // selfHealingFields returns the settings to send from the CONFIGURED block, or
 // nil when the configuration has no block (null/unknown). Only known, non-null
 // settings are sent, which is what makes the merge safe; `armed` never is.
+// `rollback` goes in the same write as `feature_enabled`, which is what lets a
+// project stored as auto-rollback be turned on at all.
 func selfHealingFields(ctx context.Context, block types.Object, diags *diag.Diagnostics) client.Fields {
 	if block.IsNull() || block.IsUnknown() {
 		return nil
@@ -308,9 +496,16 @@ func selfHealingFields(ctx context.Context, block types.Object, diags *diag.Diag
 			fields[key] = v.ValueFloat64()
 		}
 	}
-	if !m.FeatureEnabled.IsNull() && !m.FeatureEnabled.IsUnknown() {
-		fields["feature_enabled"] = m.FeatureEnabled.ValueBool()
+	putBool := func(key string, v types.Bool) {
+		if !v.IsNull() && !v.IsUnknown() {
+			fields[key] = v.ValueBool()
+		}
 	}
+	putBool("feature_enabled", m.FeatureEnabled)
+	if !m.Rollback.IsNull() && !m.Rollback.IsUnknown() {
+		fields["rollback"] = m.Rollback.ValueString()
+	}
+	putBool("count_browser_errors", m.CountBrowserErrors)
 	putInt("bake_minutes", m.BakeMinutes)
 	putFloat("baseline_multiplier", m.BaselineMultiplier)
 	putFloat("absolute_floor", m.AbsoluteFloor)
@@ -325,34 +520,44 @@ func selfHealingFields(ctx context.Context, block types.Object, diags *diag.Diag
 	return fields
 }
 
-// readSelfHealing fetches the block for a project. A 403 (token is not a
-// workspace admin) or a 404 (project gone between calls, or a Flightdeck
-// without the endpoint) leaves the block null; anything else is an error.
-func readSelfHealing(ctx context.Context, c *client.Client, projectID int64, diags *diag.Diagnostics) types.Object {
+// readSelfHealing fetches the block for a project, and the API's answer for
+// callers that report on it. A 403 (token is not a workspace admin) or a 404
+// (project gone between calls, or a Flightdeck without the endpoint) leaves
+// the block null and the answer nil; anything else is an error.
+func readSelfHealing(ctx context.Context, c *client.Client, projectID int64, diags *diag.Diagnostics) (types.Object, *client.SelfHealing) {
 	sh, err := c.GetSelfHealing(ctx, projectID)
 	if err != nil {
 		if client.IsForbidden(err) || client.IsNotFound(err) {
-			return types.ObjectNull(selfHealingAttrTypes)
+			return types.ObjectNull(selfHealingAttrTypes), nil
 		}
 		addAPIError(diags, "Error reading Flightdeck self-healing configuration", err)
-		return types.ObjectNull(selfHealingAttrTypes)
+		return types.ObjectNull(selfHealingAttrTypes), nil
 	}
-	return selfHealingToObject(sh, diags)
+	return selfHealingToObject(sh, diags), sh
 }
 
-// writeSelfHealing PATCHes the configured thresholds (if any) with the
+// writeSelfHealing PATCHes the configured settings (if any) with the
 // project's current lock_version and returns the block plus the project's
-// new lock_version. With no configured block it just reads.
-func writeSelfHealing(ctx context.Context, c *client.Client, projectID int64, configBlock types.Object, lockVersion int64, diags *diag.Diagnostics) (types.Object, int64) {
+// new lock_version. With no configured block it just reads. Either way, the
+// result's rollback blockers are reported as warnings while the mode is
+// "auto"; identifier names the project in them.
+func writeSelfHealing(ctx context.Context, c *client.Client, projectID int64, identifier string, configBlock types.Object, lockVersion int64, diags *diag.Diagnostics) (types.Object, int64) {
 	settings := selfHealingFields(ctx, configBlock, diags)
 	if diags.HasError() {
 		return types.ObjectNull(selfHealingAttrTypes), lockVersion
 	}
 	if len(settings) == 0 {
-		return readSelfHealing(ctx, c, projectID, diags), lockVersion
+		block, sh := readSelfHealing(ctx, c, projectID, diags)
+		warnRollbackBlockers(sh, identifier, diags)
+		return block, lockVersion
 	}
 	sh, err := c.UpdateSelfHealing(ctx, projectID, settings, lockVersion)
 	if err != nil {
+		// A refused write that named a setting this Flightdeck is too old for
+		// says so; any other refusal falls through to the cases below.
+		if client.IsValidation(err) && addUnsupportedSettingError(ctx, c, projectID, settings, err, diags) {
+			return types.ObjectNull(selfHealingAttrTypes), lockVersion
+		}
 		switch {
 		case client.IsNotFound(err):
 			diags.AddAttributeError(path.Root("self_healing"), "Self-healing configuration is not available on this Flightdeck",
@@ -362,7 +567,11 @@ func writeSelfHealing(ctx context.Context, c *client.Client, projectID int64, co
 			diags.AddAttributeError(path.Root("self_healing"), "Self-healing configuration requires a workspace admin",
 				"Only a workspace owner or admin may read or write a project's self-healing thresholds. "+apiMessage(err))
 		case client.HasCode(err, client.CodeArmingRefused):
-			diags.AddAttributeError(path.Root("self_healing").AtName("armed"), "Arming is console-only", apiMessage(err))
+			diags.AddAttributeError(path.Root("self_healing").AtName("feature_enabled"), "Set rollback to turn this project's self-healing on",
+				"This project is stored as auto-rollback, so turning feature_enabled on would start live rollbacks, and "+
+					"Flightdeck refuses that unless the same write says which mode to go live in. Set "+
+					"self_healing.rollback explicitly: \"auto\" to go live with auto-rollback, or \"report\" to start in "+
+					"report only. Nothing was written. "+apiMessage(err))
 		case client.IsStale(err):
 			addStaleError(diags, "Project self-healing configuration", lockVersion, nil, err)
 		default:
@@ -370,5 +579,57 @@ func writeSelfHealing(ctx context.Context, c *client.Client, projectID int64, co
 		}
 		return types.ObjectNull(selfHealingAttrTypes), lockVersion
 	}
+	warnRollbackBlockers(sh, identifier, diags)
 	return selfHealingToObject(sh, diags), sh.LockVersion
+}
+
+// selfHealingNewerSettings are the settings an older Flightdeck refuses as
+// unknown. Each is configured as the attribute of the same name.
+var selfHealingNewerSettings = []string{"rollback", "count_browser_errors"}
+
+// addUnsupportedSettingError explains a refused write that named a setting
+// this Flightdeck is too old to know. The API's refusal of an unknown key is
+// prose, so rather than match on its wording, a fresh read is asked what the
+// endpoint accepts. It reports whether it added a diagnostic; false leaves the
+// error to the caller's generic handling.
+func addUnsupportedSettingError(ctx context.Context, c *client.Client, projectID int64, sent client.Fields, err error, diags *diag.Diagnostics) bool {
+	var missing []string
+	for _, key := range selfHealingNewerSettings {
+		if _, named := sent[key]; named {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) == 0 {
+		return false
+	}
+	sh, rerr := c.GetSelfHealing(ctx, projectID)
+	if rerr != nil {
+		return false
+	}
+	// A setting is supported when the read reports it and writable_settings
+	// does not leave it out.
+	reported := map[string]bool{
+		"rollback":             sh.Rollback != nil,
+		"count_browser_errors": sh.Config.CountBrowserErrors != nil,
+	}
+	added := false
+	for _, key := range missing {
+		if reported[key] && sh.Accepts(key) {
+			continue
+		}
+		diags.AddAttributeError(path.Root("self_healing").AtName(key), "This Flightdeck is too old for self_healing."+key,
+			fmt.Sprintf("The Flightdeck at this endpoint does not accept %s on its self-healing API, so it cannot be set "+
+				"from Terraform there. Remove %s from the configuration, or upgrade Flightdeck. Nothing was written. %s",
+				key, key, apiMessage(err)))
+		added = true
+	}
+	return added
+}
+
+// capitalize upper-cases the first letter, for a phrase that opens a sentence.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

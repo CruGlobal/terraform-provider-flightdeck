@@ -8,6 +8,7 @@ import (
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
@@ -138,12 +139,14 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	}
 }
 
-// ModifyPlan checks what ValidateConfig cannot: the self-healing burn-rate
+// ModifyPlan keeps the deprecated self_healing.armed in step with the planned
+// mode, and warns about what ValidateConfig cannot see: an apply that turns
+// auto-rollback on, which needs the prior mode, and the self-healing burn-rate
 // windows as the API will MERGE them, which needs the prior values the plan
 // carries for thresholds the configuration no longer mentions.
 func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	// Nothing merged to check while creating (no prior) or destroying (no plan).
-	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+	// Nothing to warn about while destroying (no plan).
+	if req.Plan.Raw.IsNull() {
 		return
 	}
 	var config, plan projectModel
@@ -152,7 +155,25 @@ func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	warnSelfHealingWindows(ctx, config.SelfHealing, plan.SelfHealing, &resp.Diagnostics)
+	creating := req.State.Raw.IsNull()
+	prior := types.ObjectNull(selfHealingAttrTypes)
+	if !creating {
+		var state projectModel
+		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		prior = state.SelfHealing
+	}
+	if planned := planArmed(ctx, plan.SelfHealing, &resp.Diagnostics); !planned.Equal(plan.SelfHealing) {
+		plan.SelfHealing = planned
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("self_healing"), planned)...)
+	}
+	warnAutoRollback(ctx, plan.Identifier, config.SelfHealing, prior, plan.SelfHealing, &resp.Diagnostics)
+	// Nothing merged to check while creating (no prior).
+	if !creating {
+		warnSelfHealingWindows(ctx, config.SelfHealing, plan.SelfHealing, &resp.Diagnostics)
+	}
 }
 
 func (r *projectResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
@@ -185,7 +206,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 
 	state := projectToModel(ctx, created, &plan, featuresFromPrior, &resp.Diagnostics)
 	reconcileFeatures(ctx, &state, &plan, &resp.Diagnostics)
-	block, lockVersion := writeSelfHealing(ctx, r.client, created.ID, config.SelfHealing, created.LockVersion, &resp.Diagnostics)
+	block, lockVersion := writeSelfHealing(ctx, r.client, created.ID, created.Identifier, config.SelfHealing, created.LockVersion, &resp.Diagnostics)
 	state.SelfHealing = block
 	slack, lockVersion := writeSlackChannel(ctx, r.client, created.ID, config.SlackChannel, plan.SlackChannel,
 		types.ObjectNull(slackChannelAttrTypes), lockVersion, slackChannelOnCreate, &resp.Diagnostics)
@@ -216,7 +237,9 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 	}
 
 	newState := projectToModel(ctx, p, &state, featuresFromPrior, &resp.Diagnostics)
-	newState.SelfHealing = readSelfHealing(ctx, r.client, p.ID, &resp.Diagnostics)
+	block, sh := readSelfHealing(ctx, r.client, p.ID, &resp.Diagnostics)
+	newState.SelfHealing = block
+	warnRollbackBlockers(sh, p.Identifier, &resp.Diagnostics)
 	newState.SlackChannel = readSlackChannel(ctx, r.client, p.ID,
 		slackEventFilterOf(ctx, state.SlackChannel, &resp.Diagnostics), slackEventsManaged, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
@@ -255,7 +278,7 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	reconcileFeatures(ctx, &newState, &plan, &resp.Diagnostics)
 	// Each block's write pins the lock_version the previous call produced and
 	// bumps it again; the state keeps the final value.
-	block, lockVersion := writeSelfHealing(ctx, r.client, id, config.SelfHealing, updated.LockVersion, &resp.Diagnostics)
+	block, lockVersion := writeSelfHealing(ctx, r.client, id, updated.Identifier, config.SelfHealing, updated.LockVersion, &resp.Diagnostics)
 	newState.SelfHealing = block
 	slack, lockVersion := writeSlackChannel(ctx, r.client, id, config.SlackChannel, plan.SlackChannel,
 		state.SlackChannel, lockVersion, slackChannelOnUpdate, &resp.Diagnostics)
@@ -304,7 +327,8 @@ func (r *projectResource) ImportState(ctx context.Context, req resource.ImportSt
 	}
 
 	state := projectToModel(ctx, p, nil, featuresToggleable, &resp.Diagnostics)
-	state.SelfHealing = readSelfHealing(ctx, r.client, p.ID, &resp.Diagnostics)
+	// Import is followed by a refresh, which reports any rollback blockers.
+	state.SelfHealing, _ = readSelfHealing(ctx, r.client, p.ID, &resp.Diagnostics)
 	// No prior configuration to defer to, so no event categories are managed;
 	// list the ones you want in `slack_channel.event_filter` afterwards.
 	state.SlackChannel = readSlackChannel(ctx, r.client, p.ID, types.MapNull(types.BoolType), slackEventsManaged, &resp.Diagnostics)

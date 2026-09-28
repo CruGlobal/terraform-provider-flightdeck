@@ -3,11 +3,13 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -127,9 +129,26 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Validators:    []validator.String{stringvalidator.OneOf(client.ProjectNetworks...)},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
+			"app": schema.StringAttribute{
+				MarkdownDescription: "The deployed app this project belongs to, as the deploy pipeline's release events " +
+					"name it: the app's GitHub repository name, 1 to 100 letters, digits, `.`, `_` or `-`. One project is " +
+					"one app, and within a workspace an app belongs to at most one project (compared ignoring case), so an " +
+					"app another project already has fails the apply (`app_taken`). Setting or changing it needs a " +
+					"**workspace owner or admin** token, even where the token could otherwise update the project. When " +
+					"unset, the project's current app is kept: the first release event that names an app binds the " +
+					"project to it, so leaving this unset leaves the binding to the pipeline. The API can set or change " +
+					"`app` but never clear it (a workspace admin can, in Flightdeck's project settings), so removing it from " +
+					"configuration does not unbind the project. That first " +
+					"binding bumps the project's `lock_version`, so an apply racing it fails once with a lock conflict; " +
+					"run `terraform plan` again and re-apply.",
+				Optional:      true,
+				Computed:      true,
+				Validators:    []validator.String{stringvalidator.RegexMatches(appNamePattern, "must be 1-100 letters, digits, '.', '_' or '-'")},
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+			},
 			"lock_version": schema.Int64Attribute{
 				MarkdownDescription: "Optimistic-locking version the API bumps on every change (including self-healing and " +
-					"Slack channel writes). " +
+					"Slack channel writes, and the deploy pipeline binding the project's `app`). " +
 					"Sent as `If-Match` on updates.",
 				Computed: true,
 			},
@@ -200,7 +219,10 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 
 	created, err := r.client.CreateProject(ctx, fields, client.PayloadKey("project", "", fields))
 	if err != nil {
-		addAPIError(&resp.Diagnostics, "Error creating Flightdeck project", err)
+		// Creating a project needs only workspace membership, so a 403 on a
+		// create that names an app is the app's own bar.
+		_, settingApp := fields["app"]
+		addProjectWriteError(&resp.Diagnostics, "Error creating Flightdeck project", settingApp, err)
 		return
 	}
 
@@ -270,7 +292,10 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 			addStaleError(&resp.Diagnostics, fmt.Sprintf("Project %s", state.Identifier.ValueString()), state.LockVersion.ValueInt64(), current, err)
 			return
 		}
-		addAPIError(&resp.Diagnostics, "Error updating Flightdeck project", err)
+		// The app is only sent when it changes, so a 403 on a write naming it
+		// is the app's own bar.
+		_, changingApp := fields["app"]
+		addProjectWriteError(&resp.Diagnostics, "Error updating Flightdeck project", changingApp, err)
 		return
 	}
 
@@ -333,6 +358,31 @@ func (r *projectResource) ImportState(ctx context.Context, req resource.ImportSt
 	// list the ones you want in `slack_channel.event_filter` afterwards.
 	state.SlackChannel = readSlackChannel(ctx, r.client, p.ID, types.MapNull(types.BoolType), slackEventsManaged, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+// addProjectWriteError reports a failed project create or update. The app has
+// two refusals of its own, and each says what to change rather than only
+// quoting the API. changingApp is whether the write sets or changes the app,
+// which is what decides whether a 403 is the app's workspace-admin bar or the
+// token lacking the project role every other update needs.
+func addProjectWriteError(diags *diag.Diagnostics, summary string, changingApp bool, err error) {
+	apiErr, _ := client.AsError(err)
+	switch {
+	case client.HasCode(err, client.CodeAppTaken):
+		diags.AddAttributeError(path.Root("app"), "App already belongs to another project",
+			"An app belongs to at most one project in a workspace. Point this project at a different app, or have a "+
+				"workspace owner or admin change the other project's app first. Nothing was written.\n\n"+
+				"The API said: "+apiErr.Error())
+	// Only the write itself: a 403 from the read that verifies a create is the
+	// project role, and says nothing about the app.
+	case changingApp && client.IsForbidden(err) && apiErr.Method != http.MethodGet:
+		diags.AddAttributeError(path.Root("app"), "Setting a project's app requires a workspace owner or admin",
+			"This write sets or changes `app`, which needs a workspace owner or admin token even where the token "+
+				"could otherwise update the project. Use such a token, or remove `app` from the configuration and let "+
+				"the first release event that names an app bind it.\n\nThe API said: "+apiErr.Error())
+	default:
+		addAPIError(diags, summary, err)
+	}
 }
 
 func isDigits(s string) bool {

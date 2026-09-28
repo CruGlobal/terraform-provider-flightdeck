@@ -25,11 +25,17 @@ type Project struct {
 	GithubRepoFullName *string         `json:"github_repo_full_name"`
 	// LeadID is the project lead (defaults to the creator). Network is the
 	// visibility (private_project / public_project).
-	LeadID      *int64 `json:"lead_id"`
-	Network     string `json:"network"`
-	LockVersion int64  `json:"lock_version"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	LeadID  *int64 `json:"lead_id"`
+	Network string `json:"network"`
+	// App is the deployed app the project belongs to, as the deploy
+	// pipeline's release events name it.
+	// Null until someone sets it or the first release event naming an app
+	// binds it. Writable by a workspace owner or admin only, and a blank is
+	// "no opinion", so the API can set or change it but never clear it.
+	App         *string `json:"app"`
+	LockVersion int64   `json:"lock_version"`
+	CreatedAt   string  `json:"created_at"`
+	UpdatedAt   string  `json:"updated_at"`
 }
 
 // ResourceID implements Identified.

@@ -33,6 +33,9 @@ const (
 	// auto-rollback, without `rollback` in the same write to say which mode to
 	// go live in (422).
 	CodeArmingRefused = "arming_refused"
+	// Projects: the app is already another project's in this workspace (422).
+	// An app belongs to at most one project, and the message names the holder.
+	CodeAppTaken = "app_taken"
 	// GitHub integrations: the GitHub App cannot reach the repository (no row
 	// created), and one enabled integration per repository per workspace.
 	CodeRepoUnreachable   = "repo_unreachable"

@@ -5,6 +5,10 @@ resource "flightdeck_project" "app" {
   emoji       = "📱"
   network     = "private_project" # explicit members only; new projects are public
 
+  # The deployed app this project belongs to (needs a workspace owner or admin
+  # token). Optional: the first release event that names an app binds it.
+  app = "mobile-app"
+
   # Only the feature keys listed here are managed; others keep their value.
   features = {
     intake = true

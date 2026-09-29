@@ -49,10 +49,11 @@ type errorAlertRuleModel struct {
 }
 
 type alertConditionModel struct {
-	MinLevel      types.String `tfsdk:"min_level"`
-	Environment   types.String `tfsdk:"environment"`
-	Count         types.Int64  `tfsdk:"count"`
-	WindowMinutes types.Int64  `tfsdk:"window_minutes"`
+	MinLevel           types.String `tfsdk:"min_level"`
+	Environment        types.String `tfsdk:"environment"`
+	Count              types.Int64  `tfsdk:"count"`
+	WindowMinutes      types.Int64  `tfsdk:"window_minutes"`
+	CountBrowserErrors types.Bool   `tfsdk:"count_browser_errors"`
 }
 
 type alertActionModel struct {
@@ -67,10 +68,11 @@ type alertActionModel struct {
 }
 
 var alertConditionAttrTypes = map[string]attr.Type{
-	"min_level":      types.StringType,
-	"environment":    types.StringType,
-	"count":          types.Int64Type,
-	"window_minutes": types.Int64Type,
+	"min_level":            types.StringType,
+	"environment":          types.StringType,
+	"count":                types.Int64Type,
+	"window_minutes":       types.Int64Type,
+	"count_browser_errors": types.BoolType,
 }
 
 var alertActionAttrTypes = map[string]attr.Type{
@@ -96,6 +98,7 @@ func (r *errorAlertRuleResource) Schema(_ context.Context, _ resource.SchemaRequ
 	emptyCondition := types.ObjectValueMust(alertConditionAttrTypes, map[string]attr.Value{
 		"min_level": types.StringNull(), "environment": types.StringNull(),
 		"count": types.Int64Null(), "window_minutes": types.Int64Null(),
+		"count_browser_errors": types.BoolNull(),
 	})
 	boolFlag := func(desc string) schema.Attribute {
 		return schema.BoolAttribute{
@@ -110,8 +113,11 @@ func (r *errorAlertRuleResource) Schema(_ context.Context, _ resource.SchemaRequ
 			"that satisfies the *conditions*, run the enabled *actions*.\n\n" +
 			"At least one action must be enabled. `notify_webhook` requires `webhook_url`; `open_incident` requires " +
 			"the project's `incidents` feature to be enabled, and `escalation_policy_id` is only honoured alongside it. " +
-			"Condition and action keys are validated against the API's allowlists.\n\n" +
-			"Import with `<project_id>/<rule_id>`: `terraform import flightdeck_error_alert_rule.new_errors 42/12`.",
+			"Condition and action keys are validated against the API's allowlists. On a rule that opens incidents, " +
+			"set `condition.count_browser_errors = false` so an error posted with the public browser token can't page anyone.\n\n" +
+			"Import with `<project_id>/<rule_id>`: `terraform import flightdeck_error_alert_rule.new_errors 42/12`. " +
+			"The console stores `condition.count_browser_errors` on every rule it saves, and a new rule starts at " +
+			"`false`, so set it to match when importing a rule made there, or the plan will change it.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
 				MarkdownDescription: "Numeric id of the rule.",
@@ -165,6 +171,21 @@ func (r *errorAlertRuleResource) Schema(_ context.Context, _ resource.SchemaRequ
 					"window_minutes": schema.Int64Attribute{
 						MarkdownDescription: "Window in minutes for the `occurrence_threshold` trigger.",
 						Optional:            true,
+					},
+					"count_browser_errors": schema.BoolAttribute{
+						MarkdownDescription: "Whether errors sent with a browser token (`post_client_item`, which browser and " +
+							"mobile apps use) can fire the rule. Set it to `false` to leave them out: such an error never fires " +
+							"the rule or uses up its throttle window, and `occurrence_threshold` counts only the errors your " +
+							"servers sent. A browser token ships inside every page and app, so anyone can read it and post a " +
+							"fake error. **Set it to `false` on any rule with `action.open_incident`**, or one fake error can " +
+							"open an incident, page someone and change the status page. Two limits of `false`: on a project " +
+							"whose errors mostly come from browsers or mobile apps it leaves out almost every error, and a " +
+							"`new_group` or `regression` rule looks only at the error that created or reopened the group, so if " +
+							"a browser error did that, the rule stays silent for that group even when your servers later send " +
+							"the same error. When unset, the key is not sent and the rule counts every error, which is the " +
+							"API's default (unlike the project's `self_healing.count_browser_errors`, which defaults to " +
+							"`false`). Flightdeck versions that predate this setting refuse it.",
+						Optional: true,
 					},
 				},
 			},
@@ -264,6 +285,11 @@ func alertRuleFields(ctx context.Context, plan *errorAlertRuleModel, diags *diag
 		if !c.WindowMinutes.IsNull() {
 			condition["window_minutes"] = c.WindowMinutes.ValueInt64()
 		}
+		// Sent only when set, so a Flightdeck that predates the key still
+		// accepts every rule that does not use it.
+		if !c.CountBrowserErrors.IsNull() {
+			condition["count_browser_errors"] = c.CountBrowserErrors.ValueBool()
+		}
 	}
 	// Always sent, so removing a condition from configuration clears it.
 	fields["condition"] = condition
@@ -291,10 +317,11 @@ func alertRuleFields(ctx context.Context, plan *errorAlertRuleModel, diags *diag
 
 func alertRuleToModel(rule *client.ErrorAlertRule, diags *diag.Diagnostics) errorAlertRuleModel {
 	condition, d := types.ObjectValue(alertConditionAttrTypes, map[string]attr.Value{
-		"min_level":      rawString("condition.min_level", rule.Condition["min_level"], diags),
-		"environment":    rawString("condition.environment", rule.Condition["environment"], diags),
-		"count":          rawInt64("condition.count", rule.Condition["count"], diags),
-		"window_minutes": rawInt64("condition.window_minutes", rule.Condition["window_minutes"], diags),
+		"min_level":            rawString("condition.min_level", rule.Condition["min_level"], diags),
+		"environment":          rawString("condition.environment", rule.Condition["environment"], diags),
+		"count":                rawInt64("condition.count", rule.Condition["count"], diags),
+		"window_minutes":       rawInt64("condition.window_minutes", rule.Condition["window_minutes"], diags),
+		"count_browser_errors": rawCountBrowserErrors(rule.Condition["count_browser_errors"]),
 	})
 	diags.Append(d...)
 	action, d := types.ObjectValue(alertActionAttrTypes, map[string]attr.Value{
@@ -323,7 +350,8 @@ func alertRuleToModel(rule *client.ErrorAlertRule, diags *diag.Diagnostics) erro
 // The API stores condition/action values as whatever JSON the writer sent, so
 // the readers below accept the natural type and its string spelling — and
 // nothing else: a value of the wrong shape is an error naming the field, not a
-// silent truncation or a JSON fragment smuggled into a string.
+// silent truncation or a JSON fragment smuggled into a string. The boolean
+// readers are the exception: they read any value the way the API acts on it.
 
 func rawString(field string, raw json.RawMessage, diags *diag.Diagnostics) types.String {
 	if len(raw) == 0 || string(raw) == "null" {
@@ -382,6 +410,33 @@ func rawBool(raw json.RawMessage) types.Bool {
 		return types.BoolValue(n.String() != "0")
 	}
 	return types.BoolValue(false)
+}
+
+// rawCountBrowserErrors reads condition.count_browser_errors the way the API
+// does. Absent, null or blank is null: the key is not stored and the rule
+// counts every error. The API's false spellings are false, trimmed the way
+// the API trims them (ASCII whitespace and NUL only). Anything else is true,
+// because the API counts browser errors for every value it cannot read as
+// false, so the state says what the rule actually does.
+func rawCountBrowserErrors(raw json.RawMessage) types.Bool {
+	const apiBlank = "\x00\t\n\v\f\r "
+	if len(raw) == 0 || string(raw) == "null" {
+		return types.BoolNull()
+	}
+	var b bool
+	if json.Unmarshal(raw, &b) == nil {
+		return types.BoolValue(b)
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		switch strings.ToLower(strings.Trim(s, apiBlank)) {
+		case "":
+			return types.BoolNull()
+		case "false", "0", "f", "off":
+			return types.BoolValue(false)
+		}
+	}
+	return types.BoolValue(true)
 }
 
 func (r *errorAlertRuleResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {

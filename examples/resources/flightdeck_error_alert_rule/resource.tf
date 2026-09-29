@@ -1,8 +1,9 @@
 resource "flightdeck_project" "app" {
-  name       = "Mobile App"
+  name       = "Web App"
   identifier = "APP"
   features = {
-    errors = true
+    errors    = true
+    incidents = true
   }
 }
 
@@ -37,5 +38,26 @@ resource "flightdeck_error_alert_rule" "error_storm" {
   action = {
     notify_webhook = true
     webhook_url    = "https://alerts.example.com/hooks/flightdeck"
+  }
+}
+
+# Open an incident for a new production error, leaving out errors sent with the
+# browser token. That token ships inside every page, so anyone can read it and
+# post a fake error; leaving those out means one can't page anybody. The
+# trade-off: if a browser error creates the group first, this rule stays silent
+# for that error (see count_browser_errors below).
+resource "flightdeck_error_alert_rule" "page_on_call" {
+  project_id = flightdeck_project.app.id
+  name       = "Page on new server errors"
+  trigger    = "new_group"
+
+  condition = {
+    min_level            = "error"
+    environment          = "production"
+    count_browser_errors = false
+  }
+
+  action = {
+    open_incident = true
   }
 }

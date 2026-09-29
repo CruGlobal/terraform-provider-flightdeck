@@ -1,6 +1,7 @@
 package flightdecktest
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
 	"sort"
@@ -9,7 +10,7 @@ import (
 
 var (
 	alertTriggers      = []string{"new_group", "regression", "occurrence_threshold"}
-	alertConditionKeys = []string{"min_level", "environment", "count", "window_minutes"}
+	alertConditionKeys = []string{"min_level", "environment", "count", "window_minutes", "count_browser_errors"}
 	alertActionKeys    = []string{"notify_slack", "notify_email", "create_work_item", "file_intake", "notify_webhook", "open_incident"}
 	errorLevels        = []string{"debug", "info", "warning", "error", "critical"}
 	httpURL            = regexp.MustCompile(`(?i)^https?://\S+$`)
@@ -32,6 +33,9 @@ type errorAlertRuleStore struct {
 	byID map[int64]*ErrorAlertRule
 	// escalationPolicies per project, for open_incident's escalation_policy_id.
 	escalationPolicies map[int64][]int64
+	// legacy simulates a Flightdeck from before condition.count_browser_errors:
+	// the key is unknown, so a write naming it is refused.
+	legacy bool
 }
 
 func init() {
@@ -57,6 +61,14 @@ func (s *Server) AddEscalationPolicy(projectID, policyID int64) {
 	defer s.mu.Unlock()
 	st := s.errorAlertRules()
 	st.escalationPolicies[projectID] = append(st.escalationPolicies[projectID], policyID)
+}
+
+// SetErrorAlertRulesLegacy makes the endpoint behave like a Flightdeck from
+// before condition.count_browser_errors (see errorAlertRuleStore.legacy).
+func (s *Server) SetErrorAlertRulesLegacy(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.errorAlertRules().legacy = on
 }
 
 // TouchErrorAlertRule simulates an out-of-band edit that bumps lock_version.
@@ -165,11 +177,49 @@ func (s *Server) applyRuleAttrs(rule *ErrorAlertRule, attrs map[string]any, proj
 		if !isMap {
 			return http.StatusUnprocessableEntity, "invalid_attribute", "condition must be an object"
 		}
-		normalized := map[string]any{}
-		for _, k := range alertConditionKeys {
-			if val, present := raw[k]; present && val != nil {
-				normalized[k] = val
+		allowed := alertConditionKeys
+		if s.errorAlertRules().legacy {
+			allowed = nil
+			for _, k := range alertConditionKeys {
+				if k != "count_browser_errors" {
+					allowed = append(allowed, k)
+				}
 			}
+		}
+		var unknown []string
+		for k := range raw {
+			if !contains(allowed, k) {
+				unknown = append(unknown, k)
+			}
+		}
+		if len(unknown) > 0 {
+			sort.Strings(unknown)
+			plural := ""
+			if len(unknown) > 1 {
+				plural = "s"
+			}
+			return http.StatusUnprocessableEntity, "invalid_attribute",
+				fmt.Sprintf("unknown condition key%s: %s (valid: %s)", plural, strings.Join(unknown, ", "), strings.Join(allowed, ", "))
+		}
+		normalized := map[string]any{}
+		for _, k := range allowed {
+			val, present := raw[k]
+			if !present || val == nil {
+				continue
+			}
+			if k == "count_browser_errors" {
+				// Null or blank is no opinion and is not stored; false is.
+				if str, isStr := val.(string); isStr && strings.TrimSpace(str) == "" {
+					continue
+				}
+				reading, ok := conditionBoolean(val)
+				if !ok {
+					return http.StatusUnprocessableEntity, "invalid_attribute",
+						fmt.Sprintf("count_browser_errors must be true or false, got %v", val)
+				}
+				val = reading
+			}
+			normalized[k] = val
 		}
 		rule.Condition = normalized
 	}
@@ -234,6 +284,23 @@ func (s *Server) applyRuleAttrs(rule *ErrorAlertRule, attrs map[string]any, proj
 		}
 	}
 	return 0, "", ""
+}
+
+// conditionBoolean reads a boolean condition value in the API's spellings.
+func conditionBoolean(v any) (bool, bool) {
+	switch t := v.(type) {
+	case bool:
+		return t, true
+	case string:
+		// Trimmed as the API trims: ASCII whitespace and NUL only.
+		switch strings.ToLower(strings.Trim(t, "\x00\t\n\v\f\r ")) {
+		case "true", "1", "t", "on":
+			return true, true
+		case "false", "0", "f", "off":
+			return false, true
+		}
+	}
+	return false, false
 }
 
 func (s *Server) createErrorAlertRule(w http.ResponseWriter, r *http.Request) {

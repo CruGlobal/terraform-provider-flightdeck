@@ -4,26 +4,27 @@ page_title: "flightdeck_error_alert_rule Resource - flightdeck"
 subcategory: ""
 description: |-
   Manages an error alert rule in a Flightdeck project: when a trigger fires for an error group that satisfies the conditions, run the enabled actions.
-  At least one action must be enabled. notify_webhook requires webhook_url; open_incident requires the project's incidents feature to be enabled, and escalation_policy_id is only honoured alongside it. Condition and action keys are validated against the API's allowlists.
-  Import with <project_id>/<rule_id>: terraform import flightdeck_error_alert_rule.new_errors 42/12.
+  At least one action must be enabled. notify_webhook requires webhook_url; open_incident requires the project's incidents feature to be enabled, and escalation_policy_id is only honoured alongside it. Condition and action keys are validated against the API's allowlists. On a rule that opens incidents, set condition.count_browser_errors = false so an error posted with the public browser token can't page anyone.
+  Import with <project_id>/<rule_id>: terraform import flightdeck_error_alert_rule.new_errors 42/12. The console stores condition.count_browser_errors on every rule it saves, and a new rule starts at false, so set it to match when importing a rule made there, or the plan will change it.
 ---
 
 # flightdeck_error_alert_rule (Resource)
 
 Manages an error alert rule in a Flightdeck project: when a *trigger* fires for an error group that satisfies the *conditions*, run the enabled *actions*.
 
-At least one action must be enabled. `notify_webhook` requires `webhook_url`; `open_incident` requires the project's `incidents` feature to be enabled, and `escalation_policy_id` is only honoured alongside it. Condition and action keys are validated against the API's allowlists.
+At least one action must be enabled. `notify_webhook` requires `webhook_url`; `open_incident` requires the project's `incidents` feature to be enabled, and `escalation_policy_id` is only honoured alongside it. Condition and action keys are validated against the API's allowlists. On a rule that opens incidents, set `condition.count_browser_errors = false` so an error posted with the public browser token can't page anyone.
 
-Import with `<project_id>/<rule_id>`: `terraform import flightdeck_error_alert_rule.new_errors 42/12`.
+Import with `<project_id>/<rule_id>`: `terraform import flightdeck_error_alert_rule.new_errors 42/12`. The console stores `condition.count_browser_errors` on every rule it saves, and a new rule starts at `false`, so set it to match when importing a rule made there, or the plan will change it.
 
 ## Example Usage
 
 ```terraform
 resource "flightdeck_project" "app" {
-  name       = "Mobile App"
+  name       = "Web App"
   identifier = "APP"
   features = {
-    errors = true
+    errors    = true
+    incidents = true
   }
 }
 
@@ -58,6 +59,27 @@ resource "flightdeck_error_alert_rule" "error_storm" {
   action = {
     notify_webhook = true
     webhook_url    = "https://alerts.example.com/hooks/flightdeck"
+  }
+}
+
+# Open an incident for a new production error, leaving out errors sent with the
+# browser token. That token ships inside every page, so anyone can read it and
+# post a fake error; leaving those out means one can't page anybody. The
+# trade-off: if a browser error creates the group first, this rule stays silent
+# for that error (see count_browser_errors below).
+resource "flightdeck_error_alert_rule" "page_on_call" {
+  project_id = flightdeck_project.app.id
+  name       = "Page on new server errors"
+  trigger    = "new_group"
+
+  condition = {
+    min_level            = "error"
+    environment          = "production"
+    count_browser_errors = false
+  }
+
+  action = {
+    open_incident = true
   }
 }
 ```
@@ -103,6 +125,7 @@ Optional:
 Optional:
 
 - `count` (Number) Occurrence count for the `occurrence_threshold` trigger.
+- `count_browser_errors` (Boolean) Whether errors sent with a browser token (`post_client_item`, which browser and mobile apps use) can fire the rule. Set it to `false` to leave them out: such an error never fires the rule or uses up its throttle window, and `occurrence_threshold` counts only the errors your servers sent. A browser token ships inside every page and app, so anyone can read it and post a fake error. **Set it to `false` on any rule with `action.open_incident`**, or one fake error can open an incident, page someone and change the status page. Two limits of `false`: on a project whose errors mostly come from browsers or mobile apps it leaves out almost every error, and a `new_group` or `regression` rule looks only at the error that created or reopened the group, so if a browser error did that, the rule stays silent for that group even when your servers later send the same error. When unset, the key is not sent and the rule counts every error, which is the API's default (unlike the project's `self_healing.count_browser_errors`, which defaults to `false`). Flightdeck versions that predate this setting refuse it.
 - `environment` (String) Only errors reported from this environment (for example `production`). Omit it rather than setting it empty; the API strips blank conditions.
 - `min_level` (String) Minimum error level: one of `debug`, `info`, `warning`, `error`, `critical`.
 - `window_minutes` (Number) Window in minutes for the `occurrence_threshold` trigger.

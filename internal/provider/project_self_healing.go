@@ -187,8 +187,9 @@ func selfHealingSchema() schema.Attribute {
 				MarkdownDescription: "Whether errors sent with a browser token count toward the error rate the loop acts on, " +
 					"and toward the baseline a release is compared against. The server's default is `false`, so only " +
 					"errors sent with a server token count: a browser token ships inside every page, so anyone can read it " +
-					"and post fake errors to push the rate over the trigger. Browser errors still file work and alert " +
-					"either way. When unset, the project's current value is kept. Null on a Flightdeck that predates the " +
+					"and post fake errors to push the rate over the trigger. Either way, browser errors still show on the " +
+					"Errors pages and fire any error alert rule that counts them (see `flightdeck_error_alert_rule`'s " +
+					"`condition.count_browser_errors`). When unset, the project's current value is kept. Null on a Flightdeck that predates the " +
 					"setting, where a configured value fails the apply.",
 				Optional:      true,
 				Computed:      true,

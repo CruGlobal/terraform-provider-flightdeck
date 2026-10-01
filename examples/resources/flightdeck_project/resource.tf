@@ -51,3 +51,44 @@ resource "flightdeck_project" "support" {
     }
   }
 }
+
+# Agent work (workspace owners and admins only) lets AutoPilot agents take the
+# work items a person marks with the agent label, and open pull requests for
+# them. A flightdeck_label in the project depends on the project, so pointing
+# label_id at one would be a dependency cycle; for a project that already
+# exists, the label takes its project_id from a data source instead.
+data "flightdeck_project" "billing" {
+  identifier = "BILL"
+}
+
+resource "flightdeck_label" "agent_ready" {
+  project_id = data.flightdeck_project.billing.id
+  name       = "agent-ready"
+}
+
+# The service account agents work as. It needs a project role that can edit
+# work items, because a claimed item is assigned to it.
+data "flightdeck_workspace_member" "agent" {
+  email = "agent-bot@example.com"
+}
+
+resource "flightdeck_project_member" "agent" {
+  project_id = data.flightdeck_project.billing.id
+  user_id    = data.flightdeck_workspace_member.agent.id
+  role       = "member"
+}
+
+resource "flightdeck_project" "billing" {
+  name       = "Billing"
+  identifier = "BILL"
+
+  agent_work = {
+    enabled          = true
+    kinds            = ["implement-work-item"]
+    label_id         = flightdeck_label.agent_ready.id
+    agent_account_id = data.flightdeck_workspace_member.agent.id
+    max_in_progress  = 1
+    daily_budget_usd = 10
+    task_max_usd     = 2.5 # whole cents: more decimal places fail the plan
+  }
+}

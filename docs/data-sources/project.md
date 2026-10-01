@@ -38,6 +38,7 @@ output "app_project_id" {
 
 ### Read-Only
 
+- `agent_work` (Attributes) Agent work settings (whether AutoPilot agents may take the project's work items, and how much), read from the project's `agent-work` API resource. Null unless the token's user is a workspace owner or admin and the Flightdeck version exposes the endpoint. (see [below for nested schema](#nestedatt--agent_work))
 - `app` (String) The deployed app the project belongs to, as the deploy pipeline's release events name it, if any.
 - `archived` (Boolean) Whether the project is archived.
 - `description` (String) Free-text description.
@@ -50,6 +51,27 @@ output "app_project_id" {
 - `network` (String) Project visibility, `public_project` or `private_project`.
 - `self_healing` (Attributes) Resolved self-healing control-loop configuration (the feature switch, the mode and the thresholds), read from the project's `self-healing` API resource. Null unless the token's user is a workspace admin and the Flightdeck version exposes the endpoint. (see [below for nested schema](#nestedatt--self_healing))
 - `slack_channel` (Attributes) Per-project Slack channel configuration, read from the project's `slack-channel` API resource. Null unless the token's user administers the project and the Flightdeck version exposes the endpoint. `event_filter` reports every category resolved against its default. (see [below for nested schema](#nestedatt--slack_channel))
+
+<a id="nestedatt--agent_work"></a>
+### Nested Schema for `agent_work`
+
+Read-Only:
+
+- `accept_machine_labels` (Boolean) Whether the agent label counts when a machine added it.
+- `agent_account_id` (Number) User id of the service account agents work as, if one is chosen.
+- `base_ref` (String) The branch agents start from.
+- `daily_budget_usd` (Number) The most agent work may cost the project in one UTC day, in US dollars.
+- `enabled` (Boolean) Whether agents may take the project's work items.
+- `kinds` (Set of String) The kinds of work agents may do.
+- `label_chosen_at` (String) When `label_id` was last set to a label (RFC 3339).
+- `label_id` (Number) Id of the label that marks an item for an agent, if one is chosen.
+- `lock_version` (Number) Optimistic-locking version of these settings, separate from the project's.
+- `max_in_progress` (Number) How many items agents may work on at once.
+- `queue_minutes` (Number) How many minutes a task may wait to start.
+- `runbook` (String) The steps the agent follows.
+- `task_max_minutes` (Number) The most minutes one task may run.
+- `task_max_usd` (Number) The most one task may cost, in US dollars.
+
 
 <a id="nestedatt--self_healing"></a>
 ### Nested Schema for `self_healing`

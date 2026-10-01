@@ -149,20 +149,23 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"lock_version": schema.Int64Attribute{
 				MarkdownDescription: "Optimistic-locking version the API bumps on every change (including self-healing and " +
 					"Slack channel writes, and the deploy pipeline binding the project's `app`). " +
-					"Sent as `If-Match` on updates.",
+					"Sent as `If-Match` on updates. Agent work settings have their own, `agent_work.lock_version`.",
 				Computed: true,
 			},
 			"self_healing":  selfHealingSchema(),
 			"slack_channel": slackChannelSchema(),
+			"agent_work":    agentWorkSchema(),
 		},
 	}
 }
 
 // ModifyPlan keeps the deprecated self_healing.armed in step with the planned
-// mode, and warns about what ValidateConfig cannot see: an apply that turns
-// auto-rollback on, which needs the prior mode, and the self-healing burn-rate
-// windows as the API will MERGE them, which needs the prior values the plan
-// carries for thresholds the configuration no longer mentions.
+// mode and agent_work's computed attributes in step with its settings, and
+// warns about what ValidateConfig cannot see: an apply that turns
+// auto-rollback or agent work on, which needs the prior value, and the
+// self-healing burn-rate windows and agent work limits as the API will MERGE
+// them, which needs the prior values the plan carries for settings the
+// configuration does not mention.
 func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	// Nothing to warn about while destroying (no plan).
 	if req.Plan.Raw.IsNull() {
@@ -176,6 +179,7 @@ func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 	}
 	creating := req.State.Raw.IsNull()
 	prior := types.ObjectNull(selfHealingAttrTypes)
+	priorAgentWork := types.ObjectNull(agentWorkAttrTypes)
 	if !creating {
 		var state projectModel
 		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -183,15 +187,22 @@ func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 			return
 		}
 		prior = state.SelfHealing
+		priorAgentWork = state.AgentWork
 	}
 	if planned := planArmed(ctx, plan.SelfHealing, &resp.Diagnostics); !planned.Equal(plan.SelfHealing) {
 		plan.SelfHealing = planned
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("self_healing"), planned)...)
 	}
 	warnAutoRollback(ctx, plan.Identifier, config.SelfHealing, prior, plan.SelfHealing, &resp.Diagnostics)
+	if planned := planAgentWorkComputed(ctx, priorAgentWork, plan.AgentWork, &resp.Diagnostics); !planned.Equal(plan.AgentWork) {
+		plan.AgentWork = planned
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("agent_work"), planned)...)
+	}
+	warnAgentWorkEnabled(ctx, plan.Identifier, config.AgentWork, priorAgentWork, plan.AgentWork, &resp.Diagnostics)
 	// Nothing merged to check while creating (no prior).
 	if !creating {
 		warnSelfHealingWindows(ctx, config.SelfHealing, plan.SelfHealing, &resp.Diagnostics)
+		warnAgentWorkBudget(ctx, config.AgentWork, plan.AgentWork, &resp.Diagnostics)
 	}
 }
 
@@ -202,6 +213,7 @@ func (r *projectResource) ValidateConfig(ctx context.Context, req resource.Valid
 		return
 	}
 	validateSelfHealingConfig(ctx, cfg.SelfHealing, &resp.Diagnostics)
+	validateAgentWorkConfig(ctx, cfg.AgentWork, &resp.Diagnostics)
 }
 
 func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -234,6 +246,9 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 		types.ObjectNull(slackChannelAttrTypes), lockVersion, slackChannelOnCreate, &resp.Diagnostics)
 	state.SlackChannel = slack
 	state.LockVersion = types.Int64Value(lockVersion)
+	// Agent work has its own lock_version, so it leaves the project's alone.
+	state.AgentWork = writeAgentWork(ctx, r.client, created.ID, created.Identifier, config.AgentWork,
+		types.ObjectNull(agentWorkAttrTypes), plan.AgentWork, agentWorkOnCreate, &resp.Diagnostics)
 	// The project is created even if a block's write failed; record it so the
 	// next apply reconciles rather than creating a duplicate.
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -264,6 +279,9 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 	warnRollbackBlockers(sh, p.Identifier, &resp.Diagnostics)
 	newState.SlackChannel = readSlackChannel(ctx, r.client, p.ID,
 		slackEventFilterOf(ctx, state.SlackChannel, &resp.Diagnostics), slackEventsManaged, &resp.Diagnostics)
+	agentWork, aw := readAgentWork(ctx, r.client, p.ID, &resp.Diagnostics)
+	newState.AgentWork = agentWork
+	warnAgentWorkBlockers(aw, p.Identifier, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
 }
 
@@ -309,6 +327,9 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 		state.SlackChannel, lockVersion, slackChannelOnUpdate, &resp.Diagnostics)
 	newState.SlackChannel = slack
 	newState.LockVersion = types.Int64Value(lockVersion)
+	// Agent work pins its own lock_version, from the block in state.
+	newState.AgentWork = writeAgentWork(ctx, r.client, id, updated.Identifier, config.AgentWork,
+		state.AgentWork, plan.AgentWork, agentWorkOnUpdate, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
 }
 
@@ -357,6 +378,8 @@ func (r *projectResource) ImportState(ctx context.Context, req resource.ImportSt
 	// No prior configuration to defer to, so no event categories are managed;
 	// list the ones you want in `slack_channel.event_filter` afterwards.
 	state.SlackChannel = readSlackChannel(ctx, r.client, p.ID, types.MapNull(types.BoolType), slackEventsManaged, &resp.Diagnostics)
+	// Like the rollback blockers, agent work blockers come with the refresh.
+	state.AgentWork, _ = readAgentWork(ctx, r.client, p.ID, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 

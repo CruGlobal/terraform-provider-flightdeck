@@ -52,6 +52,7 @@ var liveReady = map[string]bool{
 	"slack_channel":         true,
 	"github_integration":    true,
 	"workspace_member":      true,
+	"agent_work":            true,
 }
 
 // testEnv is what a test needs to point the provider at a backend.

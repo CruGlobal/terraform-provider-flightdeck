@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -538,15 +540,24 @@ func (k *keyed) ResourceID() int64 { return k.ID }
 func (k *keyed) secret() string    { return k.Secret }
 
 // keyedServer serves POST /keys with idempotent, secret-redacting replays and
-// GET /keys/{id}; discards are recorded rather than performed.
+// GET /keys/{id}. Like the API, it refuses to replay a create while the record
+// it made is live (409 idempotency_replay_withheld with the id), and replays
+// it without its secret once the record is gone. Retirements are recorded.
 type keyedServer struct {
 	mu        sync.Mutex
 	nextID    int64
 	rows      map[int64]bool
 	replays   map[string]int64
 	redactAll bool // even a fresh create comes back without its secret
+	// legacy acts like a Flightdeck from before the refusal: a replay of a
+	// live record is a secret-less 201 too.
+	legacy bool
+	// dropNext makes the next n creates take effect and then lose their
+	// response: the connection is closed before anything is written back.
+	dropNext  int
 	posts     int
-	discarded []int64
+	retired   []int64
+	retireErr error
 }
 
 func newKeyedServer(t *testing.T) (*keyedServer, *Client) {
@@ -558,9 +569,14 @@ func newKeyedServer(t *testing.T) (*keyedServer, *Client) {
 		defer ks.mu.Unlock()
 		ks.posts++
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
 		key := r.Header.Get("Idempotency-Key")
 		if id, ok := ks.replays[key]; ok && key != "" {
+			if ks.rows[id] && !ks.legacy {
+				w.WriteHeader(http.StatusConflict)
+				_, _ = fmt.Fprintf(w, `{"error": "This create was already done, and the key it made is still live.", "code": "idempotency_replay_withheld", "id": %d}`, id)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprintf(w, `{"id": %d, "secret": null, "secret_available": false}`, id)
 			return
 		}
@@ -569,6 +585,22 @@ func newKeyedServer(t *testing.T) (*keyedServer, *Client) {
 		if key != "" {
 			ks.replays[key] = ks.nextID
 		}
+		if ks.dropNext > 0 {
+			ks.dropNext--
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("the test server cannot hijack a connection")
+				return
+			}
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			_ = conn.Close()
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
 		if ks.redactAll {
 			_, _ = fmt.Fprintf(w, `{"id": %d, "secret": null}`, ks.nextID)
 			return
@@ -598,12 +630,35 @@ func newKeyedServer(t *testing.T) (*keyedServer, *Client) {
 	return ks, c
 }
 
-func (ks *keyedServer) discard(_ context.Context, replayed *keyed) error {
+// record is the SecretRecord the tests pass: live while the row exists, and
+// retiring removes it (or fails with retireErr).
+func (ks *keyedServer) record() SecretRecord {
+	return SecretRecord{
+		Verb: "revoke",
+		Live: func(_ context.Context, id int64) (bool, error) {
+			ks.mu.Lock()
+			defer ks.mu.Unlock()
+			return ks.rows[id], nil
+		},
+		Retire: func(_ context.Context, id int64) error {
+			ks.mu.Lock()
+			defer ks.mu.Unlock()
+			if ks.retireErr != nil {
+				return ks.retireErr
+			}
+			ks.retired = append(ks.retired, id)
+			delete(ks.rows, id)
+			return nil
+		},
+	}
+}
+
+// gone removes a row the way a destroy would, without counting it as retired
+// by a create.
+func (ks *keyedServer) gone(id int64) {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
-	ks.discarded = append(ks.discarded, replayed.ID)
-	delete(ks.rows, replayed.ID)
-	return nil
+	delete(ks.rows, id)
 }
 
 func (ks *keyedServer) verify(c *Client) Verifier[*keyed] {
@@ -612,63 +667,135 @@ func (ks *keyedServer) verify(c *Client) Verifier[*keyed] {
 	})
 }
 
+func (ks *keyedServer) create(ctx context.Context, c *Client, key string) (*keyed, error) {
+	return CreateSecretResource(ctx, c, "/keys", "key", Fields{}, key, ks.verify(c), ks.record())
+}
+
 func TestCreateSecretResource_freshCreateWithSecretIsReturned(t *testing.T) {
 	ks, c := newKeyedServer(t)
-	ctx := context.Background()
-	got, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "k1", ks.verify(c), ks.discard)
-	if err != nil || got.Secret != "s3cret-501" || ks.posts != 1 || len(ks.discarded) != 0 {
-		t.Fatalf("got=%+v err=%v posts=%d discarded=%v", got, err, ks.posts, ks.discarded)
+	got, err := ks.create(context.Background(), c, "k1")
+	if err != nil || got.Secret != "s3cret-501" || ks.posts != 1 || len(ks.retired) != 0 {
+		t.Fatalf("got=%+v err=%v posts=%d retired=%v", got, err, ks.posts, ks.retired)
 	}
 }
 
-func TestCreateSecretResource_replayIsRetiredAndRecreated(t *testing.T) {
+// The record an identical create made is gone (the destroy half of a
+// replacement): the replay comes back without its secret, and the resource is
+// created again under a fresh key with nothing retired.
+func TestCreateSecretResource_replayOfAGoneRecordIsRecreated(t *testing.T) {
 	ks, c := newKeyedServer(t)
 	ctx := context.Background()
-	first, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", ks.verify(c), ks.discard)
+	first, err := ks.create(ctx, c, "stable")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", ks.verify(c), ks.discard)
+	ks.gone(first.ID)
+	second, err := ks.create(ctx, c, "stable")
 	if err != nil {
 		t.Fatalf("recreate: %v", err)
 	}
 	if second.ID == first.ID || second.Secret == "" {
 		t.Fatalf("recreate returned the replay: %+v", second)
 	}
-	// original + replayed + fresh-key; the replayed row was retired.
-	if ks.posts != 3 || len(ks.discarded) != 1 || ks.discarded[0] != first.ID {
-		t.Fatalf("posts=%d discarded=%v", ks.posts, ks.discarded)
+	// original + replayed + fresh-key; nothing retired.
+	if ks.posts != 3 || len(ks.retired) != 0 {
+		t.Fatalf("posts=%d retired=%v", ks.posts, ks.retired)
 	}
 }
 
-// Branch 1: a fresh create carries its secret but cannot be read back — the
-// row is retired (never leave a live credential unrecorded) and no second
-// create is attempted.
+// Every send was answered and the API refuses the replay because the record
+// is live: that record is somebody else's (another resource with the same
+// values, or a failed earlier apply), so it is left alone and the error names
+// it.
+func TestCreateSecretResource_withheldReplayOnAFirstSendIsAnError(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			ks, c := newKeyedServer(t)
+			ks.legacy = legacy
+			ctx := context.Background()
+			first, err := ks.create(ctx, c, "stable")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ks.create(ctx, c, "stable")
+			if !HasCode(err, CodeIdempotencyReplayWithheld) {
+				t.Fatalf("err = %v, want %s", err, CodeIdempotencyReplayWithheld)
+			}
+			apiErr, _ := AsError(err)
+			if apiErr.ID != first.ID || apiErr.Status != http.StatusConflict {
+				t.Errorf("error names %d (status %d), want %d (409)", apiErr.ID, apiErr.Status, first.ID)
+			}
+			for _, want := range []string{fmt.Sprintf("key %d", first.ID), "values that differ", "revoke it"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error does not say %q: %v", want, err)
+				}
+			}
+			if len(ks.retired) != 0 || ks.posts != 2 {
+				t.Fatalf("posts=%d retired=%v: nothing may be retired, and no fresh-key create", ks.posts, ks.retired)
+			}
+		})
+	}
+}
+
+// The first send made the record and its response was lost; the client's own
+// retry meets the record. It is this call's own, so it is retired and the
+// resource created again, on a current server (409) and an older one
+// (secret-less 201) alike.
+//
+// On a reused keep-alive connection net/http retries the keyed request by
+// itself and the client only learns of the lost answer through the request
+// trace; on a fresh connection the error reaches the client's own retry loop.
+// Both are covered.
+func TestCreateSecretResource_lostResponseIsRecovered(t *testing.T) {
+	for _, tc := range []struct{ legacy, reused bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+		t.Run(fmt.Sprintf("legacy=%t,reused=%t", tc.legacy, tc.reused), func(t *testing.T) {
+			ks, c := newKeyedServer(t)
+			ks.legacy = tc.legacy
+			if tc.reused {
+				// Open a keep-alive connection for the create to reuse.
+				if _, err := GetResource[*keyed](context.Background(), c, "/keys/1", "key"); !IsNotFound(err) {
+					t.Fatalf("warm-up read: %v", err)
+				}
+			}
+			ks.dropNext = 1
+			got, err := ks.create(context.Background(), c, "stable")
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if got.Secret == "" || got.ID == 501 {
+				t.Fatalf("got %+v, want a fresh key with its secret", got)
+			}
+			// lost original, refused (or secret-less) retry, fresh-key create.
+			if ks.posts != 3 || len(ks.retired) != 1 || ks.retired[0] != 501 {
+				t.Fatalf("posts=%d retired=%v, want 3 posts and the lost record 501 retired", ks.posts, ks.retired)
+			}
+		})
+	}
+}
+
+// A fresh create carries its secret but cannot be read back: the row is
+// retired (never leave a live credential unrecorded) and no second create is
+// attempted.
 func TestCreateSecretResource_unverifiableFreshCreateIsRetired(t *testing.T) {
 	ks, c := newKeyedServer(t)
-	ctx := context.Background()
 	unknown := func(context.Context, *keyed) (Verdict, error) { return VerifiedUnknown, nil }
-	_, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "k1", unknown, ks.discard)
+	_, err := CreateSecretResource(context.Background(), c, "/keys", "key", Fields{}, "k1", unknown, ks.record())
 	if err == nil || !strings.Contains(err.Error(), "revoked and nothing else was created") {
 		t.Fatalf("err = %v", err)
 	}
-	if ks.posts != 1 || len(ks.discarded) != 1 {
-		t.Fatalf("posts=%d discarded=%v: exactly one create, retired", ks.posts, ks.discarded)
+	if ks.posts != 1 || len(ks.retired) != 1 {
+		t.Fatalf("posts=%d retired=%v: exactly one create, retired", ks.posts, ks.retired)
 	}
 }
 
-// Branch 2: the replay cannot be retired (discard fails with something other
-// than 404) — stop, do not create another.
-func TestCreateSecretResource_replayRetireFailureStops(t *testing.T) {
+// The lost record cannot be retired: stop, do not create another.
+func TestCreateSecretResource_retireFailureStops(t *testing.T) {
 	ks, c := newKeyedServer(t)
-	ctx := context.Background()
-	if _, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", ks.verify(c), ks.discard); err != nil {
-		t.Fatal(err)
-	}
+	ks.dropNext = 1
 	boom := &Error{Status: 403, Code: CodeForbidden, Message: "no"}
-	failing := func(context.Context, *keyed) error { return boom }
-	_, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", ks.verify(c), failing)
-	if err == nil || !strings.Contains(err.Error(), "could not be retired") || !errors.Is(err, boom) {
+	ks.retireErr = boom
+	_, err := ks.create(context.Background(), c, "stable")
+	if err == nil || !strings.Contains(err.Error(), "could not be revoked") || !errors.Is(err, boom) {
 		t.Fatalf("err = %v", err)
 	}
 	if ks.posts != 2 {
@@ -676,40 +803,194 @@ func TestCreateSecretResource_replayRetireFailureStops(t *testing.T) {
 	}
 }
 
-// Branch 3: the fresh-key create also comes back without a secret — an API that
-// never returns one; refuse to record it.
+// The fresh-key create also comes back without a secret: an API that never
+// returns one. Refuse to record it.
 func TestCreateSecretResource_secretlessRecreateIsAnError(t *testing.T) {
 	ks, c := newKeyedServer(t)
 	ctx := context.Background()
+	first, err := ks.create(ctx, c, "stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ks.gone(first.ID)
 	ks.redactAll = true
-	_, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "k1", ks.verify(c), ks.discard)
+	_, err = ks.create(ctx, c, "stable")
 	if err == nil || !strings.Contains(err.Error(), "without its secret on a fresh create") {
 		t.Fatalf("err = %v", err)
 	}
-	if ks.posts != 2 || len(ks.discarded) != 1 {
-		t.Fatalf("posts=%d discarded=%v: the first (secretless) row is retired, the second is reported", ks.posts, ks.discarded)
+	if ks.posts != 3 {
+		t.Fatalf("posts=%d: the replay and one fresh-key create, never a third", ks.posts)
 	}
 }
 
-// Branch 4: the fresh-key create has a secret but cannot be read back — retire
-// it too and report, never a third create.
+// The fresh-key create has a secret but cannot be read back: retire it too and
+// report, never a third create.
 func TestCreateSecretResource_unverifiableRecreateIsRetired(t *testing.T) {
 	ks, c := newKeyedServer(t)
 	ctx := context.Background()
-	if _, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", ks.verify(c), ks.discard); err != nil {
+	first, err := ks.create(ctx, c, "stable")
+	if err != nil {
 		t.Fatal(err)
 	}
-	var verifies int
-	flaky := func(ctx context.Context, k *keyed) (Verdict, error) {
-		verifies++
-		return VerifiedUnknown, nil
-	}
-	_, err := CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", flaky, ks.discard)
+	ks.gone(first.ID)
+	flaky := func(ctx context.Context, k *keyed) (Verdict, error) { return VerifiedUnknown, nil }
+	_, err = CreateSecretResource(ctx, c, "/keys", "key", Fields{}, "stable", flaky, ks.record())
 	if err == nil || !strings.Contains(err.Error(), "cannot be read back; it was revoked") {
 		t.Fatalf("err = %v", err)
 	}
-	// original, replayed, fresh-key: three POSTs, both replay and fresh rows retired.
-	if ks.posts != 3 || len(ks.discarded) != 2 {
-		t.Fatalf("posts=%d discarded=%v", ks.posts, ks.discarded)
+	// original, replayed, fresh-key: three POSTs, and the fresh row retired.
+	if ks.posts != 3 || len(ks.retired) != 1 || ks.retired[0] == first.ID {
+		t.Fatalf("posts=%d retired=%v", ks.posts, ks.retired)
+	}
+}
+
+// ---- EarlierSendUnanswered ----------------------------------------------------
+
+// failingTransport fails the first request it sees with err, after (or
+// instead of) passing it to the real transport, then passes everything
+// through. It reports nothing to net/http's client trace, so it exercises the
+// error-reading fallback.
+type failingTransport struct {
+	err       error
+	forward   bool // pass the failing request on before failing it
+	failed    atomic.Bool
+	transport http.RoundTripper
+}
+
+func (f *failingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if f.failed.CompareAndSwap(false, true) {
+		if f.forward {
+			if resp, err := f.transport.RoundTrip(r); err == nil {
+				_ = resp.Body.Close()
+			}
+		}
+		return nil, f.err
+	}
+	return f.transport.RoundTrip(r)
+}
+
+func withheldServer(t *testing.T, posts *atomic.Int32) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = fmt.Fprint(w, `{"error":"still live","code":"idempotency_replay_withheld","id":77}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestEarlierSendUnanswered(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		forward bool
+		want    bool
+	}{
+		// Never sent: nothing the server made can be this call's.
+		{"dial timeout", &url.Error{Op: "Post", Err: &net.OpError{Op: "dial", Err: timeoutErr{}}}, false, false},
+		// Sent, and the answer was lost.
+		{"connection reset", &url.Error{Op: "Post", Err: &net.OpError{Op: "read", Err: syscall.ECONNRESET}}, true, true},
+		// A transport that reports nothing to the client trace: the error is
+		// all there is to go on.
+		{"connection reset, untraced", &url.Error{Op: "Post", Err: &net.OpError{Op: "read", Err: syscall.ECONNRESET}}, false, true},
+		{"connection refused, untraced", &url.Error{Op: "Post", Err: &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}}, false, false},
+		{"unexpected EOF", &url.Error{Op: "Post", Err: io.ErrUnexpectedEOF}, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var posts atomic.Int32
+			srv := withheldServer(t, &posts)
+			c, err := New(srv.URL, "tok", WithHTTPClient(&http.Client{
+				Transport: &failingTransport{err: tc.err, forward: tc.forward, transport: http.DefaultTransport},
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.sleep = func(context.Context, time.Duration) error { return nil }
+			err = c.Post(context.Background(), "/keys", map[string]any{}, nil, WithIdempotencyKey("k"))
+			apiErr, ok := AsError(err)
+			if !ok || apiErr.Code != CodeIdempotencyReplayWithheld {
+				t.Fatalf("err = %v", err)
+			}
+			if apiErr.ID != 77 {
+				t.Errorf("ID = %d, want the id from the body", apiErr.ID)
+			}
+			if apiErr.EarlierSendUnanswered != tc.want {
+				t.Errorf("EarlierSendUnanswered = %t, want %t", apiErr.EarlierSendUnanswered, tc.want)
+			}
+		})
+	}
+
+	t.Run("answered every time", func(t *testing.T) {
+		var posts atomic.Int32
+		srv := withheldServer(t, &posts)
+		c, err := New(srv.URL, "tok")
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = c.Post(context.Background(), "/keys", map[string]any{}, nil, WithIdempotencyKey("k"))
+		apiErr, _ := AsError(err)
+		if apiErr == nil || apiErr.EarlierSendUnanswered || posts.Load() != 1 {
+			t.Fatalf("err = %v posts=%d: a refusal is final, and nothing went unanswered", err, posts.Load())
+		}
+	})
+
+	t.Run("gateway error first", func(t *testing.T) {
+		var calls atomic.Int32
+		c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if calls.Add(1) == 1 {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			w.WriteHeader(http.StatusConflict)
+			_, _ = fmt.Fprint(w, `{"error":"still live","code":"idempotency_replay_withheld","id":77}`)
+		}))
+		err := c.Post(context.Background(), "/keys", map[string]any{}, nil, WithIdempotencyKey("k"))
+		apiErr, _ := AsError(err)
+		if apiErr == nil || !apiErr.EarlierSendUnanswered {
+			t.Fatalf("err = %v: a gateway answer says nothing about the server, so it counts as unanswered", err)
+		}
+	})
+
+	t.Run("throttled first", func(t *testing.T) {
+		var calls atomic.Int32
+		c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if calls.Add(1) == 1 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			w.WriteHeader(http.StatusConflict)
+			_, _ = fmt.Fprint(w, `{"error":"still live","code":"idempotency_replay_withheld","id":77}`)
+		}))
+		err := c.Post(context.Background(), "/keys", map[string]any{}, nil, WithIdempotencyKey("k"))
+		apiErr, _ := AsError(err)
+		if apiErr == nil || apiErr.EarlierSendUnanswered {
+			t.Fatalf("err = %v: a 429 is an answer (the request was not processed)", err)
+		}
+	})
+}
+
+// timeoutErr is a net.Error that timed out.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+// A replay-withheld body whose id is not a number still parses for its message.
+func TestErrorEnvelope_nonNumericID(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = fmt.Fprint(w, `{"error":"still live","code":"idempotency_replay_withheld","id":"abc"}`)
+	}))
+	err := c.Post(context.Background(), "/keys", map[string]any{}, nil, WithIdempotencyKey("k"))
+	apiErr, _ := AsError(err)
+	if apiErr == nil || apiErr.Message != "still live" || apiErr.Code != CodeIdempotencyReplayWithheld || apiErr.ID != 0 {
+		t.Fatalf("err = %+v", apiErr)
 	}
 }

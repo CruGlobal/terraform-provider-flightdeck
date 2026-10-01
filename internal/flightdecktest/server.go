@@ -80,6 +80,13 @@ type Server struct {
 	// deployment that only sent the prose message. Atomic because the envelope
 	// helpers consult it while handlers hold mu.
 	omitCodes atomic.Bool
+	// legacySecretReplays replays a secret-bearing create without its secret
+	// even while the record it made is live, as Flightdeck did before it
+	// started refusing such replays.
+	legacySecretReplays bool
+	// dropResponses are requests to serve and then answer with nothing: the
+	// connection is closed instead, as if the response were lost on the way.
+	dropResponses []requestHook
 }
 
 // requestHook runs once, just before the first request matching method + path
@@ -161,6 +168,26 @@ func (s *Server) OnNextRequest(method, path string, fn func()) {
 	s.beforeRequest = append(s.beforeRequest, requestHook{method: method, path: path, fn: fn})
 }
 
+// LegacySecretReplays makes a replayed create of a routing key, ingestion
+// token or webhook come back as a 201 without its secret even while the
+// record it made is live, the way Flightdeck answered before it refused such
+// replays with 409 idempotency_replay_withheld.
+func (s *Server) LegacySecretReplays(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.legacySecretReplays = on
+}
+
+// DropNextResponse makes the next request with the given method whose path
+// ends in pathSuffix take effect as usual, and then lose its response: the
+// fake closes the connection instead of answering, the way a timeout or a
+// dropped connection loses an answer the server did send.
+func (s *Server) DropNextResponse(method, pathSuffix string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dropResponses = append(s.dropResponses, requestHook{method: method, path: pathSuffix})
+}
+
 // OmitErrorCodes makes every error body prose-only (no `code`), like a
 // deployment that predates machine-readable codes.
 func (s *Server) OmitErrorCodes(on bool) { s.omitCodes.Store(on) }
@@ -191,6 +218,14 @@ func (s *Server) RequestsMatching(method, pathPrefix string) []RecordedRequest {
 	}
 	return out
 }
+
+// discardWriter is a ResponseWriter that keeps nothing, for a response the
+// fake is about to lose on purpose.
+type discardWriter struct{ header http.Header }
+
+func (d discardWriter) Header() http.Header         { return d.header }
+func (d discardWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (d discardWriter) WriteHeader(int)             {}
 
 // statusRecorder captures the status code and body for the request log.
 type statusRecorder struct {
@@ -262,7 +297,28 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				break
 			}
 		}
+		drop := false
+		for i, h := range s.dropResponses {
+			if h.method == r.Method && strings.HasSuffix(r.URL.Path, h.path) {
+				s.dropResponses = append(s.dropResponses[:i], s.dropResponses[i+1:]...)
+				drop = true
+				break
+			}
+		}
 		s.mu.Unlock()
+		if drop {
+			// Serve into a recorder the client never sees, then hang up.
+			lost := &statusRecorder{ResponseWriter: discardWriter{header: http.Header{}}, status: http.StatusOK}
+			next.ServeHTTP(lost, r)
+			rec.status = lost.status
+			rec.body.Write(lost.body.Bytes())
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+				}
+			}
+			return
+		}
 		next.ServeHTTP(rec, r)
 	})
 }

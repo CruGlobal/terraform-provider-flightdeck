@@ -63,26 +63,41 @@ func (c *Client) GetIngestionToken(ctx context.Context, projectID, id int64) (*I
 }
 
 // CreateIngestionToken mints a token and guarantees the returned value carries
-// the secret. If the API replays an earlier create (the secret is redacted on
-// a replay), the replayed row is revoked and the token is minted again under a
-// fresh key; the stable key is never re-sent. See CreateSecretResource.
+// the secret, or fails. A token is live until it is revoked: its name,
+// environment and scope never change. See CreateSecretResource for what
+// happens when the stable Idempotency-Key names a token that already exists.
 func (c *Client) CreateIngestionToken(ctx context.Context, projectID int64, fields Fields, idempotencyKey string) (*IngestionToken, error) {
 	return CreateSecretResource(ctx, c, ingestionTokensPath(projectID), ingestionTokenRoot, fields, idempotencyKey,
 		VerifyByGet(func(ctx context.Context, id int64) (*IngestionToken, error) {
 			return c.GetIngestionToken(ctx, projectID, id)
 		}),
-		func(ctx context.Context, replayed *IngestionToken) error {
-			// The replayed body carries the lock_version at creation time; the
-			// row may have moved on (it was revoked when the predecessor was
-			// destroyed), so revoke against the CURRENT version.
-			current, err := c.GetIngestionToken(ctx, projectID, replayed.ID)
-			if err != nil {
-				return err
-			}
-			if current.IsRevoked() {
-				return nil
-			}
-			return c.RevokeIngestionToken(ctx, projectID, current.ID, current.LockVersion)
+		SecretRecord{
+			Verb: "revoke",
+			Live: func(ctx context.Context, id int64) (bool, error) {
+				current, err := c.GetIngestionToken(ctx, projectID, id)
+				if err != nil {
+					if IsNotFound(err) {
+						return false, nil
+					}
+					return false, err
+				}
+				return !current.IsRevoked(), nil
+			},
+			Retire: func(ctx context.Context, id int64) error {
+				// Revoke at the CURRENT lock_version: the row may have moved on
+				// since the response that named it.
+				current, err := c.GetIngestionToken(ctx, projectID, id)
+				if err != nil {
+					if IsNotFound(err) {
+						return nil
+					}
+					return err
+				}
+				if current.IsRevoked() {
+					return nil
+				}
+				return c.RevokeIngestionToken(ctx, projectID, current.ID, current.LockVersion)
+			},
 		})
 }
 

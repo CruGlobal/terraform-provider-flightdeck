@@ -130,8 +130,9 @@ func slackChannelSchema() schema.Attribute {
 			"usually `channel_id`, `linked`, `provision_status` and `provision_note` are filled in afterwards and a " +
 			"later refresh picks them up. An apply that ends with `provision_status` at `queued` has succeeded: it " +
 			"does not wait for Slack, and the pending values never produce a diff. If the write comes back with " +
-			"`provision_status` at `failed`, the provider warns and passes `provision_note` along rather than " +
-			"failing, since the configuration is saved.\n\n" +
+			"`provision_status` at `failed`, or at `needs_invite` (linked, but Flightdeck is not in the channel and " +
+			"cannot join it, so it cannot invite anyone), the provider warns and passes `provision_note` along " +
+			"rather than failing, since the configuration is saved.\n\n" +
 			"Nothing provisions at all when `available` is false (the workspace has no connected Slack integration) or " +
 			"`scopes_sufficient` is false (the connection predates the channel scopes). Both are fixed by re-authorizing " +
 			"Slack under Settings → Integrations, which the API cannot do; the provider warns rather than failing, since " +
@@ -213,8 +214,11 @@ func slackChannelSchema() schema.Attribute {
 				Computed:            true,
 			},
 			"provision_status": schema.StringAttribute{
-				MarkdownDescription: "Outcome of the asynchronous provision: `queued`, `provisioning`, `linked` or `failed`. " +
-					"Null when nothing has been enqueued.",
+				MarkdownDescription: "Outcome of the asynchronous provision: `queued`, `provisioning`, `linked`, " +
+					"`needs_invite` or `failed`. `needs_invite` means the channel is linked, but Flightdeck is not in it " +
+					"and cannot join it by itself (a private channel it was removed from, an archived one, or a " +
+					"connection without permission to join), so it cannot invite members until someone adds the " +
+					"Flightdeck app to the channel; `provision_note` says what to do. Null when nothing has been enqueued.",
 				Computed: true,
 			},
 			"provision_note": schema.StringAttribute{
@@ -621,13 +625,26 @@ func addSlackChannelUnusable(ctx context.Context, config types.Object, err error
 }
 
 // slackChannelProvisioningWarnings flags the two states that look like success
-// and provision nothing, and a provision that has already failed. The
+// and provision nothing, a provision that has already failed, and a channel
+// that is linked but that Flightdeck is not in and cannot join. The
 // configuration is stored in every case, so these are warnings: the first two
 // need an interactive OAuth flow the API cannot perform, and an error for the
-// third would leave state out of step with what Flightdeck saved.
+// others would leave state out of step with what Flightdeck saved. The last
+// two name the project, because Terraform folds warnings that share a summary
+// into one, and each project's channel needs its own fix.
 func slackChannelProvisioningWarnings(sc *client.SlackChannel, diags *diag.Diagnostics) {
 	if !sc.ChannelEnabled {
 		return
+	}
+	said := func(fallback string) string {
+		if sc.ProvisionNote != nil && strings.TrimSpace(*sc.ProvisionNote) != "" {
+			return "Flightdeck said: " + strings.TrimSpace(*sc.ProvisionNote)
+		}
+		return fallback
+	}
+	status := ""
+	if sc.ProvisionStatus != nil {
+		status = *sc.ProvisionStatus
 	}
 	switch {
 	case !sc.ChannelAvailable:
@@ -642,17 +659,23 @@ func slackChannelProvisioningWarnings(sc *client.SlackChannel, diags *diag.Diagn
 			"The configuration is stored, but provisioning will fail: this workspace's Slack connection predates the "+
 				"scopes needed to create channels and invite members. Re-authorize Slack under Settings → Integrations — "+
 				"an interactive authorization the API cannot perform — then re-apply.")
-	case sc.ProvisionStatus != nil && *sc.ProvisionStatus == "failed":
-		note := "Flightdeck did not say why."
-		if sc.ProvisionNote != nil && strings.TrimSpace(*sc.ProvisionNote) != "" {
-			note = "Flightdeck said: " + strings.TrimSpace(*sc.ProvisionNote)
-		}
+	case status == client.SlackProvisionFailed:
 		diags.AddAttributeWarning(path.Root("slack_channel").AtName("enabled"),
-			"Slack channel enabled, but provisioning failed",
-			note+"\n\n"+
+			fmt.Sprintf("Slack channel enabled for project %d, but provisioning failed", sc.ProjectID),
+			said("Flightdeck did not say why.")+"\n\n"+
 				"The configuration is saved, so this apply still succeeded, and `provision_status` stays `failed` until "+
 				"the channel is provisioned. Once the cause is fixed, provisioning runs again the next time this block "+
 				"changes, or from the project's settings page.")
+	case status == client.SlackProvisionNeedsInvite:
+		diags.AddAttributeWarning(path.Root("slack_channel").AtName("enabled"),
+			fmt.Sprintf("Slack channel linked for project %d, but Flightdeck is not in it", sc.ProjectID),
+			said("Flightdeck is not a member of the channel and cannot join it by itself.")+"\n\n"+
+				"The configuration is saved and the channel is linked, so this apply still succeeded, but Flightdeck "+
+				"cannot invite the project's members until someone adds the Flightdeck app to the channel in Slack. "+
+				"`provision_status` stays `needs_invite` until Flightdeck checks again, which happens the next time "+
+				"this block changes, the next time a member is invited, or when the Slack settings are saved on the "+
+				"project's settings page. Terraform writes this block only when its configuration changes, so after "+
+				"inviting the app, save the settings page once rather than re-applying an unchanged configuration.")
 	}
 }
 

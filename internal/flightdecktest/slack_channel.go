@@ -10,7 +10,7 @@ func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
 		s.stores["slack_channel"] = &slackChannelStore{
 			enabled: true, available: true, scopesSufficient: true,
-			unusable: map[string]bool{},
+			unusable: map[string]bool{}, needsInvite: map[string]bool{},
 		}
 		mux.HandleFunc("GET /api/v1/projects/{project_id}/slack-channel", s.showSlackChannel)
 		mux.HandleFunc("PATCH /api/v1/projects/{project_id}/slack-channel", s.updateSlackChannel)
@@ -34,6 +34,11 @@ type slackChannelStore struct {
 	// that Flightdeck cannot post to: private with the bot not a member, or
 	// archived.
 	unusable map[string]bool
+	// needsInvite holds the channels, by derived name, that Flightdeck can
+	// link but is not in and cannot join (a public channel and a connection
+	// without channels:join, say): a write links them with provision status
+	// needs_invite instead of linked.
+	needsInvite map[string]bool
 }
 
 func (s *Server) slackChannelStore() *slackChannelStore {
@@ -86,6 +91,22 @@ func (s *Server) SetSlackChannelUnusable(name string, unusable bool) {
 		st.unusable[normalizeSlackChannelName(name)] = true
 	} else {
 		delete(st.unusable, normalizeSlackChannelName(name))
+	}
+}
+
+// SetSlackChannelNeedsInvite marks a channel as one Flightdeck can link but is
+// not in and cannot join. A write that leaves a project's channel enabled on
+// it links it with provision status needs_invite and a note saying what to
+// do, and any later write retries the check. Passing false is someone
+// inviting the Flightdeck app: the next write finds it a member and links it.
+func (s *Server) SetSlackChannelNeedsInvite(name string, on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.slackChannelStore()
+	if on {
+		st.needsInvite[normalizeSlackChannelName(name)] = true
+	} else {
+		delete(st.needsInvite, normalizeSlackChannelName(name))
 	}
 }
 
@@ -351,6 +372,37 @@ func (s *Server) checkSlackChannel(p *Project) (int, string, string) {
 			"Invite " + SlackBotHandle + " to #" + name + " in Slack, or choose a different channel, then try again."
 }
 
+// checkSlackMembership mirrors the half of the inline check that asks whether
+// Flightdeck is in the channel. A write that links a channel Flightdeck is not
+// in and cannot join records needs_invite with the API's note, and any write
+// to a needs_invite channel checks again, even one that changes nothing:
+// retrying is the point. The status columns are the provisioner's, so this
+// never moves lock_version.
+func (s *Server) checkSlackMembership(p *Project, changed bool) {
+	st := s.slackChannelStore()
+	if !p.SlackChannelEnabled || !st.available || !st.scopesSufficient {
+		return
+	}
+	retry := p.SlackProvisionStatus == "needs_invite"
+	linking := changed && p.SlackChannelID == ""
+	if !retry && !linking {
+		return
+	}
+	name := slackChannelBasename(p)
+	if st.needsInvite[name] {
+		p.SlackChannelID = "C" + strings.ToUpper(strings.ReplaceAll(name, "-", ""))
+		p.SlackProvisionStatus = "needs_invite"
+		p.SlackProvisionNote = "Linked #" + name + ", but Flightdeck isn't in it and can't join without the channels:join " +
+			"permission. Invite the Flightdeck app to #" + name + ", or reconnect Slack in workspace settings to grant it, " +
+			"then save the Slack settings again."
+		return
+	}
+	if retry {
+		p.SlackProvisionStatus = "linked"
+		p.SlackProvisionNote = "Linked existing #" + name
+	}
+}
+
 // enqueueSlackProvision mirrors the model's enqueue: it no-ops when the
 // channel is off or the workspace has no live integration, and otherwise
 // reports a queued job rather than a finished channel.
@@ -493,11 +545,13 @@ func (s *Server) updateSlackChannel(w http.ResponseWriter, r *http.Request) {
 	// a channel still waiting to be linked back to "queued" and lose a
 	// terminal failure note. The empty body this endpoint blesses is exactly
 	// that case.
-	if changed := slackChannelChanged(p, &candidate); changed {
+	changed := slackChannelChanged(p, &candidate)
+	if changed {
 		candidate.LockVersion++
 		*p = candidate
 		s.enqueueSlackProvision(p)
 	}
+	s.checkSlackMembership(p, changed)
 	writeJSON(w, http.StatusOK, s.serializeSlackChannel(p))
 }
 

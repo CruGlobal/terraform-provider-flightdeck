@@ -95,6 +95,22 @@ type idempotentResponse struct {
 	status      int
 	body        []byte
 	fingerprint string
+	// withheld is set for the creates whose secret is returned only once; see
+	// withheldSecret.
+	withheld *withheldSecret
+}
+
+// withheldSecret mirrors the API's rule for replaying a create whose secret
+// is returned only once (a routing key, an ingestion token, a webhook). While
+// the record the cached response names is still live, the replay is refused
+// with 409 idempotency_replay_withheld and the record's id, because handing
+// back a success without the secret invites the client to revoke a
+// credential that may belong to somebody else. Once the record is gone, the
+// replay goes out as before, without its secret. live reads the cached
+// (redacted) body and is called with s.mu held; message is the refusal's prose.
+type withheldSecret struct {
+	live    func(replayed map[string]any) bool
+	message func(id int64) string
 }
 
 // fingerprintOf mirrors the API's create fingerprint: a hash of
@@ -138,15 +154,38 @@ func (s *Server) withIdempotencyFingerprint(w http.ResponseWriter, r *http.Reque
 
 // withIdempotencyRedacted is withIdempotency for creates whose response carries
 // a secret: create returns the body to render AND the body to cache for
-// replays (nil caches the rendered body), as the API redacts secrets from its cache.
-func (s *Server) withIdempotencyRedacted(w http.ResponseWriter, r *http.Request, scope string, create func() (int, any, any)) {
-	s.idempotently(w, r, scope, "", create)
+// replays (nil caches the rendered body), as the API redacts secrets from its
+// cache. withheld refuses a replay while the record it names is live.
+func (s *Server) withIdempotencyRedacted(w http.ResponseWriter, r *http.Request, scope string, withheld *withheldSecret, create func() (int, any, any)) {
+	s.idempotentlyWithheld(w, r, scope, "", withheld, create)
 }
 
 // idempotently is the shared implementation: an optional attribute fingerprint
 // (empty opts out) and an optional redacted body to cache (nil caches the
 // rendered body).
 func (s *Server) idempotently(w http.ResponseWriter, r *http.Request, scope, fingerprint string, create func() (int, any, any)) {
+	s.idempotentlyWithheld(w, r, scope, fingerprint, nil, create)
+}
+
+// withheldLiveID is the id of the live record a cached secret-less response
+// names, or 0 to replay it. Only a body that says it withheld its secret
+// qualifies, as in the API. Called with s.mu held.
+func (s *Server) withheldLiveID(stored idempotentResponse) int64 {
+	if stored.withheld == nil || s.legacySecretReplays {
+		return 0
+	}
+	var replayed map[string]any
+	if json.Unmarshal(stored.body, &replayed) != nil || replayed["secret_available"] != false {
+		return 0
+	}
+	id, ok := asInt64(replayed["id"])
+	if !ok || id <= 0 || !stored.withheld.live(replayed) {
+		return 0
+	}
+	return id
+}
+
+func (s *Server) idempotentlyWithheld(w http.ResponseWriter, r *http.Request, scope, fingerprint string, withheld *withheldSecret, create func() (int, any, any)) {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" || len(key) > 255 {
 		status, body, _ := create()
@@ -156,10 +195,17 @@ func (s *Server) idempotently(w http.ResponseWriter, r *http.Request, scope, fin
 	cacheKey := scope + "/" + key
 	s.mu.Lock()
 	if stored, ok := s.idempotent[cacheKey]; ok {
+		liveID := s.withheldLiveID(stored)
 		s.mu.Unlock()
 		if fingerprint != "" && stored.fingerprint != "" && stored.fingerprint != fingerprint {
 			writeError(w, http.StatusConflict, "idempotency_key_reused",
 				"This Idempotency-Key was already used for a create with different attributes. Send the original attributes to replay it, or a new key to create a separate resource.")
+			return
+		}
+		if liveID != 0 {
+			body := errorBody(stored.withheld.message(liveID), "idempotency_replay_withheld")
+			body["id"] = liveID
+			writeJSON(w, http.StatusConflict, body)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -185,7 +231,7 @@ func (s *Server) idempotently(w http.ResponseWriter, r *http.Request, scope, fin
 			toCache, _ = json.Marshal(cached)
 		}
 		s.mu.Lock()
-		s.idempotent[cacheKey] = idempotentResponse{status: status, body: toCache, fingerprint: fingerprint}
+		s.idempotent[cacheKey] = idempotentResponse{status: status, body: toCache, fingerprint: fingerprint, withheld: withheld}
 		s.mu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")

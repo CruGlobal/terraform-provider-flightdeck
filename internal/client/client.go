@@ -23,9 +23,11 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -165,6 +167,22 @@ type request struct {
 	// dropped connection or a gateway 5xx, where the first attempt may have
 	// been processed.
 	replayable bool
+	// trace, when set, is told how the request's attempts went (see sendTrace).
+	trace *sendTrace
+}
+
+// sendTrace reports how a request's attempts went, for a caller that has to
+// act on a SUCCESSFUL answer differently depending on them. A failed request
+// carries the same facts on its *Error.
+type sendTrace struct {
+	// earlierSendUnanswered: an attempt before the one that answered may have
+	// reached the server and got no usable response (Error.EarlierSendUnanswered).
+	earlierSendUnanswered bool
+}
+
+// withSendTrace asks do to fill t once the request is answered.
+func withSendTrace(t *sendTrace) RequestOption {
+	return func(r *request) { r.trace = t }
 }
 
 // WithQuery adds query-string parameters.
@@ -374,12 +392,28 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, opt
 	}
 
 	uncodedConflicts := 0
+	// unanswered: an attempt so far may have reached the server and got no
+	// usable response. It only ever turns on, and it describes the attempts
+	// BEFORE the one being handled, which is what a caller asks about.
+	unanswered := false
 	for attempt := 0; ; attempt++ {
-		resp, err := c.send(ctx, method, u.String(), payload, req)
+		var sent attemptTrace
+		resp, err := c.send(httptrace.WithClientTrace(ctx, sent.hooks()), method, u.String(), payload, req)
+		// net/http retries a keyed request by itself when a reused connection
+		// dies after the request was written, and only says so through the
+		// trace: two complete writes in one attempt mean the first went
+		// unanswered.
+		if sent.writes.Load() > 1 {
+			unanswered = true
+		}
 		if err != nil {
 			if !req.replayable || !isTransient(err) || attempt >= c.maxRetries {
 				return &Error{Method: method, Path: path, Message: err.Error(), Err: err,
-					Idempotent: req.idempotencyKey != "", Preconditioned: req.ifMatch != nil}
+					Idempotent: req.idempotencyKey != "", Preconditioned: req.ifMatch != nil,
+					EarlierSendUnanswered: unanswered}
+			}
+			if sent.mayHaveReachedServer(err) {
+				unanswered = true
 			}
 			if werr := c.sleep(ctx, c.backoff(attempt, 0)); werr != nil {
 				return werr
@@ -390,10 +424,14 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, opt
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 		_ = resp.Body.Close()
 		if readErr != nil {
-			return &Error{Method: method, Path: path, Status: resp.StatusCode, Message: readErr.Error(), Err: readErr}
+			return &Error{Method: method, Path: path, Status: resp.StatusCode, Message: readErr.Error(), Err: readErr,
+				EarlierSendUnanswered: unanswered}
 		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if req.trace != nil {
+				req.trace.earlierSendUnanswered = unanswered
+			}
 			if out == nil || len(bytes.TrimSpace(respBody)) == 0 {
 				return nil
 			}
@@ -407,6 +445,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, opt
 		apiErr := newError(method, path, resp, respBody)
 		apiErr.Idempotent = req.idempotencyKey != ""
 		apiErr.Preconditioned = req.ifMatch != nil
+		apiErr.EarlierSendUnanswered = unanswered
 
 		retry := false
 		switch {
@@ -425,6 +464,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, opt
 		}
 		if !retry || attempt >= c.maxRetries {
 			return apiErr
+		}
+		// A gateway answering for the server says nothing about whether the
+		// server itself got the request, so treat it as unanswered.
+		if isGatewayStatus(apiErr.Status) {
+			unanswered = true
 		}
 		if werr := c.sleep(ctx, c.backoff(attempt, apiErr.RetryAfter)); werr != nil {
 			return werr
@@ -484,6 +528,64 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+// attemptTrace watches one attempt through net/http's client trace: whether
+// the transport reported on it at all, and how many times it finished writing
+// the request. The hooks can run on the transport's goroutines, hence atomics.
+type attemptTrace struct {
+	traced atomic.Bool
+	writes atomic.Int32
+}
+
+func (t *attemptTrace) hooks() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		GetConn: func(string) { t.traced.Store(true) },
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				t.writes.Add(1)
+			}
+		},
+	}
+}
+
+// mayHaveReachedServer reports whether a failed attempt could have been
+// received by the server. When the transport traced the attempt, that is
+// exactly whether the request was written in full. A transport that reports
+// nothing (a custom RoundTripper) falls back to reading the error.
+//
+// It matters because a caller treats "an earlier send went unanswered" as "the
+// record the server now reports is my own", and may revoke that record.
+// Counting a request that never left would let it revoke a record some other
+// caller made, so a doubtful case counts as never sent.
+func (t *attemptTrace) mayHaveReachedServer(err error) bool {
+	if t.traced.Load() {
+		return t.writes.Load() > 0
+	}
+	return mayHaveBeenSent(err)
+}
+
+// mayHaveBeenSent reads a transport failure for whether it could have come
+// after the server received the request: a timeout waiting for the answer, a
+// reset or closed connection, a torn-down response. A failure to connect at
+// all (a refused connection, a DNS failure, any error while dialling, a TLS
+// handshake that timed out) means the request never left.
+func mayHaveBeenSent(err error) bool {
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return false
+	}
+	if strings.Contains(err.Error(), "TLS handshake timeout") {
+		return false
+	}
+	return true
 }
 
 func isGatewayStatus(status int) bool {

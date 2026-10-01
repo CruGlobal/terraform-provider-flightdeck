@@ -114,6 +114,13 @@ Full reference docs (generated from the provider schema) live in
 - Every create carries an `Idempotency-Key` derived from the resource's
   identity, so a retried create replays the original instead of making a
   duplicate.
+- Routing keys, ingestion tokens and webhooks return their secret only to
+  the create that made them, so a replay cannot hand it back. When a create's
+  response is lost and the retry meets the record it made, the provider
+  revokes that record (nobody holds its secret) and creates another. When the
+  record was made by something else, such as a second resource declared with
+  the same values, Flightdeck refuses the replay and the apply fails naming
+  the record, without revoking anything.
 - Every update carries the resource's `lock_version` as an `If-Match`
   precondition. If something else changed the resource in between, the
   API answers 409 and the provider reports it instead of overwriting;

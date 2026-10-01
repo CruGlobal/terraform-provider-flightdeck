@@ -52,22 +52,34 @@ func (c *Client) GetWebhook(ctx context.Context, id int64) (*Webhook, error) {
 }
 
 // CreateWebhook creates a webhook and guarantees the returned value carries the
-// signing secret. A replayed create (secret redacted) is deleted and the
-// webhook is created again under a fresh key. See CreateSecretResource.
+// signing secret, or fails. A webhook has no revoked state, so it is live
+// until it is deleted, paused or not. See CreateSecretResource for what
+// happens when the stable Idempotency-Key names a webhook that already exists.
 func (c *Client) CreateWebhook(ctx context.Context, fields Fields, idempotencyKey string) (*Webhook, error) {
 	return CreateSecretResource(ctx, c, "/webhooks", webhookRoot, fields, idempotencyKey,
 		VerifyByGet(c.GetWebhook),
-		func(ctx context.Context, replayed *Webhook) error {
-			// Delete against the row's CURRENT version; a 404 (the predecessor
-			// was already destroyed) is fine.
-			current, err := c.GetWebhook(ctx, replayed.ID)
-			if err != nil {
-				if IsNotFound(err) {
-					return nil
+		SecretRecord{
+			Verb: "delete",
+			Live: func(ctx context.Context, id int64) (bool, error) {
+				if _, err := c.GetWebhook(ctx, id); err != nil {
+					if IsNotFound(err) {
+						return false, nil
+					}
+					return false, err
 				}
-				return err
-			}
-			return c.DeleteWebhook(ctx, current.ID, current.LockVersion)
+				return true, nil
+			},
+			Retire: func(ctx context.Context, id int64) error {
+				// Delete at the CURRENT lock_version; a webhook already gone is fine.
+				current, err := c.GetWebhook(ctx, id)
+				if err != nil {
+					if IsNotFound(err) {
+						return nil
+					}
+					return err
+				}
+				return c.DeleteWebhook(ctx, current.ID, current.LockVersion)
+			},
 		})
 }
 

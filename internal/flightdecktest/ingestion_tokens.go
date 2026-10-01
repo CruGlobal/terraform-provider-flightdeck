@@ -3,6 +3,7 @@ package flightdecktest
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -148,7 +149,7 @@ func (s *Server) createIngestionToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.withIdempotencyRedacted(w, r, "ingestion_token", func() (int, any, any) {
+	s.withIdempotencyRedacted(w, r, "ingestion_token", s.ingestionTokenWithheld(pid), func() (int, any, any) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.liveProject(pid) == nil {
@@ -178,6 +179,24 @@ func (s *Server) createIngestionToken(w http.ResponseWriter, r *http.Request) {
 		redacted["message"] = "Replay of a previously-used Idempotency-Key. The token is returned only by the original create and is never stored, so it cannot be replayed."
 		return http.StatusCreated, serializeIngestionToken(t, true), redacted
 	})
+}
+
+// ingestionTokenWithheld is the API's replay rule for ingestion tokens:
+// refused while the token the create made is not revoked.
+func (s *Server) ingestionTokenWithheld(projectID int64) *withheldSecret {
+	return &withheldSecret{
+		live: func(replayed map[string]any) bool {
+			id, _ := asInt64(replayed["id"])
+			t := s.liveIngestionToken(projectID, id)
+			return t != nil && t.RevokedAt == nil
+		},
+		message: func(id int64) string {
+			return fmt.Sprintf("This create was already done, and the token it made is still live, so its secret "+
+				"can't be sent again. If this is a retry of your own create, revoke token %d and "+
+				"create again; if another token in this project needs the same name, environment and "+
+				"scope, change one of them.", id)
+		},
+	}
 }
 
 // Revoke, not delete: the row stays; answered 200 with the revoked row, and a

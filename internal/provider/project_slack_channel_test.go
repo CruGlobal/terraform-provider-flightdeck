@@ -574,10 +574,10 @@ func TestProjectSlackChannel_insufficientScopes(t *testing.T) {
 }
 
 func TestProjectSlackChannel_warningsForTheNoProvisionStates(t *testing.T) {
-	failed, linked := "failed", "linked"
+	failed, linked, needsInvite := "failed", "linked", "needs_invite"
 	note := "Invite @example-bot to #example-channel"
 	blank := "  "
-	healthy := client.SlackChannel{ChannelEnabled: true, ChannelAvailable: true, ScopesSufficient: true}
+	healthy := client.SlackChannel{ProjectID: 42, ChannelEnabled: true, ChannelAvailable: true, ScopesSufficient: true}
 	withStatus := func(sc client.SlackChannel, status, note *string) client.SlackChannel {
 		sc.ProvisionStatus, sc.ProvisionNote = status, note
 		return sc
@@ -609,7 +609,7 @@ func TestProjectSlackChannel_warningsForTheNoProvisionStates(t *testing.T) {
 		{
 			name:    "provision failed",
 			channel: withStatus(healthy, &failed, &note),
-			want:    "provisioning failed",
+			want:    "project 42, but provisioning failed",
 			detail:  note,
 		},
 		{
@@ -617,6 +617,22 @@ func TestProjectSlackChannel_warningsForTheNoProvisionStates(t *testing.T) {
 			channel: withStatus(healthy, &failed, &blank),
 			want:    "provisioning failed",
 			detail:  "did not say why",
+		},
+		{
+			name:    "linked, but Flightdeck is not in the channel",
+			channel: withStatus(healthy, &needsInvite, &note),
+			want:    "project 42, but Flightdeck is not in it",
+			detail:  note,
+		},
+		{
+			name:    "needs an invite, without a note",
+			channel: withStatus(healthy, &needsInvite, nil),
+			want:    "Flightdeck is not in it",
+			detail:  "cannot join it by itself",
+		},
+		{
+			name:    "needs an invite, but the channel is off",
+			channel: withStatus(client.SlackChannel{ChannelAvailable: true, ScopesSufficient: true}, &needsInvite, &note),
 		},
 		{
 			// A failure left over from before the channel was switched off is
@@ -1141,6 +1157,64 @@ func TestWriteSlackChannel_failedProvisionWarns(t *testing.T) {
 	}
 	if got := block.Attributes()["provision_status"]; !got.Equal(types.StringValue("failed")) {
 		t.Errorf("provision_status = %s, want failed", got)
+	}
+}
+
+// A write that links a channel Flightdeck is not in comes back needs_invite. It
+// is saved, so it is recorded and warned about with the API's note, and an
+// unchanged write to such a channel checks again.
+func TestWriteSlackChannel_needsInviteWarns(t *testing.T) {
+	env := newTestEnv(t, "slack_channel")
+	env.requireFake(t)
+	c, id := slackChannelTestProject(t, env, "Slack invite")
+	ctx := t.Context()
+	env.fake.SetSlackChannelNeedsInvite("fd-slack-invite", true)
+
+	var diags diag.Diagnostics
+	block, lockVersion := writeSlackChannel(ctx, c, id,
+		slackChannelBlock(t, map[string]attr.Value{"enabled": types.BoolValue(true)}),
+		types.ObjectUnknown(slackChannelAttrTypes), types.ObjectNull(slackChannelAttrTypes), 0,
+		slackChannelOnUpdate, &diags)
+
+	if diags.HasError() {
+		t.Fatalf("a saved configuration must not be an error: %v", diags.Errors())
+	}
+	warnings := diags.Warnings()
+	if len(warnings) != 1 {
+		t.Fatalf("expected exactly one warning, got %v", warnings)
+	}
+	if want := fmt.Sprintf("project %d, but Flightdeck is not in it", id); !strings.Contains(warnings[0].Summary(), want) {
+		t.Errorf("summary = %q, want it to contain %q", warnings[0].Summary(), want)
+	}
+	for _, want := range []string{"Invite the Flightdeck app to #fd-slack-invite", "save the settings page"} {
+		if !strings.Contains(warnings[0].Detail(), want) {
+			t.Errorf("detail does not say %q:\n%s", want, warnings[0].Detail())
+		}
+	}
+	if block.IsNull() {
+		t.Fatal("the saved block must be recorded")
+	}
+	attrs := block.Attributes()
+	if got := attrs["provision_status"]; !got.Equal(types.StringValue("needs_invite")) {
+		t.Errorf("provision_status = %s, want needs_invite", got)
+	}
+	if got := attrs["linked"]; !got.Equal(types.BoolValue(true)) {
+		t.Errorf("linked = %s, want true: a needs_invite channel is linked", got)
+	}
+
+	// Once the app is invited, a write checks again and the warning is gone.
+	env.fake.SetSlackChannelNeedsInvite("fd-slack-invite", false)
+	sc, err := c.UpdateSlackChannel(ctx, id, client.Fields{}, lockVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.ProvisionStatus == nil || *sc.ProvisionStatus != "linked" {
+		t.Fatalf("provision_status = %v after the invite, want linked", sc.ProvisionStatus)
+	}
+	var after diag.Diagnostics
+	slackChannelProvisioningWarnings(sc, &after)
+	if len(after) != 0 {
+		t.Errorf("a linked channel still warns: %v", after)
 	}
 }
 

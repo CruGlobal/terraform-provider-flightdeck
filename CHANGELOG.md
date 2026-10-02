@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.6.0...v0.7.0) (2026-10-02)
+
+
+### Added
+
+* manage a project's agent work settings (flightdeck_project.agent_work) ([#33](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/33)) ([c66955b](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/c66955b1ab70f17f5544e999d262e4f989838bf1))
+* set condition.count_browser_errors on error alert rules ([#30](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/30)) ([4fe2ce9](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/4fe2ce926507cf68a02e193e765538205b3a0ae5))
+
+
+### Fixed
+
+* recover a lost create response, never revoke a live secret on replay, and warn when Slack needs an invite ([#32](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/32)) ([c53a3ac](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/c53a3ac029b29681062d00ec83d521a245a3ca81))
+
 ## [0.6.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.5.0...v0.6.0) (2026-09-28)
 
 

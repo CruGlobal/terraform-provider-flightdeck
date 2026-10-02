@@ -129,6 +129,7 @@ func (d *projectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				},
 			},
 			"slack_channel": slackChannelDataSourceSchema(),
+			"agent_work":    agentWorkDataSourceSchema(),
 		},
 	}
 }
@@ -155,8 +156,10 @@ func (d *projectDataSource) Read(ctx context.Context, req datasource.ReadRequest
 	}
 
 	state := projectToModel(ctx, p, nil, featuresAll, &resp.Diagnostics)
-	// Rollback blockers are the managing resource's to report, not a lookup's.
+	// Rollback and agent work blockers are the managing resource's to report,
+	// not a lookup's.
 	state.SelfHealing, _ = readSelfHealing(ctx, d.client, p.ID, &resp.Diagnostics)
+	state.AgentWork, _ = readAgentWork(ctx, d.client, p.ID, &resp.Diagnostics)
 	state.SlackChannel = readSlackChannel(ctx, d.client, p.ID, types.MapNull(types.BoolType), slackEventsAll, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }

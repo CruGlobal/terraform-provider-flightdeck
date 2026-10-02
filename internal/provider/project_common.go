@@ -62,6 +62,7 @@ type projectModel struct {
 	LockVersion        types.Int64  `tfsdk:"lock_version"`
 	SelfHealing        types.Object `tfsdk:"self_healing"`
 	SlackChannel       types.Object `tfsdk:"slack_channel"`
+	AgentWork          types.Object `tfsdk:"agent_work"`
 }
 
 // featureKeyFilter says which feature keys to keep when mapping the API's
@@ -82,9 +83,9 @@ const (
 )
 
 // projectToModel maps an API project into state. prior supplies the feature
-// keys to keep when filter is featuresFromPrior. The self_healing and
-// slack_channel blocks travel on their own endpoints and are filled
-// separately; they start null here.
+// keys to keep when filter is featuresFromPrior. The self_healing,
+// slack_channel and agent_work blocks travel on their own endpoints and are
+// filled separately; they start null here.
 func projectToModel(ctx context.Context, p *client.Project, prior *projectModel, filter featureKeyFilter, diags *diag.Diagnostics) projectModel {
 	m := projectModel{
 		ID:                 types.Int64Value(p.ID),
@@ -100,6 +101,7 @@ func projectToModel(ctx context.Context, p *client.Project, prior *projectModel,
 		LockVersion:        types.Int64Value(p.LockVersion),
 		SelfHealing:        types.ObjectNull(selfHealingAttrTypes),
 		SlackChannel:       types.ObjectNull(slackChannelAttrTypes),
+		AgentWork:          types.ObjectNull(agentWorkAttrTypes),
 	}
 	if p.LeadID != nil {
 		m.LeadID = types.Int64Value(*p.LeadID)
@@ -160,7 +162,8 @@ func stringPointerValue(s *string) types.String {
 // removing it from configuration clears it server-side. features is sent only
 // when configured: an absent block means "not managed here". lead_id is sent
 // only when configured. github_repo_full_name is read-only over the API and
-// never sent; the self_healing block travels on its own endpoint.
+// never sent; the self_healing, slack_channel and agent_work blocks travel on
+// their own endpoints.
 //
 // app is sent only when the plan sets or changes it. An unset app plans the
 // prior value (UseStateForUnknown), so it is never sent and the binding the

@@ -27,7 +27,7 @@ project, not to infrastructure code.
 
 | Resource | Manages |
 | --- | --- |
-| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing configuration, Slack channel configuration; reports the (read-only) GitHub repository link. |
+| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing configuration, Slack channel configuration, agent work settings; reports the (read-only) GitHub repository link. |
 | `flightdeck_state` | A workflow state within a project (name, group, color, default, position). |
 | `flightdeck_label` | A label within a project. |
 | `flightdeck_project_member` | A user's membership of a project (by membership id) and their role. |
@@ -43,11 +43,12 @@ project, not to infrastructure code.
 | --- | --- |
 | `flightdeck_project` | A project by id or identifier. |
 | `flightdeck_states` | All workflow states of a project. |
-| `flightdeck_workspace_member` | Resolves a workspace member by email address to a numeric user id, for `project_member.user_id` and `project.lead_id`. |
+| `flightdeck_workspace_member` | Resolves a workspace member by email address to a numeric user id, for `project_member.user_id`, `project.lead_id` and `project.agent_work.agent_account_id`. |
 
-`flightdeck_project_member.user_id` and `flightdeck_project.lead_id` take
-a numeric user id; `flightdeck_workspace_member` resolves one from an
-email address, so a configuration can name people rather than ids. The
+`flightdeck_project_member.user_id`, `flightdeck_project.lead_id` and
+`flightdeck_project.agent_work.agent_account_id` take a numeric user id;
+`flightdeck_workspace_member` resolves one from an email address, so a
+configuration can name people (and service accounts) rather than ids. The
 match is exact — case and surrounding whitespace are ignored, nothing
 else — and an address that resolves to nobody fails the plan.
 

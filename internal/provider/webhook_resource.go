@@ -117,9 +117,15 @@ func (r *webhookResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"keeps it in state as a sensitive attribute so the receiving end can be configured from it (for example " +
 			"through a secret manager). It is never re-read, so an imported webhook has no `secret` value, and it " +
 			"cannot be chosen or rotated through the API: to rotate, replace the webhook (`terraform taint` or a " +
-			"`-replace` apply). If the API replays an earlier create (the same declaration re-created within 24 " +
-			"hours) the replayed row comes back without its secret; the provider deletes that row and creates the " +
-			"webhook afresh rather than recording a secret it cannot know.\n\n" +
+			"`-replace` apply), which by default deletes the old webhook before it creates the new one.\n\n" +
+			"A create is made idempotent with a key derived from its `url`, `events`, `project_id` and `active`, so " +
+			"two webhooks declared with all of those the same are one create as far as the API is concerned, for the " +
+			"24 hours it remembers a create. While " +
+			"the first exists, Flightdeck refuses the second create rather than replay it without its secret, and " +
+			"the apply fails naming the webhook that already exists: the second would only duplicate it, so change the " +
+			"`url` or `events` of the resource the error is reported on. The same error follows an apply that failed after Flightdeck made the webhook; then " +
+			"delete the webhook it names and apply again. A replacement under `create_before_destroy`, within 24 " +
+			"hours of the old webhook's create, is refused the same way.\n\n" +
 			"Import by numeric id: `terraform import flightdeck_webhook.ci 9`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
@@ -182,6 +188,17 @@ func (r *webhookResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 	created, err := r.client.CreateWebhook(ctx, fields, client.PayloadKey("webhook", "", fields))
 	if err != nil {
+		if addReplayWithheldError(&resp.Diagnostics, pathRoot("url"), "An identical webhook already exists",
+			func(id int64) replayWithheldText {
+				return replayWithheldText{
+					record: fmt.Sprintf("Webhook %d", id),
+					distinct: "If another flightdeck_webhook has the same url, events, project and active flag, it holds " +
+						"that webhook, and this one would only duplicate it: change this resource's url or events, or remove it.",
+					retire: fmt.Sprintf("delete webhook %d in Flightdeck", id),
+				}
+			}, err) {
+			return
+		}
 		addAPIError(&resp.Diagnostics, "Error creating Flightdeck webhook", err)
 		return
 	}

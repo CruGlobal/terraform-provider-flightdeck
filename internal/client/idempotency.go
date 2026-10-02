@@ -159,10 +159,10 @@ func CreateResource[T Identified](ctx context.Context, c *Client, path, rootKey 
 	return recreated, nil
 }
 
-func postResource[T Identified](ctx context.Context, c *Client, path, rootKey string, fields Fields, key string) (T, error) {
+func postResource[T Identified](ctx context.Context, c *Client, path, rootKey string, fields Fields, key string, opts ...RequestOption) (T, error) {
 	var zero T
 	var raw json.RawMessage
-	if err := c.Post(ctx, path, map[string]any{rootKey: fields}, &raw, WithIdempotencyKey(key)); err != nil {
+	if err := c.Post(ctx, path, map[string]any{rootKey: fields}, &raw, append([]RequestOption{WithIdempotencyKey(key)}, opts...)...); err != nil {
 		return zero, err
 	}
 	created, err := DecodeResource[T](raw, rootKey)
@@ -234,31 +234,95 @@ func PatchResource[T any](ctx context.Context, c *Client, path, rootKey string, 
 }
 
 // secretBearing is implemented by resources whose create response carries a
-// secret exactly once (ingestion tokens, webhooks).
+// secret exactly once (ingestion tokens, routing keys, webhooks).
 type secretBearing interface {
 	Identified
 	secret() string
 }
 
+// SecretRecord is how CreateSecretResource inspects and removes a record that
+// a replayed create names. Both are per resource, because what "live" means
+// is: a routing key is live until it is revoked or renamed, an ingestion token
+// until it is revoked, a webhook until it is deleted. Each mirrors the API's
+// own rule for refusing a replay.
+type SecretRecord struct {
+	// Live reports whether the record is still live. A record that is gone (a
+	// 404) is not live, which is an answer rather than an error.
+	Live func(ctx context.Context, id int64) (bool, error)
+	// Retire revokes the record (deletes it, for a webhook) at its current
+	// lock_version. A record that is already revoked or gone is success.
+	Retire func(ctx context.Context, id int64) error
+	// Verb is what Retire does, as the messages say it: "revoke" or "delete".
+	Verb string
+}
+
 // CreateSecretResource is CreateResource for a resource whose create response
-// carries a secret that the API returns ONLY to the original create. A replay
-// of the same Idempotency-Key returns the row with the secret redacted, and no
-// read can ever recover it — so a create response without the secret must
-// never be recorded as a resource with an unknown credential. It is treated as
-// a replay: the replayed row (this client's own earlier, unrecorded create, or
-// the since-revoked/deleted predecessor of a recreate) is removed with
-// `discard`, and the resource is created again under a fresh key. The stable
-// key is never re-sent once any response has been received. A second response
-// without the secret is an error, never a third attempt.
+// carries a secret that the API returns ONLY to the original create. The
+// stable Idempotency-Key is sent once; whatever comes back, it is never sent
+// again in this call.
+//
+// The API never replays such a create with its secret. While the record the
+// create made is still live it refuses the replay with 409
+// CodeIdempotencyReplayWithheld and the record's id; once the record is
+// revoked or deleted it replays it with the secret redacted. Either way the
+// question is whose record that is, and the only evidence is how this call's
+// own sends went:
+//
+//   - An earlier send of this request may have reached the server and got no
+//     usable response (Error.EarlierSendUnanswered, or the same fact from the
+//     trace on a successful answer). The record is then this call's own
+//     create, whose response was lost: nobody holds its secret. It is retired
+//     and the resource is created again under a fresh key.
+//   - Every send was answered. The record was made by something else that sent
+//     the same body: another resource declared with identical values, or an
+//     earlier apply that failed after creating it. Both look the same from
+//     here, and the first holds a credential somebody uses, so nothing is
+//     retired: the create fails with an error that names the record and both
+//     ways out (see replayWithheld).
+//   - The replayed record is no longer live (revoked, deleted, or for a
+//     routing key renamed away). Nothing can be lost: the resource is created
+//     again under a fresh key, and nothing is retired. This is the path
+//     Terraform's default destroy-then-create replacement takes.
+//
+// An older Flightdeck replays a LIVE record with its secret redacted instead
+// of refusing it. That answer is checked with record.Live and handled exactly
+// like the refusal, so the outcome does not depend on the server's version.
+//
+// One case remains that no client can settle: two resources declared with
+// identical values, where the first's create succeeded and the second's first
+// send was then lost on the way back. The second's retry finds a live record
+// after an unanswered send and retires it as its own, although it was the
+// first resource's. That needs a duplicated declaration and a lost response on
+// exactly that request. The first resource's next refresh then finds its
+// record gone and the next apply creates it again, so the damage lasts until
+// that apply rather than hiding, but whatever used the old secret is refused
+// in between.
+//
+// A fresh create that cannot be read back is retired too, so a live
+// credential is never left unrecorded, and a second response without the
+// secret is an error, never a third attempt.
 func CreateSecretResource[T secretBearing](
 	ctx context.Context, c *Client, path, rootKey string, fields Fields, key string,
-	verify Verifier[T], discard func(ctx context.Context, replayed T) error,
+	verify Verifier[T], record SecretRecord,
 ) (T, error) {
 	var zero T
-	created, err := postResource[T](ctx, c, path, rootKey, fields, key)
+	var trace sendTrace
+	created, err := postResource[T](ctx, c, path, rootKey, fields, key, withSendTrace(&trace))
 	if err != nil {
-		return zero, err
+		apiErr, ok := asError(err)
+		if !ok || apiErr.Code != CodeIdempotencyReplayWithheld || apiErr.ID <= 0 {
+			return zero, err
+		}
+		if !apiErr.EarlierSendUnanswered {
+			return zero, replayWithheld(path, rootKey, apiErr.ID, record.Verb, apiErr)
+		}
+		// Our own create, whose response was lost: nobody holds its secret.
+		if rerr := record.Retire(ctx, apiErr.ID); rerr != nil {
+			return zero, retireFailed(path, rootKey, apiErr.ID, record.Verb, rerr)
+		}
+		return createSecretAfresh[T](ctx, c, path, rootKey, fields, verify, record, apiErr.ID)
 	}
+
 	if created.secret() != "" {
 		verdict, err := verifyWithRetry(ctx, c, created, verify)
 		if err != nil {
@@ -269,18 +333,41 @@ func CreateSecretResource[T secretBearing](
 		}
 		// A fresh create that cannot be read back: do not leave a live
 		// credential unrecorded, and do not mint another.
-		_ = discard(ctx, created)
+		_ = record.Retire(ctx, created.ResourceID())
 		return zero, &Error{Method: http.MethodPost, Path: path, Status: http.StatusCreated,
 			Message: fmt.Sprintf("the API reported %s %d created, but a follow-up read could not find it; "+
-				"it was revoked and nothing else was created", rootKey, created.ResourceID())}
+				"it was %s and nothing else was created", rootKey, created.ResourceID(), pastTense(record.Verb))}
 	}
 
-	// Replay: the secret was redacted. Retire the replayed row and mint afresh.
-	if err := discard(ctx, created); err != nil && !IsNotFound(err) {
+	// A replay: the secret was redacted. Whose record it names decides what
+	// happens to it.
+	replayedID := created.ResourceID()
+	live, err := record.Live(ctx, replayedID)
+	if err != nil {
 		return zero, &Error{Method: http.MethodPost, Path: path, Status: http.StatusCreated, Err: err,
 			Message: fmt.Sprintf("the API replayed an earlier create of %s %d without its secret, and the replayed "+
-				"row could not be retired: %s", rootKey, created.ResourceID(), err)}
+				"record could not be read to see whether it is still in use; nothing was created or %s: %s",
+				rootKey, replayedID, pastTense(record.Verb), err)}
 	}
+	if live {
+		if !trace.earlierSendUnanswered {
+			return zero, replayWithheld(path, rootKey, replayedID, record.Verb, nil)
+		}
+		if err := record.Retire(ctx, replayedID); err != nil {
+			return zero, retireFailed(path, rootKey, replayedID, record.Verb, err)
+		}
+	}
+	return createSecretAfresh[T](ctx, c, path, rootKey, fields, verify, record, replayedID)
+}
+
+// createSecretAfresh creates the resource under a one-off key, after the
+// stable key turned out to name record replacedID, and insists on a usable
+// answer: a secret, and a record that reads back.
+func createSecretAfresh[T secretBearing](
+	ctx context.Context, c *Client, path, rootKey string, fields Fields,
+	verify Verifier[T], record SecretRecord, replacedID int64,
+) (T, error) {
+	var zero T
 	recreated, err := postResource[T](ctx, c, path, rootKey, fields, RandomIdempotencyKey())
 	if err != nil {
 		return zero, err
@@ -295,10 +382,47 @@ func CreateSecretResource[T secretBearing](
 		return zero, err
 	}
 	if verdict != VerifiedPresent {
-		_ = discard(ctx, recreated)
+		_ = record.Retire(ctx, recreated.ResourceID())
 		return zero, &Error{Method: http.MethodPost, Path: path, Status: http.StatusCreated,
-			Message: fmt.Sprintf("the API reported %s %d created (after retiring replayed %s %d), but it cannot be "+
-				"read back; it was revoked and nothing else was created", rootKey, recreated.ResourceID(), rootKey, created.ResourceID())}
+			Message: fmt.Sprintf("the API reported %s %d created (after the replayed %s %d), but it cannot be "+
+				"read back; it was %s and nothing else was created", rootKey, recreated.ResourceID(), rootKey, replacedID,
+				pastTense(record.Verb))}
 	}
 	return recreated, nil
+}
+
+// replayWithheld is the error for a create whose stable key names a live
+// record this call did not make. cause is the API's own refusal, when that is
+// how the replay was answered.
+func replayWithheld(path, rootKey string, id int64, verb string, cause *Error) *Error {
+	noun := strings.ReplaceAll(rootKey, "_", " ")
+	e := &Error{Method: http.MethodPost, Path: path, Status: http.StatusConflict,
+		Code: CodeIdempotencyReplayWithheld, ID: id, Idempotent: true,
+		Message: fmt.Sprintf("an identical create already made %s %d, which is still live, and its secret is "+
+			"returned only once, so it cannot be recorded here; nothing was created or %s. Either give this "+
+			"resource values that differ from the other one's, or, if %s %d was left behind by an earlier apply "+
+			"that failed, %s it and apply again", noun, id, pastTense(verb), noun, id, verb)}
+	if cause != nil {
+		e.Err = cause
+		e.EarlierSendUnanswered = cause.EarlierSendUnanswered
+	}
+	return e
+}
+
+func retireFailed(path, rootKey string, id int64, verb string, err error) *Error {
+	return &Error{Method: http.MethodPost, Path: path, Status: http.StatusCreated, Err: err,
+		Message: fmt.Sprintf("an earlier attempt at this create got no usable response, and the %s %d it left "+
+			"behind could not be %s, so nothing else was created: %s",
+			strings.ReplaceAll(rootKey, "_", " "), id, pastTense(verb), err)}
+}
+
+// pastTense turns "revoke" into "revoked" and "delete" into "deleted".
+func pastTense(verb string) string {
+	if verb == "" {
+		return "removed"
+	}
+	if strings.HasSuffix(verb, "e") {
+		return verb + "d"
+	}
+	return verb + "ed"
 }

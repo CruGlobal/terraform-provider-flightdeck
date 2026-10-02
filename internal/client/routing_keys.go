@@ -71,55 +71,67 @@ func (c *Client) GetRoutingKey(ctx context.Context, projectID, id int64) (*Routi
 }
 
 // CreateRoutingKey mints a key and guarantees the returned value carries the
-// secret. If the API replays an earlier create (the secret is redacted on a
-// replay), the replayed row is revoked and the key is minted again under a
-// fresh Idempotency-Key; the stable key is never re-sent. See
-// CreateSecretResource.
+// secret, or fails. See CreateSecretResource for what happens when the stable
+// Idempotency-Key names a key that already exists: it is retired and the key
+// minted again under a fresh key only when it is this call's own lost create;
+// a live key anything else made is never touched, and the create fails with
+// CodeIdempotencyReplayWithheld naming it.
 //
-// retiredID reports the row this create actually revoked to get here, or 0.
-// The caller needs to know, because two declarations sending an identical body
-// send an identical Idempotency-Key: an earlier attempt at THIS declaration
-// and a DIFFERENT declaration with the same name are indistinguishable by
-// payload alone. The first is a retry recovering itself; the second means a
-// sibling's live credential was just retired. Only the caller can tell those
-// apart, and only if it is told a row went.
-//
-// One case IS distinguishable from here, and is handled rather than reported:
-// `name` is editable in place, but the cached create is keyed on the body that
+// A key is live, for that purpose, when it is not revoked and still carries
+// the name this create sent: the API's own rule for refusing a replay. `name`
+// is editable in place, but the cached create is keyed on the body that
 // carried the ORIGINAL name, and the API honours that key for 24 hours. So a
-// row renamed since can be named by a create that has nothing to do with it —
-// somebody freed a name and somebody else reused it. A row whose CURRENT name
-// is not the one just sent is demonstrably not this create's earlier attempt,
-// so it is left alone; the caller then mints under a fresh key and the new
-// declaration gets its own credential, with nothing destroyed.
+// row renamed since can be named by a create that has nothing to do with it,
+// when somebody freed a name and somebody else reused it. Such a row is
+// demonstrably not this create's, so it is left alone and the new declaration
+// gets its own credential.
+//
+// retiredID reports the row this create revoked on the way, or 0. That is
+// only ever this call's own create (whose response was lost, so nobody holds
+// its secret) or a fresh key that could not be read back, but a revoked row
+// the operator did not ask for is still worth naming when the create then
+// fails.
 func (c *Client) CreateRoutingKey(ctx context.Context, projectID int64, fields Fields, idempotencyKey string) (key *RoutingKey, retiredID int64, err error) {
 	sentName, named := fields["name"].(string)
 	created, err := CreateSecretResource(ctx, c, routingKeysPath(projectID), routingKeyRoot, fields, idempotencyKey,
 		VerifyByGet(func(ctx context.Context, id int64) (*RoutingKey, error) {
 			return c.GetRoutingKey(ctx, projectID, id)
 		}),
-		func(ctx context.Context, replayed *RoutingKey) error {
-			// The replayed body carries the lock_version at creation time; the
-			// row may have moved on, so read the CURRENT one.
-			current, err := c.GetRoutingKey(ctx, projectID, replayed.ID)
-			if err != nil {
-				return err
-			}
-			// Already gone: nothing to retire, and nothing to tell the caller.
-			// This is the ordinary rotation path, where the destroy revoked
-			// the row before the create replayed.
-			if current.IsRevoked() {
-				return nil
-			}
-			// Renamed since it was created, so this replay is not ours.
-			if named && current.Name != sentName {
-				return nil
-			}
-			// Set before the revoke, not after: if the revoke or the re-mint
-			// that follows it fails, which row went is exactly what the
-			// caller most needs to be told.
-			retiredID = current.ID
-			return c.RevokeRoutingKey(ctx, projectID, current.ID, current.LockVersion)
+		SecretRecord{
+			Verb: "revoke",
+			Live: func(ctx context.Context, id int64) (bool, error) {
+				current, err := c.GetRoutingKey(ctx, projectID, id)
+				if err != nil {
+					if IsNotFound(err) {
+						return false, nil
+					}
+					return false, err
+				}
+				// Renamed since it was created, so this replay is not ours.
+				if named && current.Name != sentName {
+					return false, nil
+				}
+				return !current.IsRevoked(), nil
+			},
+			Retire: func(ctx context.Context, id int64) error {
+				// Revoke at the CURRENT lock_version: the row may have moved on
+				// since the response that named it.
+				current, err := c.GetRoutingKey(ctx, projectID, id)
+				if err != nil {
+					if IsNotFound(err) {
+						return nil
+					}
+					return err
+				}
+				if current.IsRevoked() {
+					return nil
+				}
+				// Set before the revoke, not after: if the revoke or the
+				// re-mint that follows it fails, which row went is exactly what
+				// the caller most needs to be told.
+				retiredID = current.ID
+				return c.RevokeRoutingKey(ctx, projectID, current.ID, current.LockVersion)
+			},
 		})
 	return created, retiredID, err
 }

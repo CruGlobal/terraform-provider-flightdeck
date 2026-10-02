@@ -39,6 +39,16 @@ type SlackChannel struct {
 	LockVersion          int64           `json:"lock_version"`
 }
 
+// The provision outcomes slack_provision_status reports that need someone to
+// act. Failed: the job, or a check of a linked channel, could not finish (the
+// note says why). NeedsInvite: the channel is linked, but Flightdeck is not in
+// it and cannot join it by itself, so no member can be invited until someone
+// adds the Flightdeck app to the channel.
+const (
+	SlackProvisionFailed      = "failed"
+	SlackProvisionNeedsInvite = "needs_invite"
+)
+
 // SlackChannelWritableKeys are the settable keys, spelled as the read emits
 // them so a read applies straight back. Everything else on the shape is
 // server-owned and refused by name.

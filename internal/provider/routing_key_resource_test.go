@@ -1,9 +1,12 @@
 package provider
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
@@ -73,8 +76,8 @@ func TestRoutingKey_basicLifecycle(t *testing.T) {
 	})
 }
 
-// The API has no rotate route, so rotation is replacement: a new key is minted
-// and the old one revoked.
+// The API has no rotate route, so rotation is replacement. Terraform's default
+// replacement destroys first: the old key is revoked, then a new one minted.
 func TestRoutingKey_rotationIsReplacement(t *testing.T) {
 	env := newTestEnv(t, "routing_key")
 	env.requireFake(t)
@@ -186,8 +189,9 @@ func TestRoutingKey_reportsAConsoleAttachedPolicy(t *testing.T) {
 // Idempotency-Key is a hash of the request body, and `name` is the only thing
 // in that body, so before `name` was required two nameless declarations sent
 // identical payloads: the second replayed the first, the replay carried no
-// secret, and recovering from that revoked the first resource's live key while
-// the apply reported success.
+// secret, and recovering from that once revoked the first resource's live key
+// while the apply reported success. (Same-named keys are now refused; see
+// TestRoutingKey_duplicateNameIsRefusedAndTheFirstKeyKept.)
 func TestRoutingKey_siblingKeysAreIndependent(t *testing.T) {
 	env := newTestEnv(t, "routing_key")
 	env.requireFake(t)
@@ -268,6 +272,182 @@ func TestRoutingKey_staleWriteIsReported(t *testing.T) {
 				},
 				Config:      routingKeyConfig(env, identifier, `  name = "Racy renamed"`),
 				ExpectError: regexMust(`(?s)Routing key "Racy" modified outside of Terraform`),
+			},
+		},
+	})
+}
+
+// Two keys declared with the same name are one create to the API. The first
+// key is live, so Flightdeck refuses the second create instead of replaying it
+// without its secret, and the provider fails that resource without touching
+// the first. Renaming the refused one is the fix, and leaves the first key as
+// it was. An older Flightdeck replays the live key without its secret instead,
+// and the provider reads that the same way.
+func TestRoutingKey_duplicateNameIsRefusedAndTheFirstKeyKept(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			env := newTestEnv(t, "routing_key")
+			if legacy {
+				env.requireFake(t)
+				env.fake.LegacySecretReplays(true)
+			}
+			identifier := randIdentifier()
+			first := `
+resource "flightdeck_routing_key" "a" {
+  project_id = flightdeck_project.parent.id
+  name       = "Same"
+}
+`
+			second := func(name string) string {
+				return fmt.Sprintf(`
+resource "flightdeck_routing_key" "b" {
+  project_id = flightdeck_project.parent.id
+  name       = %q
+}
+`, name)
+			}
+			var id, secret string
+			runTest(t, resource.TestCase{
+				Steps: []resource.TestStep{
+					{
+						Config: projectFixture(env, identifier) + first,
+						Check: resource.ComposeAggregateTestCheckFunc(
+							captureAttr("flightdeck_routing_key.a", "id", &id),
+							captureAttr("flightdeck_routing_key.a", "routing_key", &secret),
+						),
+					},
+					{
+						Config:      projectFixture(env, identifier) + first + second("Same"),
+						ExpectError: regexMust(`(?s)A routing key with this name already exists.*named "Same", it holds\s+that\s+key`),
+					},
+					{
+						Config: projectFixture(env, identifier) + first + second("Other"),
+						Check: resource.ComposeAggregateTestCheckFunc(
+							resource.TestCheckResourceAttrPtr("flightdeck_routing_key.a", "id", &id),
+							resource.TestCheckResourceAttrPtr("flightdeck_routing_key.a", "routing_key", &secret),
+							resource.TestCheckResourceAttrSet("flightdeck_routing_key.b", "routing_key"),
+							func(s *terraform.State) error {
+								if env.fake == nil {
+									return nil
+								}
+								if row := env.fake.RoutingKey(mustInt(id)); row == nil || row.RevokedAt != nil {
+									return fmt.Errorf("the first key %s is not live on the server: %+v", id, row)
+								}
+								for _, r := range env.fake.RequestsMatching("DELETE", "/api/v1/projects/") {
+									if strings.Contains(r.Path, "/routing-keys/") {
+										return fmt.Errorf("a routing key was revoked (%s): the refused create must not revoke anything", r.Path)
+									}
+								}
+								return nil
+							},
+						),
+					},
+				},
+			})
+		})
+	}
+}
+
+// The create took effect but its response was lost, so the client's retry
+// meets the key it made itself. Nobody holds that key's value, so the provider
+// revokes it and mints another, and the apply succeeds quietly.
+func TestRoutingKey_lostCreateResponseIsRecovered(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			env := newTestEnv(t, "routing_key")
+			env.requireFake(t)
+			env.fake.LegacySecretReplays(legacy)
+			identifier := randIdentifier()
+			recorded := runTestRecordingApplyDiagnostics(t, resource.TestCase{
+				Steps: []resource.TestStep{
+					{
+						PreConfig: func() { env.fake.DropNextResponse("POST", "/routing-keys") },
+						Config:    routingKeyConfig(env, identifier, `  name = "Lost"`),
+						Check: func(s *terraform.State) error {
+							lost := lostCreateID(t, env, "/routing-keys")
+							rs := s.RootModule().Resources[routingKeyRes].Primary
+							if rs.ID == fmt.Sprint(lost) {
+								return fmt.Errorf("state recorded the key whose response was lost (%d)", lost)
+							}
+							if rs.Attributes["routing_key"] == "" {
+								return fmt.Errorf("the recovered key has no value")
+							}
+							if row := env.fake.RoutingKey(lost); row == nil || row.RevokedAt == nil {
+								return fmt.Errorf("the key whose response was lost (%d) should be revoked: %+v", lost, row)
+							}
+							if row := env.fake.RoutingKey(mustInt(rs.ID)); row == nil || row.RevokedAt != nil {
+								return fmt.Errorf("the recorded key %s is not live", rs.ID)
+							}
+							return nil
+						},
+					},
+				},
+			})
+			for _, w := range recorded.bySeverity(tfprotov6.DiagnosticSeverityWarning) {
+				t.Errorf("unexpected warning: %s: %s", w.Summary, w.Detail)
+			}
+		})
+	}
+}
+
+// lostCreateID is the id the first POST to a path ending in suffix created,
+// read from the response the fake recorded and then withheld.
+func lostCreateID(t *testing.T, env *testEnv, suffix string) int64 {
+	t.Helper()
+	for _, r := range env.fake.RequestsMatching("POST", "/api/v1/") {
+		if !strings.HasSuffix(r.Path, suffix) {
+			continue
+		}
+		var body struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal(r.Response, &body); err != nil || body.ID == 0 {
+			t.Fatalf("the first create's response %q has no id: %v", r.Response, err)
+		}
+		return body.ID
+	}
+	t.Fatalf("no POST to %s was recorded", suffix)
+	return 0
+}
+
+// With create_before_destroy the replacement mints first, so within 24 hours
+// of the old key's create it sends that same create again while the old key
+// is live. Flightdeck refuses it, the provider says why, and the old key is
+// kept.
+func TestRoutingKey_createBeforeDestroyReplacementWithinTheWindowIsRefused(t *testing.T) {
+	env := newTestEnv(t, "routing_key")
+	identifier := randIdentifier()
+	cfg := projectFixture(env, identifier) + `
+resource "flightdeck_routing_key" "test" {
+  project_id = flightdeck_project.parent.id
+  name       = "Rotating"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+`
+	var id string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: cfg,
+				Check:  captureAttr(routingKeyRes, "id", &id),
+			},
+			{
+				Taint:       []string{routingKeyRes},
+				Config:      cfg,
+				ExpectError: regexMust(`(?s)A routing key with this name already exists.*create_before_destroy` + "`" + `\s+replacement`),
+			},
+			{
+				// Nothing was revoked: the old key is still the one in state,
+				// tainted, so a replacement is still planned.
+				RefreshState:       true,
+				ExpectNonEmptyPlan: true,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPtr(routingKeyRes, "id", &id),
+					resource.TestCheckResourceAttrSet(routingKeyRes, "routing_key"),
+				),
 			},
 		},
 	})

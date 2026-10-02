@@ -53,6 +53,43 @@ func addStaleError(diags *diag.Diagnostics, what string, stateVersion int64, cur
 	diags.AddError(what+" modified outside of Terraform", detail)
 }
 
+// replayWithheldText is what a resource says about the record a refused
+// replay names: what it is, how two declarations come to collide, and how to
+// remove it.
+type replayWithheldText struct {
+	record   string // "Routing key 7 in project 42"
+	distinct string // the fix for a second declaration with the same values
+	retire   string // the fix for a record a failed apply left: "revoke routing key 7 in Flightdeck"
+}
+
+// addReplayWithheldError explains a create refused with
+// idempotency_replay_withheld (or the client's own reading of an older
+// server's secret-less replay of a live record): the create's key names a live
+// record that this create did not make, and whose secret cannot be sent again.
+// It reports whether err was that error.
+func addReplayWithheldError(diags *diag.Diagnostics, at path.Path, summary string, text func(id int64) replayWithheldText, err error) bool {
+	apiErr, ok := client.AsError(err)
+	if !ok || apiErr.Code != client.CodeIdempotencyReplayWithheld {
+		return false
+	}
+	t := text(apiErr.ID)
+	detail := fmt.Sprintf("%s was made by a create identical to this one, and it is still live. Flightdeck returns its "+
+		"secret only to the create that made it, so this resource cannot take it over. Nothing was created or "+
+		"removed.\n\n"+
+		"- %s\n"+
+		"- If it was left behind by an earlier apply that failed, %s, then apply again.\n"+
+		"- If this is a `create_before_destroy` replacement of a resource created less than 24 hours ago, it is "+
+		"the one being replaced. Replace it once without `create_before_destroy`, or wait until a day has passed "+
+		"since it was created.", t.record, t.distinct, t.retire)
+	// The API's own words, when the refusal came from the API rather than
+	// from the client reading an older server's replay.
+	if cause, ok := client.AsError(apiErr.Unwrap()); ok && cause.Message != "" {
+		detail += "\n\nThe API said: " + cause.Message
+	}
+	diags.AddAttributeError(at, summary, detail)
+	return true
+}
+
 // apiMessage returns the server's message from an API error, or the error text.
 func apiMessage(err error) string {
 	if apiErr, ok := client.AsError(err); ok && apiErr.Message != "" {

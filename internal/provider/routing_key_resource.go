@@ -27,8 +27,9 @@ import (
 //
 // The secret follows the ingestion-token pattern exactly: the API returns it
 // once, on create, and never again. Rotation is replacement, because the API
-// has no rotate route — `terraform apply -replace` mints a new key and revokes
-// the old one, in that order.
+// has no rotate route. Terraform's default replacement destroys first, so
+// `terraform apply -replace` revokes the old key and then mints the new one;
+// only a resource with `create_before_destroy` mints first.
 
 var (
 	_ resource.Resource                = &routingKeyResource{}
@@ -92,15 +93,20 @@ func (r *routingKeyResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			"```json\n{\n  \"routing_key\": \"fd_evt_…\",\n  \"event_action\": \"trigger\",\n  \"dedup_key\": \"disk-full-web-1\",\n" +
 			"  \"payload\": { \"summary\": \"Disk nearly full\", \"severity\": \"warning\", \"source\": \"web-1\" }\n}\n```\n\n" +
 			"A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own — each " +
-			"with its own `name`. Names must be distinct within a project, and **nothing enforces that**: the API " +
-			"accepts duplicates, and the provider can only notice the consequence after the fact and warn (see " +
-			"`name`). " +
+			"with its own `name`. Names must be distinct within a project. The API does not check that as such, but " +
+			"for 24 hours after a key's create, a second key declared with the same name is the same create as far as " +
+			"the API is concerned, and fails (see `name`). " +
 			"Receiving events does not imply paging: a key pages only if an escalation policy is attached to it, " +
 			"which is a console operation and read-only here (see `escalation_policy_id`).\n\n" +
 			"The key value is returned by the API **once, on create**, and stored in Terraform state as a sensitive " +
 			"attribute so it can be handed to the monitor. It is never re-read; an imported key has no `routing_key` " +
 			"value. The API has no rotate route, so **rotation is replacement**: " +
-			"`terraform apply -replace=flightdeck_routing_key.monitor` mints a new key and revokes the old one. " +
+			"`terraform apply -replace=flightdeck_routing_key.monitor` revokes the old key and then mints a new one, " +
+			"because Terraform destroys before it creates by default, so the monitor is without a working key until " +
+			"it is given the new one. To mint the new key first, set `create_before_destroy` in the resource's " +
+			"`lifecycle` block. That has one limit: within 24 hours of the old key's create, the replacement sends " +
+			"the same create again while the old key is still live, and Flightdeck refuses it, so either wait out " +
+			"the 24 hours or let that one replacement destroy first. " +
 			"Deleting the resource revokes the key — irreversibly, and the row stays readable as history, so a " +
 			"revoked key is not a free identifier.\n\n" +
 			"Import with `<project_id>/<key_id>`: `terraform import flightdeck_routing_key.monitor 42/7`.",
@@ -120,13 +126,11 @@ func (r *routingKeyResource) Schema(_ context.Context, _ resource.SchemaRequest,
 					"Editable in place. **Give every routing key in a project a distinct name:** a create is made " +
 					"idempotent with a key derived from the request body, and `name` is the only thing in that body, " +
 					"so two keys declared in one project with the same name are one create as far as the API is " +
-					"concerned. The second replays the first, and because a replay never returns the secret the " +
-					"provider retires that row and mints a fresh key — leaving the first declaration pointing at a " +
-					"revoked one until the next apply re-mints it. The provider warns when that happens; it cannot " +
-					"prevent it, because at the point it is detectable a sibling colliding and an earlier attempt of " +
-					"the same resource recovering itself look identical, and the second has to keep working. Reusing " +
-					"a name a key was *renamed away from* is safe: the provider checks the stored name before " +
-					"retiring anything.",
+					"concerned for the 24 hours it remembers a create. While the first key is live, Flightdeck refuses the second create rather than replay it " +
+					"without its secret, and the apply fails naming the key that already exists: give the resource the " +
+					"error is reported on another name. The same error follows an apply that failed after Flightdeck made the key; then " +
+					"revoke the key it names and apply again. Reusing a name a key was *renamed away from* is safe: " +
+					"the renamed key is not the one the create would replay.",
 				Required:   true,
 				Validators: []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
@@ -178,31 +182,29 @@ func (r *routingKeyResource) Create(ctx context.Context, req resource.CreateRequ
 	fields := client.Fields{"name": plan.Name.ValueString()}
 	created, retiredID, err := r.client.CreateRoutingKey(ctx, projectID, fields, client.PayloadKey("routing_key", strconv.FormatInt(projectID, 10), fields))
 	if err != nil {
-		// A retired row is reported on the failure path too. The revoke
-		// happens before the re-mint, so a create that fails after it has
-		// already taken a key away — and an operator staring at a generic
-		// create error is exactly who needs to be told which one.
+		// The client revokes only a key this create made itself and could not
+		// record (its answer was lost, or it could not be read back), so the
+		// revoked key's value was never handed to anyone. Naming it explains a
+		// revoked row nobody asked for.
 		if retiredID != 0 {
-			resp.Diagnostics.AddWarning("A routing key was revoked before this create failed",
-				fmt.Sprintf("Routing key %d was revoked while recovering a replayed create, and the replacement did not "+
-					"complete. That key is gone: anything still presenting it will be rejected. Re-apply to mint a new "+
-					"one, and check whether another resource in project %d was relying on it.", retiredID, projectID))
+			resp.Diagnostics.AddWarning("A routing key this apply had just created was revoked",
+				fmt.Sprintf("Routing key %d in project %d was created by this apply but could not be recorded, so it was "+
+					"revoked. Its value was never handed to anything, so nothing was using it. Re-apply to create the "+
+					"routing key.", retiredID, projectID))
+		}
+		if addReplayWithheldError(&resp.Diagnostics, pathRoot("name"), "A routing key with this name already exists",
+			func(id int64) replayWithheldText {
+				return replayWithheldText{
+					record: fmt.Sprintf("Routing key %d in project %d", id, projectID),
+					distinct: fmt.Sprintf("If another flightdeck_routing_key in this project is named %q, it holds that key: give this "+
+						"resource a different name.", plan.Name.ValueString()),
+					retire: fmt.Sprintf("revoke routing key %d in Flightdeck", id),
+				}
+			}, err) {
+			return
 		}
 		addAPIError(&resp.Diagnostics, "Error creating Flightdeck routing key", err)
 		return
-	}
-	if retiredID != 0 {
-		// Either a previous attempt at this same declaration is recovering
-		// itself, which is fine, or another resource in this project declared
-		// the same name and has just had its live key revoked, which is not.
-		// Nothing below this layer can tell those apart, so say so plainly.
-		resp.Diagnostics.AddWarning("An existing routing key was retired to create this one",
-			fmt.Sprintf("Creating %q replayed an earlier create of an identical declaration, so routing key %d was revoked "+
-				"and a new key minted. A replayed create never returns its secret, so the old key could not be kept.\n\n"+
-				"If an earlier attempt at this same resource failed part-way, this is that attempt being cleaned up and "+
-				"there is nothing to do. If another flightdeck_routing_key in project %d is declared with the name %q, "+
-				"that resource is now holding a revoked key: give each routing key a distinct name and re-apply to mint "+
-				"it a working one.", plan.Name.ValueString(), retiredID, projectID, plan.Name.ValueString()))
 	}
 	// The client guarantees the key carries its secret or fails.
 	state := routingKeyToModel(created, types.StringNull())
@@ -315,6 +317,6 @@ func (r *routingKeyResource) ImportState(ctx context.Context, req resource.Impor
 	resp.Diagnostics.AddWarning("Imported routing key has no key value",
 		"The API returns a routing key's value only when it is created, so `routing_key` is null for an imported key. "+
 			"Replace the resource (`terraform apply -replace`) if Terraform needs to hand the value to a monitor; "+
-			"that mints a new key and revokes this one.")
+			"that revokes this key and mints a new one (or the other way round, with `create_before_destroy`).")
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }

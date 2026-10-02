@@ -74,11 +74,18 @@ func (r *ingestionTokenResource) Schema(_ context.Context, _ resource.SchemaRequ
 			"to report exceptions to the project's error tracking.\n\n" +
 			"The token value is returned by the API **once, on create**, and stored in Terraform state as a sensitive " +
 			"attribute so it can be handed to the application (for example through a secret manager). It is never " +
-			"re-read; an imported token has no `token` value. If the API replays an earlier create (the same " +
-			"declaration re-created within 24 hours) the replayed row comes back without its secret; the provider " +
-			"revokes that row and mints a fresh token rather than recording a credential it cannot know. Tokens " +
-			"cannot be edited: changing any attribute replaces the token (the old one is revoked). Deleting the " +
-			"resource revokes the token; the row stays listed as history.\n\n" +
+			"re-read; an imported token has no `token` value. Tokens cannot be edited: changing any attribute " +
+			"replaces the token, and by default Terraform revokes the old one before it mints the new one.\n\n" +
+			"A create is made idempotent with a key derived from its `name`, `environment` and `scope`, so two tokens " +
+			"declared in one project with all three the same are one create as far as the API is concerned, for the 24 " +
+			"hours it remembers a create. While " +
+			"the first token is live, Flightdeck refuses the second create rather than replay it without its secret, " +
+			"and the apply fails naming the token that already exists: change one of the three on the resource the error " +
+			"is reported on. The " +
+			"same error follows an apply that failed after Flightdeck made the token; then revoke the token it names " +
+			"and apply again. A replacement that destroys first is not affected (the old token is revoked by then), " +
+			"but one under `create_before_destroy` with the same values, within 24 hours of the old token's create, " +
+			"is refused the same way. Deleting the resource revokes the token; the row stays listed as history.\n\n" +
 			"Import with `<project_id>/<token_id>`: `terraform import flightdeck_ingestion_token.prod 42/31`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
@@ -147,6 +154,18 @@ func (r *ingestionTokenResource) Create(ctx context.Context, req resource.Create
 	}
 	created, err := r.client.CreateIngestionToken(ctx, projectID, fields, client.PayloadKey("ingestion_token", strconv.FormatInt(projectID, 10), fields))
 	if err != nil {
+		if addReplayWithheldError(&resp.Diagnostics, pathRoot("name"), "An ingestion token with these values already exists",
+			func(id int64) replayWithheldText {
+				return replayWithheldText{
+					record: fmt.Sprintf("Ingestion token %d in project %d", id, projectID),
+					distinct: fmt.Sprintf("If another flightdeck_ingestion_token in this project has the name %q, environment %q "+
+						"and scope %q, it holds that token: change one of the three on this resource.", plan.Name.ValueString(),
+						plan.Environment.ValueString(), plan.Scope.ValueString()),
+					retire: fmt.Sprintf("revoke ingestion token %d in Flightdeck", id),
+				}
+			}, err) {
+			return
+		}
 		addAPIError(&resp.Diagnostics, "Error creating Flightdeck ingestion token", err)
 		return
 	}

@@ -133,11 +133,12 @@ func TestCreateRoutingKey_freshCreateRetiresNothing(t *testing.T) {
 }
 
 // Two declarations sending an identical body send an identical
-// Idempotency-Key, so the second is served as a replay. Recovering from that
-// retires the FIRST declaration's live row — which is why the caller has to be
-// told, and is the case `name` being Required makes accidental rather than
-// impossible.
-func TestCreateRoutingKey_replayReportsTheRetiredRow(t *testing.T) {
+// Idempotency-Key, so the second is served as a replay of the first's live
+// row. That row is the first declaration's working credential, so the second
+// create fails and names it rather than revoking it. This fake is an older
+// Flightdeck that replays a live row without its secret; a current one refuses
+// the replay with a 409, and the client reads both the same way.
+func TestCreateRoutingKey_identicalSiblingIsRefusedAndNothingIsRevoked(t *testing.T) {
 	s, c := newRoutingKeyServer(t)
 	ctx := context.Background()
 	fields := Fields{"name": "Same"}
@@ -152,26 +153,23 @@ func TestCreateRoutingKey_replayReportsTheRetiredRow(t *testing.T) {
 	}
 
 	// A second resource, same project, same name: byte-identical body.
-	second, retiredID, err := c.CreateRoutingKey(ctx, 1, fields, stable)
-	if err != nil {
-		t.Fatal(err)
+	_, retiredID, err := c.CreateRoutingKey(ctx, 1, fields, stable)
+	if !HasCode(err, CodeIdempotencyReplayWithheld) {
+		t.Fatalf("err = %v, want %s", err, CodeIdempotencyReplayWithheld)
 	}
-	if retiredID != first.ID {
-		t.Fatalf("retiredID = %d, want the first row %d — the caller cannot warn about what it is not told", retiredID, first.ID)
+	if apiErr, _ := AsError(err); apiErr.ID != first.ID {
+		t.Fatalf("the error names %d, want the first row %d", apiErr.ID, first.ID)
 	}
-	if second.ID == first.ID || second.Key == "" {
-		t.Fatalf("the replay was returned instead of a fresh key: %+v", second)
+	if retiredID != 0 || len(s.revoked) != 0 {
+		t.Fatalf("retiredID=%d revoked=%v: the first row is live and must be left alone", retiredID, s.revoked)
 	}
-	if len(s.revoked) != 1 || s.revoked[0] != first.ID {
-		t.Fatalf("revoked = %v, want exactly the first row %d", s.revoked, first.ID)
-	}
-	if s.posts != 3 {
-		t.Fatalf("posts = %d, want 3 (original, replay, fresh key)", s.posts)
+	if s.posts != 2 {
+		t.Fatalf("posts = %d, want 2 (original, replay) and no fresh key", s.posts)
 	}
 }
 
 // The same payload really does produce the same key: this is the mechanism the
-// collision rests on, and `name` is the only thing in the body that can vary.
+// collision above rests on, and `name` is the only thing in the body that can vary.
 func TestPayloadKey_sameBodySameKeyDifferentNameDiffers(t *testing.T) {
 	same := PayloadKey("routing_key", "1", Fields{"name": "Same"})
 	again := PayloadKey("routing_key", "1", Fields{"name": "Same"})

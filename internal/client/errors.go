@@ -24,7 +24,14 @@ const (
 	// 409: the same Idempotency-Key was already used for a create with different
 	// attributes; retrying does not help.
 	CodeIdempotencyKeyReused = "idempotency_key_reused"
-	CodeRateLimited          = "rate_limited"
+	// 409: the same Idempotency-Key already created a record whose secret is
+	// returned only once (a routing key, an ingestion token or a webhook), and
+	// that record is still live, so the API will not replay the create without
+	// its secret. The body's `id` names the record (Error.ID). Retrying as-is
+	// gets the same answer until the record is revoked or deleted, or the body
+	// changes.
+	CodeIdempotencyReplayWithheld = "idempotency_replay_withheld"
+	CodeRateLimited               = "rate_limited"
 	// State delete guards (422), each needing different handling.
 	CodeStateInUse     = "state_in_use"
 	CodeStateIsDefault = "state_is_default"
@@ -73,6 +80,19 @@ type Error struct {
 	// update's 409 is a lost optimistic-locking race.
 	Idempotent     bool
 	Preconditioned bool
+
+	// ID is the record id a coded error body names, or 0 when it names none.
+	// CodeIdempotencyReplayWithheld carries the id of the live record the
+	// replayed create made.
+	ID int64
+
+	// EarlierSendUnanswered records that an earlier attempt at this same
+	// request may have reached the server but got no usable response back (a
+	// timeout, a dropped connection, a gateway 5xx) before the attempt that
+	// produced this error. It is how a create tells "my own lost first attempt
+	// made this" from "something else made this": only the first can be true
+	// when the request was answered every time it was sent.
+	EarlierSendUnanswered bool
 }
 
 func (e *Error) Error() string {
@@ -182,10 +202,13 @@ func asError(err error) (*Error, bool) {
 // AsError returns the *Error in err's chain, if any.
 func AsError(err error) (*Error, bool) { return asError(err) }
 
-// errorEnvelope is the API's uniform non-2xx body.
+// errorEnvelope is the API's uniform non-2xx body. `id` appears on the few
+// coded errors that name a record. It is kept raw so a body whose id is not a
+// number still parses for its message.
 type errorEnvelope struct {
-	Error string `json:"error"`
-	Code  string `json:"code"`
+	Error string          `json:"error"`
+	Code  string          `json:"code"`
+	ID    json.RawMessage `json:"id"`
 }
 
 func newError(method, path string, resp *http.Response, body []byte) *Error {
@@ -194,6 +217,9 @@ func newError(method, path string, resp *http.Response, body []byte) *Error {
 	if json.Unmarshal(body, &env) == nil && env.Error != "" {
 		e.Message = env.Error
 		e.Code = env.Code
+		if id, err := strconv.ParseInt(strings.TrimSpace(string(env.ID)), 10, 64); err == nil && id > 0 {
+			e.ID = id
+		}
 	} else if msg := strings.TrimSpace(string(body)); msg != "" {
 		if len(msg) > maxErrorBody {
 			cut := maxErrorBody

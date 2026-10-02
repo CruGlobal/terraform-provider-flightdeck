@@ -276,3 +276,74 @@ func TestWebhook_replayedCreateIsRetiredAndCreatedAfresh(t *testing.T) {
 		t.Fatalf("expected original + replay + fresh-key POSTs, got %d", len(posts))
 	}
 }
+
+// A create whose response was lost is recovered: the webhook it made is
+// deleted (nobody holds its secret) and another is created.
+func TestWebhook_lostCreateResponseIsRecovered(t *testing.T) {
+	env := newTestEnv(t, "webhook")
+	env.requireFake(t)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				PreConfig: func() { env.fake.DropNextResponse("POST", "/webhooks") },
+				Config: webhookConfig(env, `
+  url    = "https://ci.example.com/hooks/lost"
+  events = ["project.updated"]`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrSet(webhookRes, "secret"),
+					func(s *terraform.State) error {
+						lost := lostCreateID(t, env, "/webhooks")
+						if s.RootModule().Resources[webhookRes].Primary.ID == fmt.Sprint(lost) {
+							return fmt.Errorf("state recorded the webhook whose response was lost (%d)", lost)
+						}
+						if env.fake.Webhook(lost) != nil {
+							return fmt.Errorf("the webhook whose response was lost (%d) should be deleted", lost)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+// An identical second declaration is one create to the API, refused while the
+// first webhook exists, and the first is left alone.
+func TestWebhook_duplicateDeclarationIsRefused(t *testing.T) {
+	env := newTestEnv(t, "webhook")
+	cfg := webhookConfig(env, `
+  url    = "https://ci.example.com/hooks/twin"
+  events = ["project.updated"]`)
+	twin := `
+resource "flightdeck_webhook" "twin" {
+  url    = "https://ci.example.com/hooks/twin"
+  events = ["project.updated"]
+}
+`
+	var id, secret string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: cfg,
+				Check:  resource.ComposeAggregateTestCheckFunc(captureAttr(webhookRes, "id", &id), captureAttr(webhookRes, "secret", &secret)),
+			},
+			{
+				Config:      cfg + twin,
+				ExpectError: regexMust(`(?s)An identical webhook already exists.*would only\s+duplicate\s+it`),
+			},
+			{
+				Config: cfg,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPtr(webhookRes, "id", &id),
+					resource.TestCheckResourceAttrPtr(webhookRes, "secret", &secret),
+					func(*terraform.State) error {
+						if env.fake != nil && env.fake.Webhook(mustInt(id)) == nil {
+							return fmt.Errorf("the first webhook %s was deleted", id)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}

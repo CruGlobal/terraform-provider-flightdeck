@@ -197,8 +197,8 @@ resource "flightdeck_project" "parent" {
 			{
 				// Recreate the identical declaration inside the window: the API
 				// replays the revoked row WITHOUT its secret. The provider must not
-				// record that; it revokes the replay (a no-op here) and mints a fresh
-				// token under a new key, whose secret it does know.
+				// record that; the row is no longer live, so it revokes nothing and
+				// mints a fresh token under a new key, whose secret it does know.
 				Config: tokenConfig(env, identifier, `  name = "api"`),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestMatchResourceAttr(tokenRes, "token", regexMust(`^fd_post_`)),
@@ -252,4 +252,74 @@ func TestIngestionToken_revokeSendsIfMatchAndAnswers200(t *testing.T) {
 	if len(deletes) != 1 || deletes[0].Header.Get("If-Match") == "" || deletes[0].Status != 200 {
 		t.Fatalf("revoke DELETE = %+v", deletes)
 	}
+}
+
+// Two tokens with the same name, environment and scope are one create to the
+// API. While the first is live the second is refused, and nothing is revoked.
+func TestIngestionToken_duplicateDeclarationIsRefused(t *testing.T) {
+	env := newTestEnv(t, "ingestion_token")
+	identifier := randIdentifier()
+	second := `
+resource "flightdeck_ingestion_token" "twin" {
+  project_id = flightdeck_project.parent.id
+  name       = "api"
+}
+`
+	var id, token string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: tokenConfig(env, identifier, `  name = "api"`),
+				Check:  resource.ComposeAggregateTestCheckFunc(captureAttr(tokenRes, "id", &id), captureAttr(tokenRes, "token", &token)),
+			},
+			{
+				Config:      tokenConfig(env, identifier, `  name = "api"`) + second,
+				ExpectError: regexMust(`(?s)An ingestion token with these values already exists.*it holds\s+that\s+token`),
+			},
+			{
+				// The first token is untouched.
+				Config: tokenConfig(env, identifier, `  name = "api"`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPtr(tokenRes, "id", &id),
+					resource.TestCheckResourceAttrPtr(tokenRes, "token", &token),
+					func(*terraform.State) error {
+						if env.fake == nil {
+							return nil
+						}
+						if row := env.fake.IngestionToken(mustInt(id)); row == nil || row.RevokedAt != nil {
+							return fmt.Errorf("the first token %s is not live: %+v", id, row)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+// A create whose response was lost is recovered: the token it made is revoked
+// (nobody holds its value) and another is minted.
+func TestIngestionToken_lostCreateResponseIsRecovered(t *testing.T) {
+	env := newTestEnv(t, "ingestion_token")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				PreConfig: func() { env.fake.DropNextResponse("POST", "/ingestion-tokens") },
+				Config:    tokenConfig(env, identifier, `  name = "lost"`),
+				Check: func(s *terraform.State) error {
+					lost := lostCreateID(t, env, "/ingestion-tokens")
+					rs := s.RootModule().Resources[tokenRes].Primary
+					if rs.ID == fmt.Sprint(lost) || !strings.HasPrefix(rs.Attributes["token"], "fd_post_") {
+						return fmt.Errorf("state = %s (%q), want a fresh token, not the lost %d", rs.ID, rs.Attributes["last_four"], lost)
+					}
+					if row := env.fake.IngestionToken(lost); row == nil || row.RevokedAt == nil {
+						return fmt.Errorf("the token whose response was lost (%d) should be revoked: %+v", lost, row)
+					}
+					return nil
+				},
+			},
+		},
+	})
 }

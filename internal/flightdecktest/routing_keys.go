@@ -3,6 +3,7 @@ package flightdecktest
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -174,7 +175,7 @@ func (s *Server) createRoutingKey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.withIdempotencyRedacted(w, r, "routing_key", func() (int, any, any) {
+	s.withIdempotencyRedacted(w, r, "routing_key", s.routingKeyWithheld(pid), func() (int, any, any) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.liveProject(pid) == nil {
@@ -201,6 +202,25 @@ func (s *Server) createRoutingKey(w http.ResponseWriter, r *http.Request) {
 		redacted["message"] = "Replay of a previously-used Idempotency-Key. The routing key is returned only by the original create and is never stored, so it cannot be replayed."
 		return http.StatusCreated, serializeRoutingKey(k, true), redacted
 	})
+}
+
+// routingKeyWithheld is the API's replay rule for routing keys: refused while
+// the key the create made is live AND still carries the name the cached
+// response recorded. A key renamed since replays as before.
+func (s *Server) routingKeyWithheld(projectID int64) *withheldSecret {
+	return &withheldSecret{
+		live: func(replayed map[string]any) bool {
+			id, _ := asInt64(replayed["id"])
+			k := s.liveRoutingKey(projectID, id)
+			return k != nil && k.RevokedAt == nil && k.Name == asString(replayed["name"])
+		},
+		message: func(id int64) string {
+			return fmt.Sprintf("This create was already done, and the key it made is still live, so its secret "+
+				"can't be sent again. If this is a retry of your own create, revoke key %d and "+
+				"create again; if another key in this project needs the same name, give it a "+
+				"different name.", id)
+		},
+	}
 }
 
 // Update writes name only. escalation_policy_id is settable at the API but the

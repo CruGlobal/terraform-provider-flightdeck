@@ -3,6 +3,7 @@ package flightdecktest
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -181,6 +182,23 @@ func (s *Server) applyWebhookAttrs(h *Webhook, attrs map[string]any) (int, strin
 	return 0, "", ""
 }
 
+// webhookWithheld is the API's replay rule for webhooks: refused while the
+// webhook the create made still exists, paused or edited.
+func (s *Server) webhookWithheld() *withheldSecret {
+	return &withheldSecret{
+		live: func(replayed map[string]any) bool {
+			id, _ := asInt64(replayed["id"])
+			return s.webhooks().byID[id] != nil
+		},
+		message: func(id int64) string {
+			return fmt.Sprintf("This create was already done, and the webhook it made still exists, so its secret "+
+				"can't be sent again. If this is a retry of your own create, delete webhook %d "+
+				"and create again; if you meant to make a second webhook, it would duplicate this one, "+
+				"so change its url or events.", id)
+		},
+	}
+}
+
 func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 	attrs, ok := decodeBody(w, r, "webhook")
 	if !ok {
@@ -192,7 +210,7 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Unlock()
-	s.withIdempotencyRedacted(w, r, "webhook", func() (int, any, any) {
+	s.withIdempotencyRedacted(w, r, "webhook", s.webhookWithheld(), func() (int, any, any) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		h := &Webhook{ID: s.id(), Active: true}

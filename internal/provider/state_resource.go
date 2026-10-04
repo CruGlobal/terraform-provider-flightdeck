@@ -108,9 +108,12 @@ func (r *stateResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "Display name; unique within the project.",
+				MarkdownDescription: "Display name; unique within the project, at most 255 characters.",
 				Required:            true,
-				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
+				Validators: []validator.String{
+					stringvalidator.LengthAtLeast(1),
+					charLengthAtMost(client.NameMaxLength),
+				},
 			},
 			"group": schema.StringAttribute{
 				MarkdownDescription: "Workflow group: one of `" + strings.Join(client.StateGroups, "`, `") + "`.",

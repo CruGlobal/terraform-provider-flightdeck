@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // defaultLabels are the starter labels a new project is seeded with.
@@ -120,8 +121,20 @@ func (s *Server) showLabel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
+// nameTooLong refuses a label or state name longer than 255 characters, as
+// stored (a name is not stripped), before anything is saved.
+func nameTooLong(v any) (int, string, string) {
+	if str, isStr := v.(string); isStr && utf8.RuneCountInString(str) > 255 {
+		return http.StatusUnprocessableEntity, "invalid_attribute", "name must be 255 characters or fewer"
+	}
+	return 0, "", ""
+}
+
 func (s *Server) applyLabelAttrs(l *Label, attrs map[string]any) (int, string, string) {
 	if v, ok := attrs["name"]; ok {
+		if status, code, msg := nameTooLong(v); status != 0 {
+			return status, code, msg
+		}
 		l.Name = asString(v)
 	}
 	if v, ok := attrs["color"]; ok && v != nil {

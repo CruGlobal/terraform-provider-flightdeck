@@ -81,9 +81,12 @@ func (r *labelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "Display name; unique within the project.",
+				MarkdownDescription: "Display name; unique within the project, at most 255 characters.",
 				Required:            true,
-				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
+				Validators: []validator.String{
+					stringvalidator.LengthAtLeast(1),
+					charLengthAtMost(client.NameMaxLength),
+				},
 			},
 			"color": schema.StringAttribute{
 				MarkdownDescription: "Hex color (`#rgb` or `#rrggbb`, compared case-insensitively). Defaults to the server's default.",

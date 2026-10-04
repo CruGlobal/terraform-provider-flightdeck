@@ -53,7 +53,7 @@ resource "flightdeck_state" "triage" {
 ### Required
 
 - `group` (String) Workflow group: one of `backlog`, `unstarted`, `started`, `completed`, `cancelled`.
-- `name` (String) Display name; unique within the project.
+- `name` (String) Display name; unique within the project, at most 255 characters.
 - `project_id` (Number) Id of the project the state belongs to. Changing it replaces the state.
 
 ### Optional

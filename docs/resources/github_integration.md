@@ -80,7 +80,7 @@ resource "github_repository_webhook" "flightdeck" {
 ### Required
 
 - `project_id` (Number) Id of the project. Changing it replaces the integration.
-- `repo_full_name` (String) Repository as `owner/repo`. Changing it replaces the integration.
+- `repo_full_name` (String) Repository as `owner/repo`, at most 140 characters (GitHub allows an owner of up to 39 and a repository name of up to 100). Changing it replaces the integration.
 
 ### Optional
 

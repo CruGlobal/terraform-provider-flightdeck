@@ -10,7 +10,8 @@
 //   - `Idempotency-Key` on creates and `If-Match` on updates;
 //   - client-side backoff on 429 (honouring Retry-After), on the 409
 //     "idempotency key in flight" replay window, and on transient 5xx/network
-//     failures — but only for requests that are safe to replay.
+//     failures, an attempt that timed out before its answer arrived included,
+//     but only for requests that are safe to replay.
 package client
 
 import (
@@ -442,7 +443,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, opt
 			unanswered = true
 		}
 		if err != nil {
-			if !req.replayable || !isTransient(err) || attempt >= c.maxRetries {
+			// Whether the caller gave up is for the caller's own context to
+			// say, not the error: net/http reports its http.Client.Timeout as
+			// a deadline too, and that is one attempt timing out, which is
+			// worth another on a request that is safe to send again.
+			if ctx.Err() != nil || !req.replayable || !isTransient(err) || attempt >= c.maxRetries {
 				return &Error{Method: method, Path: path, Message: err.Error(), Err: err,
 					Idempotent: req.idempotencyKey != "", Preconditioned: req.ifMatch != nil,
 					EarlierSendUnanswered: unanswered}
@@ -451,7 +456,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, opt
 				unanswered = true
 			}
 			if werr := c.sleep(ctx, c.backoff(attempt, 0)); werr != nil {
-				return werr
+				return &Error{Method: method, Path: path, Message: werr.Error(), Err: werr,
+					Idempotent: req.idempotencyKey != "", Preconditioned: req.ifMatch != nil,
+					EarlierSendUnanswered: unanswered}
 			}
 			continue
 		}
@@ -506,7 +513,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, opt
 			unanswered = true
 		}
 		if werr := c.sleep(ctx, c.backoff(attempt, apiErr.RetryAfter)); werr != nil {
-			return werr
+			return &Error{Method: method, Path: path, Message: werr.Error(), Err: werr,
+				Idempotent: req.idempotencyKey != "", Preconditioned: req.ifMatch != nil,
+				EarlierSendUnanswered: unanswered}
 		}
 	}
 }
@@ -601,11 +610,21 @@ func (t *attemptTrace) mayHaveReachedServer(err error) bool {
 }
 
 // mayHaveBeenSent reads a transport failure for whether it could have come
-// after the server received the request: a timeout waiting for the answer, a
-// reset or closed connection, a torn-down response. A failure to connect at
-// all (a refused connection, a DNS failure, any error while dialling, a TLS
-// handshake that timed out) means the request never left.
+// after the server received the request: a reset or closed connection, a
+// torn-down response. A failure to connect at all (a refused connection, a
+// DNS failure, any error while dialling, a TLS handshake that timed out)
+// means the request never left.
+//
+// A timeout counts as never sent here. net/http reports its http.Client
+// Timeout as one flattened error that no longer says whether the request was
+// out, so from the error alone a timeout while dialling looks the same as one
+// waiting for the answer, and the doubtful case must count as never sent. A
+// traced attempt (the default transport) does not come here: the trace says
+// whether the request was written.
 func mayHaveBeenSent(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	if errors.Is(err, syscall.ECONNREFUSED) {
 		return false
 	}
@@ -628,12 +647,18 @@ func isGatewayStatus(status int) bool {
 }
 
 // isTransient reports whether a transport-level error is worth retrying: a
-// timeout, a refused or reset connection, or a torn-down response. Context
-// cancellation, TLS failures, DNS failures that are not timeouts, and malformed
-// requests are permanent and are never retried.
+// timeout (including the http.Client's own Timeout, which net/http reports as
+// a context deadline), a refused or reset connection, or a torn-down response.
+// Cancellation, TLS failures, DNS failures that are not timeouts, and malformed
+// requests are permanent and are never retried. A deadline that is the
+// caller's own is caught before this is asked, by checking the caller's
+// context.
 func isTransient(err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) {
 		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
 	}
 	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
 		return true

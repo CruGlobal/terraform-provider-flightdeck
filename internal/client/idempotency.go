@@ -296,7 +296,9 @@ type SecretRecord struct {
 // exactly that request. The first resource's next refresh then finds its
 // record gone and the next apply creates it again, so the damage lasts until
 // that apply rather than hiding, but whatever used the old secret is refused
-// in between.
+// in between. A send that timed out after it was written counts as lost in
+// the same way, even when something between the client and Flightdeck (a
+// proxy, say) dropped it before Flightdeck saw it.
 //
 // A fresh create that cannot be read back is retired too, so a live
 // credential is never left unrecorded, and a second response without the

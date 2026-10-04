@@ -44,7 +44,8 @@ const (
 	// An app belongs to at most one project, and the message names the holder.
 	CodeAppTaken = "app_taken"
 	// GitHub integrations: the GitHub App cannot reach the repository (no row
-	// created), and one enabled integration per repository per workspace.
+	// created), and a repository can be linked to one project across the
+	// whole Flightdeck install, compared without regard to letter case.
 	CodeRepoUnreachable   = "repo_unreachable"
 	CodeRepoAlreadyLinked = "repo_already_linked"
 	// PagerDuty: one credential per project, so a second POST is refused (422)
@@ -135,8 +136,10 @@ func (e *Error) Retryable() bool {
 }
 
 // IsNotFound reports a 404. The API also answers 404 for ids that belong to
-// another tenant and for a project mid-teardown, so a 404 always means "gone
-// from this token's point of view" and never "try again".
+// another tenant, for a project mid-teardown, and for anything in a project
+// the token cannot see (never a 403, which would say the project exists), so
+// a 404 always means "gone from this token's point of view" and never "try
+// again".
 func IsNotFound(err error) bool { return hasStatus(err, http.StatusNotFound) }
 
 // IsStale reports a 409 caused by a lost optimistic-locking race (If-Match /

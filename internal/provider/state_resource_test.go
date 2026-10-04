@@ -203,7 +203,7 @@ func TestState_validation(t *testing.T) {
 				Config: stateConfig(env, identifier, `
   name  = "Backlog"
   group = "backlog"`),
-				ExpectError: regexMust(`(?s)Error creating Flightdeck state.*HTTP 422 \(validation_failed\).*Name has already\s+been taken`),
+				ExpectError: regexMust(`(?s)Error creating Flightdeck state.*HTTP\s+422\s+\(validation_failed\).*Name\s+has\s+already\s+been\s+taken`),
 			},
 		},
 	})

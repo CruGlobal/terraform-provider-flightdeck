@@ -690,6 +690,9 @@ func agentWorkKeepPlan(planned, fresh types.Object, diags *diag.Diagnostics) typ
 
 // addAgentWorkWriteError explains a refused read or write of the settings.
 func addAgentWorkWriteError(ctx context.Context, c *client.Client, projectID, lockVersion int64, err error, diags *diag.Diagnostics) {
+	if addIfProjectGone(ctx, c, projectID, "", err, diags) {
+		return
+	}
 	at := path.Root("agent_work")
 	switch {
 	case client.IsNotFound(err):

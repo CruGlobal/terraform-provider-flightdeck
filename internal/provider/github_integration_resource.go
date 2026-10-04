@@ -78,7 +78,8 @@ func (r *githubIntegrationResource) Schema(_ context.Context, _ resource.SchemaR
 			"- **Caller-managed** (`secret` supplied): Flightdeck stores the secret and touches nothing on GitHub; you " +
 			"declare the matching repository webhook yourself (for example a `github_repository_webhook` pointing at " +
 			"Flightdeck's GitHub webhook endpoint with the same secret). `webhook_registered` is `false`.\n\n" +
-			"A repository can be linked once across the workspace, enabled or not (`repo_already_linked`), and a " +
+			"A repository can be linked to one project across the whole Flightdeck install, enabled or not, in any " +
+			"letter case (`repo_already_linked`), and a " +
 			"project can have one enabled integration at a time. The secret is write-only: sent on create only, " +
 			"never read back, and state holds only the value you configured; it must be at least 16 characters " +
 			"(a blank value counts as omitted). Changing `repo_full_name` or `secret` replaces the integration " +
@@ -180,7 +181,17 @@ func (r *githubIntegrationResource) Create(ctx context.Context, req resource.Cre
 			resp.Diagnostics.AddAttributeError(pathRoot("repo_full_name"), "Flightdeck's GitHub App cannot reach the repository",
 				apiMessage(err)+"\n\nInstall the App on the repository, or supply `secret` and register the webhook yourself.")
 		case client.HasCode(err, client.CodeRepoAlreadyLinked):
-			resp.Diagnostics.AddAttributeError(pathRoot("repo_full_name"), "Repository already linked", apiMessage(err))
+			resp.Diagnostics.AddAttributeError(pathRoot("repo_full_name"), "Repository already linked",
+				apiMessage(err)+"\n\nA repository can be linked to one project across the whole Flightdeck install, "+
+					"and names are compared without regard to letter case, so this includes the same repository spelled "+
+					"differently and one another request linked at the same moment. Nothing was created.")
+		case client.HasCode(err, client.CodeValidationFailed):
+			// Usually the project already has an enabled integration, perhaps
+			// one linked a moment ago; the API's message says which rule.
+			resp.Diagnostics.AddAttributeError(pathRoot("project_id"), "Cannot link a repository to this project",
+				apiMessage(err)+"\n\nNothing was created. This usually means the project already has an enabled GitHub "+
+					"integration: a project can have one, and Flightdeck checks again when two links are made at the same "+
+					"moment. If so, disable or delete the project's other integration first, or import it to manage it here.")
 		case client.IsForbidden(err):
 			resp.Diagnostics.AddError("Linking a GitHub repository requires a workspace admin",
 				"Only a workspace owner or admin may manage a project's GitHub integration. "+apiMessage(err))

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -165,8 +166,11 @@ func (r *errorAlertRuleResource) Schema(_ context.Context, _ resource.SchemaRequ
 						Validators: []validator.String{stringvalidator.LengthAtLeast(1)},
 					},
 					"count": schema.Int64Attribute{
-						MarkdownDescription: "Occurrence count for the `occurrence_threshold` trigger.",
-						Optional:            true,
+						MarkdownDescription: "Occurrence count for the `occurrence_threshold` trigger, at least 1. Required " +
+							"for that trigger; accepted but inert for the others. A rule stored before Flightdeck required a " +
+							"count may read back 0 (it alerts as if it were 1); set it to 1 or more to manage it here.",
+						Optional:   true,
+						Validators: []validator.Int64{int64validator.AtLeast(1)},
 					},
 					"window_minutes": schema.Int64Attribute{
 						MarkdownDescription: "Window in minutes for the `occurrence_threshold` trigger.",
@@ -225,7 +229,24 @@ func (r *errorAlertRuleResource) Schema(_ context.Context, _ resource.SchemaRequ
 func (r *errorAlertRuleResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var cfg errorAlertRuleModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
-	if resp.Diagnostics.HasError() || cfg.Action.IsNull() || cfg.Action.IsUnknown() {
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	// The threshold trigger counts occurrences, so it needs something to count.
+	// The API refuses such a rule without a count (or with 0) when it is
+	// created, its count changes, or it switches to this trigger.
+	if cfg.Trigger.ValueString() == "occurrence_threshold" && !cfg.Condition.IsUnknown() {
+		var cond alertConditionModel
+		if !cfg.Condition.IsNull() {
+			resp.Diagnostics.Append(cfg.Condition.As(ctx, &cond, objectAsOptions)...)
+		}
+		if cond.Count.IsNull() && !cond.Count.IsUnknown() {
+			resp.Diagnostics.AddAttributeError(path.Root("condition").AtName("count"), "count required for occurrence_threshold",
+				"The `occurrence_threshold` trigger fires when an error happens `condition.count` times within "+
+					"`condition.window_minutes`, so `condition.count` must be set (at least 1).")
+		}
+	}
+	if cfg.Action.IsNull() || cfg.Action.IsUnknown() {
 		return
 	}
 	var action alertActionModel

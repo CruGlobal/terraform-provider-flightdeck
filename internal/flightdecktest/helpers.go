@@ -53,6 +53,11 @@ func decodeBody(w http.ResponseWriter, r *http.Request, root string) (map[string
 			writeError(w, http.StatusBadRequest, "bad_request", "malformed JSON body")
 			return nil, false
 		}
+		if hasLongNumber(envelope) {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				"Request body holds a number longer than 64 characters")
+			return nil, false
+		}
 	}
 	inner, ok := envelope[root].(map[string]any)
 	if !ok {
@@ -60,6 +65,32 @@ func decodeBody(w http.ResponseWriter, r *http.Request, root string) (map[string
 		return nil, false
 	}
 	return inner, true
+}
+
+// maxNumberLength is the longest JSON number the API reads. A longer one is
+// refused before the body is parsed at all.
+const maxNumberLength = 64
+
+// hasLongNumber reports whether a decoded body (numbers kept as json.Number)
+// holds a number longer than maxNumberLength anywhere.
+func hasLongNumber(v any) bool {
+	switch t := v.(type) {
+	case json.Number:
+		return len(t) > maxNumberLength
+	case map[string]any:
+		for _, inner := range t {
+			if hasLongNumber(inner) {
+				return true
+			}
+		}
+	case []any:
+		for _, inner := range t {
+			if hasLongNumber(inner) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pathID parses a numeric path segment; a non-numeric id is a 404, as in the API.

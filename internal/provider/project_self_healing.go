@@ -559,6 +559,9 @@ func writeSelfHealing(ctx context.Context, c *client.Client, projectID int64, id
 		if client.IsValidation(err) && addUnsupportedSettingError(ctx, c, projectID, settings, err, diags) {
 			return types.ObjectNull(selfHealingAttrTypes), lockVersion
 		}
+		if addIfProjectGone(ctx, c, projectID, identifier, err, diags) {
+			return types.ObjectNull(selfHealingAttrTypes), lockVersion
+		}
 		switch {
 		case client.IsNotFound(err):
 			diags.AddAttributeError(path.Root("self_healing"), "Self-healing configuration is not available on this Flightdeck",

@@ -91,11 +91,9 @@ func (c *Client) UpdateProject(ctx context.Context, id int64, fields Fields, loc
 
 // DeleteProject asks the API to delete a project. The API soft-marks the
 // project and tears it down asynchronously (202 Accepted); from that moment
-// it is unreachable, so an already-gone 404 is also success.
+// it is unreachable, so an already-gone 404 is also success, and of two
+// deletes racing each other one gets the 202 and the other that 404. A delete
+// that loses a race to a write is sent once more (see deleteGone).
 func (c *Client) DeleteProject(ctx context.Context, id int64) error {
-	err := c.Delete(ctx, projectPath(id), nil)
-	if err != nil && !IsNotFound(err) {
-		return err
-	}
-	return nil
+	return c.deleteGone(ctx, projectPath(id))
 }

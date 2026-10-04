@@ -28,6 +28,14 @@ func addAPIError(diags *diag.Diagnostics, summary string, err error) {
 		detail += "\n\nThe Flightdeck token was rejected. Check that it is a valid, unexpired personal access token and that its user is still a member of the workspace."
 	case client.IsForbidden(err):
 		detail += "\n\nThe token's user lacks the project or workspace role this operation requires."
+	case client.IsNotFound(err):
+		detail += "\n\nFlightdeck answers 404 for anything this token cannot reach: an id that does not exist or was " +
+			"just deleted, one in another workspace, or anything in a project the token cannot see (a private project " +
+			"it is not a member of, or one being deleted). Check the id and the token's access, then run `terraform " +
+			"plan` again."
+	case apiErr.Code == client.CodeStaleObject:
+		detail += "\n\nThis write lost a race: the record, or something it refers to, changed or was deleted at the " +
+			"same moment, and nothing was written. Run `terraform plan` again to re-read it, then re-apply."
 	case apiErr.Code == client.CodeInvalidAttribute:
 		detail += "\n\nThe API rejected the configuration outright; fix the attribute rather than retrying."
 	case apiErr.Status == 429:
@@ -41,16 +49,33 @@ func addAPIError(diags *diag.Diagnostics, summary string, err error) {
 // server's own message is quoted verbatim so a 409 that turns out to be
 // something else (a uniqueness conflict on a deployment without error codes)
 // is still readable.
+//
+// current is the version a re-read found, or nil when it could not be read.
+// The API also answers stale_object to a write whose target, or something
+// the write names (a user, a label, a team), was deleted at the same moment.
+// When the refusal carries that code and the re-read still finds the state's
+// version, that is the likelier cause, and the message leads with it rather
+// than with an edit that may not have happened. A 409 without the code (an
+// older server's uniqueness conflict, say) keeps the plain message.
 func addStaleError(diags *diag.Diagnostics, what string, stateVersion int64, current *int64, err error) {
-	detail := fmt.Sprintf("%s was changed outside of Terraform since the last refresh (state has lock_version %d", what, stateVersion)
-	if current != nil {
-		detail += fmt.Sprintf(", the server now has %d", *current)
+	var summary, detail string
+	if current != nil && *current == stateVersion && client.HasCode(err, client.CodeStaleObject) {
+		summary = what + " was not written: the write lost a race"
+		detail = fmt.Sprintf("Flightdeck refused the write as a lost race, but %s still reads back the lock_version in "+
+			"state (%d), so the likely cause is that something this write refers to was deleted at the same moment. "+
+			"Nothing was written. Run `terraform plan` again to re-read it, then re-apply.", what, stateVersion)
+	} else {
+		summary = what + " modified outside of Terraform"
+		detail = fmt.Sprintf("%s was changed outside of Terraform since the last refresh (state has lock_version %d", what, stateVersion)
+		if current != nil {
+			detail += fmt.Sprintf(", the server now has %d", *current)
+		}
+		detail += "). Nothing was overwritten. Run `terraform plan` again to pick up the current values, then re-apply."
 	}
-	detail += "). Nothing was overwritten. Run `terraform plan` again to pick up the current values, then re-apply."
 	if apiErr, ok := client.AsError(err); ok && apiErr.Message != "" {
 		detail += "\n\nThe API said: " + apiErr.Message
 	}
-	diags.AddError(what+" modified outside of Terraform", detail)
+	diags.AddError(summary, detail)
 }
 
 // replayWithheldText is what a resource says about the record a refused

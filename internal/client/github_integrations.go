@@ -57,8 +57,8 @@ func (c *Client) GetGithubIntegration(ctx context.Context, id int64) (*GithubInt
 
 // CreateGithubIntegration links a repository through the verified create path.
 // A repository the GitHub App cannot reach is a 422 repo_unreachable (no row
-// created); a repository already linked to an enabled integration in the
-// workspace is repo_already_linked.
+// created); a repository already linked to any project, enabled or not and in
+// any letter case, is repo_already_linked.
 func (c *Client) CreateGithubIntegration(ctx context.Context, projectID int64, fields Fields, idempotencyKey string) (*GithubIntegration, error) {
 	return CreateResource(ctx, c, githubIntegrationsPath(projectID), githubIntegrationRoot, fields, idempotencyKey,
 		VerifyByGet(c.GetGithubIntegration))

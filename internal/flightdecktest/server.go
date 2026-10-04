@@ -87,7 +87,26 @@ type Server struct {
 	// dropResponses are requests to serve and then answer with nothing: the
 	// connection is closed instead, as if the response were lost on the way.
 	dropResponses []requestHook
+	// refusals are requests to answer with a canned error instead of serving
+	// them, so nothing they ask for happens.
+	refusals []refusal
 }
+
+// refusal is a one-shot canned error for the next request matching it.
+type refusal struct {
+	method, pathSuffix string
+	status             int
+	code, message      string
+}
+
+// The API's answers to a request that lost a race to a DELETE: a write that
+// names something deleted at the same moment, and a DELETE that another
+// request added something to while it was being deleted. Both are 409
+// stale_object, and nothing was written.
+const (
+	LostRaceWriteMessage  = "Something this request refers to was deleted while it was being saved, so nothing was saved. Re-read it and try again."
+	LostRaceDeleteMessage = "This changed while it was being deleted, so it was not deleted. Send the DELETE again."
+)
 
 // requestHook runs once, just before the first request matching method + path
 // is handled — the seam for "someone else wrote in between plan and apply".
@@ -188,6 +207,15 @@ func (s *Server) DropNextResponse(method, pathSuffix string) {
 	s.dropResponses = append(s.dropResponses, requestHook{method: method, path: pathSuffix})
 }
 
+// RefuseNext makes the next request with the given method whose path ends in
+// pathSuffix answer the given error without being served, so nothing it asks
+// for happens. It runs after authentication and any OnNextRequest hook.
+func (s *Server) RefuseNext(method, pathSuffix string, status int, code, message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refusals = append(s.refusals, refusal{method: method, pathSuffix: pathSuffix, status: status, code: code, message: message})
+}
+
 // OmitErrorCodes makes every error body prose-only (no `code`), like a
 // deployment that predates machine-readable codes.
 func (s *Server) OmitErrorCodes(on bool) { s.omitCodes.Store(on) }
@@ -263,6 +291,15 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// A GET or HEAD with a body is refused before anything else looks at
+		// the request, the token included. An empty body is fine. Every
+		// provider test runs through this, so a read that sends a body fails.
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && len(body) > 0 {
+			writeError(rec, http.StatusBadRequest, "body_not_allowed",
+				"A GET or HEAD request can't have a body. Send filters in the query string.")
+			return
+		}
+
 		// Fault injection runs before auth, as the real throttle does.
 		s.mu.Lock()
 		if s.throttleNext > 0 {
@@ -296,6 +333,19 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				s.mu.Lock()
 				break
 			}
+		}
+		var refused *refusal
+		for i, rf := range s.refusals {
+			if rf.method == r.Method && strings.HasSuffix(r.URL.Path, rf.pathSuffix) {
+				s.refusals = append(s.refusals[:i], s.refusals[i+1:]...)
+				refused = &rf
+				break
+			}
+		}
+		if refused != nil {
+			s.mu.Unlock()
+			writeError(rec, refused.status, refused.code, refused.message)
+			return
 		}
 		drop := false
 		for i, h := range s.dropResponses {

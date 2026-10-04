@@ -245,26 +245,30 @@ func (s *Server) idempotentlyWithheld(w http.ResponseWriter, r *http.Request, sc
 		_, _ = w.Write(stored.body)
 		return
 	}
-	if s.inFlightNext > 0 {
-		s.inFlightNext--
+	if s.inFlightNext > 0 || s.reservedKeys[cacheKey] {
+		if !s.reservedKeys[cacheKey] {
+			s.inFlightNext--
+		}
 		s.mu.Unlock()
 		writeError(w, http.StatusConflict, "idempotency_key_in_flight",
 			"A request with this Idempotency-Key is still in progress. Retry in a moment to receive its result.")
 		return
 	}
+	s.reservedKeys[cacheKey] = true
 	s.mu.Unlock()
 
 	status, body, cached := create()
 	encoded, _ := json.Marshal(body)
+	s.mu.Lock()
 	if status >= 200 && status < 300 {
 		toCache := encoded
 		if cached != nil {
 			toCache, _ = json.Marshal(cached)
 		}
-		s.mu.Lock()
 		s.idempotent[cacheKey] = idempotentResponse{status: status, body: toCache, fingerprint: fingerprint, withheld: withheld}
-		s.mu.Unlock()
 	}
+	delete(s.reservedKeys, cacheKey)
+	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(encoded)

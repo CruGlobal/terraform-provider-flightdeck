@@ -440,7 +440,6 @@ func rawBool(raw json.RawMessage) types.Bool {
 // because the API counts browser errors for every value it cannot read as
 // false, so the state says what the rule actually does.
 func rawCountBrowserErrors(raw json.RawMessage) types.Bool {
-	const apiBlank = "\x00\t\n\v\f\r "
 	if len(raw) == 0 || string(raw) == "null" {
 		return types.BoolNull()
 	}

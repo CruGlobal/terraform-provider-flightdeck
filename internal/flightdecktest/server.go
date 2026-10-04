@@ -65,6 +65,10 @@ type Server struct {
 	// register themselves through registerResource.
 	stores     map[string]any
 	idempotent map[string]idempotentResponse
+	// reservedKeys are the idempotency keys whose create is running. Like
+	// the API, a second request with one is 409 idempotency_key_in_flight
+	// rather than a second create.
+	reservedKeys map[string]bool
 	// projectHooks run after every project create so the nested-resource
 	// fakes can seed a project's defaults (states, labels).
 	projectHooks []func(s *Server, p *Project)
@@ -131,6 +135,7 @@ func New(t testing.TB) *Server {
 		nextID:         1000,
 		stores:         map[string]any{},
 		idempotent:     map[string]idempotentResponse{},
+		reservedKeys:   map[string]bool{},
 		workspaceAdmin: true,
 	}
 	s.members = []User{

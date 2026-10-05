@@ -36,7 +36,7 @@ resource "flightdeck_label" "security" {
 
 ### Required
 
-- `name` (String) Display name; unique within the project.
+- `name` (String) Display name; unique within the project, at most 255 characters.
 - `project_id` (Number) Id of the project the label belongs to. Changing it replaces the label.
 
 ### Optional

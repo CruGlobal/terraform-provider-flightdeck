@@ -102,10 +102,12 @@ func (r *githubIntegrationResource) Schema(_ context.Context, _ resource.SchemaR
 				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 			},
 			"repo_full_name": schema.StringAttribute{
-				MarkdownDescription: "Repository as `owner/repo`. Changing it replaces the integration.",
-				Required:            true,
+				MarkdownDescription: "Repository as `owner/repo`, at most 140 characters (GitHub allows an owner of up " +
+					"to 39 and a repository name of up to 100). Changing it replaces the integration.",
+				Required: true,
 				Validators: []validator.String{
 					stringvalidator.RegexMatches(client.RepoFullNamePattern, `must be "owner/repo"`),
+					charLengthAtMost(client.RepoFullNameMaxLength),
 				},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},

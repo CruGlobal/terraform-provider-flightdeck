@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var repoFullNameForm = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
@@ -225,6 +226,11 @@ func (s *Server) createGithubIntegration(w http.ResponseWriter, r *http.Request)
 			return http.StatusForbidden, errorBody("This action requires workspace owner or admin rights.", "forbidden")
 		}
 		repo := strings.TrimSpace(asString(attrs["repo_full_name"]))
+		// Counted after the strip, before anything else is asked of it.
+		if repo != "" && utf8.RuneCountInString(repo) > 140 {
+			return http.StatusUnprocessableEntity, errorBody(
+				"repo_full_name must be 140 characters or fewer (owner/repository, as GitHub names it)", "invalid_attribute")
+		}
 		if !repoFullNameForm.MatchString(repo) {
 			return http.StatusUnprocessableEntity, errorBody("repo_full_name is required, in owner/repo form", "invalid_attribute")
 		}

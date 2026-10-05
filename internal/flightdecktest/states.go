@@ -205,6 +205,9 @@ func (s *Server) showState(w http.ResponseWriter, r *http.Request) {
 // a fixed enum, color a hex value. Returns (status, code, message); 0 = ok.
 func (s *Server) applyStateAttrs(st *State, attrs map[string]any) (int, string, string) {
 	if v, ok := attrs["name"]; ok {
+		if status, code, msg := nameTooLong(v); status != 0 {
+			return status, code, msg
+		}
 		st.Name = asString(v)
 	}
 	if v, ok := attrs["group"]; ok {

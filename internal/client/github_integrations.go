@@ -10,6 +10,12 @@ import (
 // with no whitespace or further slashes.
 var RepoFullNamePattern = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
 
+// RepoFullNameMaxLength is the longest owner/repository Flightdeck accepts, in
+// characters: GitHub allows an owner of up to 39 and a repository of up to
+// 100, so 39 + "/" + 100. Flightdeck checks only the total, and refuses a
+// longer one with 422 invalid_attribute.
+const RepoFullNameMaxLength = 140
+
 // GithubCIFailureActions are what a failed workflow run on the repository's
 // default branch does, which the API accepts in exactly these spellings.
 var GithubCIFailureActions = []string{"off", "create_work_item", "file_intake"}

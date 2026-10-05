@@ -251,7 +251,8 @@ func TestGithubIntegration_apiRefusals(t *testing.T) {
 				Check: resource.TestCheckResourceAttr(ghRes, "webhook_registered", "true"),
 			},
 			{
-				// A repository is linked once across the workspace, enabled or not.
+				// A repository is linked once across the workspace, enabled or not,
+				// and in any letter case.
 				Config: githubIntegrationConfig(env, identifier, fmt.Sprintf(`  repo_full_name = %q`, repo)) + fmt.Sprintf(`
 resource "flightdeck_project" "other" {
   name       = "Other"
@@ -263,8 +264,8 @@ resource "flightdeck_github_integration" "dupe" {
   repo_full_name = %q
   depends_on     = [flightdeck_github_integration.test]
 }
-`, randIdentifier(), repo),
-				ExpectError: regexMust(`(?s)Repository already linked.*already linked to a\s+Flightdeck project`),
+`, randIdentifier(), strings.ToUpper(repo)),
+				ExpectError: regexMust(`(?s)Repository already linked.*already linked to a\s+Flightdeck project.*without\s+regard\s+to\s+letter\s+case`),
 			},
 			{
 				// One enabled integration per project.
@@ -275,7 +276,7 @@ resource "flightdeck_github_integration" "second" {
   depends_on     = [flightdeck_github_integration.test]
 }
 `, repo+"-second"),
-				ExpectError: regexMust(`(?s)HTTP 422 \(validation_failed\).*already has an enabled GitHub\s+integration`),
+				ExpectError: regexMust(`(?s)Cannot link a repository to this\s+project.*already has an enabled GitHub\s+integration.*disable\s+or\s+delete\s+the\s+project's\s+other\s+integration`),
 			},
 		},
 	})

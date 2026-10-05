@@ -241,6 +241,26 @@ func (c *Client) Delete(ctx context.Context, path string, out any, opts ...Reque
 	return c.do(ctx, http.MethodDelete, path, nil, out, opts...)
 }
 
+// deleteGone DELETEs a resource the API deletes without an If-Match
+// precondition, and treats a 404 as success: the resource is already gone
+// from this token's point of view, which is what a delete asks for. Of two
+// racing deletes, one is answered and the other gets that 404.
+//
+// A 409 stale_object on such a DELETE means it lost a race to a write that
+// added something to the resource while it was being deleted, and nothing was
+// deleted. The API's advice is to send the DELETE again, and a DELETE is safe
+// to repeat, so it is sent exactly once more. A second refusal is returned.
+func (c *Client) deleteGone(ctx context.Context, path string) error {
+	err := c.Delete(ctx, path, nil)
+	if IsStale(err) {
+		err = c.Delete(ctx, path, nil)
+	}
+	if err != nil && !IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
 // Meta is the pagination block on every collection response.
 type Meta struct {
 	Count      int `json:"count"`
@@ -374,6 +394,13 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, opt
 	req := &request{replayable: method == http.MethodGet || method == http.MethodDelete}
 	for _, opt := range opts {
 		opt(req)
+	}
+
+	// The API refuses a GET or HEAD that carries any body, even `{}`, with 400
+	// body_not_allowed before it reads the token. Filters go in the query
+	// string, so a body here is a bug in the caller; fail before sending it.
+	if body != nil && (method == http.MethodGet || method == http.MethodHead) {
+		return fmt.Errorf("%s %s: a %s request must not carry a body (send filters with WithQuery)", method, path, method)
 	}
 
 	var payload []byte

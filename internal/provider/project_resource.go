@@ -302,13 +302,29 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	id := state.ID.ValueInt64()
 	updated, err := r.client.UpdateProject(ctx, id, fields, state.LockVersion.ValueInt64())
 	if err != nil {
+		// A delete wins over an update sent at the same moment: the update
+		// lands first and goes with the project, or gets a 404, or (already
+		// part way through) a 409 whose re-read then 404s.
 		if client.IsStale(err) {
 			var current *int64
-			if fresh, rerr := r.client.GetProject(ctx, id); rerr == nil {
+			fresh, rerr := r.client.GetProject(ctx, id)
+			switch {
+			case rerr == nil:
 				current = &fresh.LockVersion
+			case client.IsNotFound(rerr):
+				addProjectGoneError(&resp.Diagnostics, state.Identifier.ValueString(), err)
+				return
 			}
 			addStaleError(&resp.Diagnostics, fmt.Sprintf("Project %s", state.Identifier.ValueString()), state.LockVersion.ValueInt64(), current, err)
 			return
+		}
+		// A 404 can also be an id the write names (a lead_id outside the
+		// workspace), so the project is gone only if it no longer reads back.
+		if client.IsNotFound(err) {
+			if _, rerr := r.client.GetProject(ctx, id); client.IsNotFound(rerr) {
+				addProjectGoneError(&resp.Diagnostics, state.Identifier.ValueString(), err)
+				return
+			}
 		}
 		// The app is only sent when it changes, so a 403 on a write naming it
 		// is the app's own bar.
@@ -381,6 +397,35 @@ func (r *projectResource) ImportState(ctx context.Context, req resource.ImportSt
 	// Like the rollback blockers, agent work blockers come with the refresh.
 	state.AgentWork, _ = readAgentWork(ctx, r.client, p.ID, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+// addProjectGoneError reports a write to a project that is no longer there
+// for this token: deleted (perhaps at the same moment), or no longer visible
+// to it. The write failed, and the next refresh drops it from state.
+func addProjectGoneError(diags *diag.Diagnostics, identifier string, err error) {
+	diags.AddError(fmt.Sprintf("Project %s is gone", identifier),
+		fmt.Sprintf("Project %s was deleted while this apply was writing to it, or this token can no longer see it. "+
+			"Run `terraform plan` again: the refresh removes it from state, and the plan offers to create it again if "+
+			"it is still in the configuration.\n\nThe API said: %s", identifier, apiMessage(err)))
+}
+
+// addIfProjectGone reports a 404 or 409 from one of a project's own settings
+// endpoints as the project being gone, when that is what it was: the project
+// itself no longer reads back. A delete wins over a write sent at the same
+// moment, so the project write can land and the next one find nothing. It
+// reports whether it added the error.
+func addIfProjectGone(ctx context.Context, c *client.Client, projectID int64, identifier string, err error, diags *diag.Diagnostics) bool {
+	if !client.IsNotFound(err) && !client.IsStale(err) {
+		return false
+	}
+	if _, rerr := c.GetProject(ctx, projectID); !client.IsNotFound(rerr) {
+		return false
+	}
+	if identifier == "" {
+		identifier = strconv.FormatInt(projectID, 10)
+	}
+	addProjectGoneError(diags, identifier, err)
+	return true
 }
 
 // addProjectWriteError reports a failed project create or update. The app has

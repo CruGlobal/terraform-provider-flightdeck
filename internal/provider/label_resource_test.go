@@ -72,7 +72,7 @@ func TestLabel_validationAndDuplicates(t *testing.T) {
 			{
 				// "Bug" is a seeded starter label.
 				Config:      labelConfig(env, identifier, `  name = "Bug"`),
-				ExpectError: regexMust(`(?s)Error creating Flightdeck label.*HTTP 422 \(validation_failed\).*Name has already\s+been taken`),
+				ExpectError: regexMust(`(?s)Error creating Flightdeck label.*HTTP\s+422\s+\(validation_failed\).*Name\s+has\s+already\s+been\s+taken`),
 			},
 		},
 	})

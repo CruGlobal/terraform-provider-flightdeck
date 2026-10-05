@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -647,7 +648,7 @@ func TestProject_leadIDIsSettableAndDefaultsToTheCreator(t *testing.T) {
 				Config: projectConfig(env, identifier, `
   name    = "Led"
   lead_id = 999999`),
-				ExpectError: regexMust(`HTTP 404 \(not_found\)`),
+				ExpectError: regexMust(`(?s)HTTP\s+422\s+\(invalid_attribute\).*lead_id\s+999999\s+is\s+not\s+a\s+member\s+of\s+this\s+workspace`),
 			},
 		},
 	})
@@ -790,4 +791,109 @@ func TestProject_worksAgainstADeploymentWithoutErrorCodes(t *testing.T) {
 	if errors < 3 {
 		t.Errorf("expected the 409 in-flight, the 409 stale and the 404 to have been served, saw %d error responses", errors)
 	}
+}
+
+// A lead outside the workspace is a bad argument, never a sign the project is
+// gone: the error says so and the project stays in state. Flightdeck answers
+// it with 422 invalid_attribute; versions before that answered 404, the same
+// as a missing project, which the provider tells apart by reading the
+// project back.
+func TestProject_leadOutsideTheWorkspaceKeepsTheProject(t *testing.T) {
+	env := newTestEnv(t, "project")
+	identifier := randIdentifier()
+	name := randName("Led")
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{Config: projectConfig(env, identifier, fmt.Sprintf(`  name = %q`, name))},
+			{
+				Config: projectConfig(env, identifier, fmt.Sprintf(`
+  name    = %q
+  lead_id = 999999999`, name)),
+				ExpectError: regexMust(`(?s)Error updating Flightdeck project.*HTTP\s+(404\s+\(not_found\)|422\s+\(invalid_attribute\))`),
+			},
+			{
+				// Still in state, unchanged: nothing to do.
+				Config: projectConfig(env, identifier, fmt.Sprintf(`  name = %q`, name)),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+			},
+		},
+	})
+}
+
+// The fake reads a lead_id the way the API does: a blank clears it, a digit
+// string is an id, and anything else that is not a workspace member's id is
+// refused naming the field.
+func TestProject_fakeReadsLeadIDLikeTheAPI(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	ctx := context.Background()
+	c, err := client.New(env.endpoint, env.token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := env.fake.AddProject("Led", randIdentifier())
+	patch := func(lead any) (*client.Project, error) {
+		fresh, err := c.GetProject(ctx, p.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.UpdateProject(ctx, p.ID, client.Fields{"lead_id": lead}, fresh.LockVersion)
+	}
+	for _, bad := range []any{"7a", 2.5, -1, true, []any{2}, map[string]any{"id": 2}} {
+		_, err := patch(bad)
+		if !client.HasCode(err, client.CodeInvalidAttribute) || !strings.Contains(apiMessage(err), "lead_id must be") {
+			t.Errorf("lead_id %#v: err = %v, want 422 invalid_attribute naming lead_id", bad, err)
+		}
+	}
+	if _, err := patch(999999); !client.HasCode(err, client.CodeInvalidAttribute) ||
+		!strings.Contains(apiMessage(err), "only workspace members can lead a project") {
+		t.Errorf("a lead outside the workspace: err = %v", err)
+	}
+	if _, err := patch(3); !client.HasCode(err, client.CodeInvalidAttribute) ||
+		!strings.Contains(apiMessage(err), "lead_id 3 is a guest in this workspace") {
+		t.Errorf("a guest as lead: err = %v", err)
+	}
+	if got, err := patch(" 2 "); err != nil || got.LeadID == nil || *got.LeadID != 2 {
+		t.Errorf("a digit string: got %+v, %v", got, err)
+	}
+	if got, err := patch(""); err != nil || got.LeadID != nil {
+		t.Errorf("a blank should clear the lead: got %+v, %v", got, err)
+	}
+}
+
+// The fake refuses a project member's user_id and a webhook's project_id the
+// way the API does: by name, as 422 invalid_attribute, for a value that is not
+// an id and for an id outside what the token can reach.
+func TestFake_readsMemberAndWebhookIDsLikeTheAPI(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	ctx := context.Background()
+	c, err := client.New(env.endpoint, env.token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := env.fake.AddProject("IDs", randIdentifier())
+	refused := func(what string, err error, want string) {
+		t.Helper()
+		if !client.HasCode(err, client.CodeInvalidAttribute) || !strings.Contains(apiMessage(err), want) {
+			t.Errorf("%s: err = %v, want 422 invalid_attribute saying %q", what, err, want)
+		}
+	}
+	member := func(user any) error {
+		_, err := c.AddProjectMember(ctx, p.ID, client.Fields{"user_id": user, "role": "member"}, client.RandomIdempotencyKey())
+		return err
+	}
+	refused("member user_id 7a", member("7a"), `user_id must be an integer id of 0 or more, got "7a"`)
+	refused("member outside the workspace", member(999999),
+		"user_id 999999 is not a member of this workspace; only workspace members can be added to a project")
+
+	hook := func(project any) error {
+		_, err := c.CreateWebhook(ctx, client.Fields{"url": "https://ci.example.com/hooks/ids", "events": []string{"project.updated"},
+			"project_id": project}, client.RandomIdempotencyKey())
+		return err
+	}
+	refused("webhook project_id list", hook([]any{p.ID}), "project_id must be a single id, not a list")
+	refused("webhook project you can't see", hook(999999), "project_id 999999 is not a project you can see in this workspace")
 }

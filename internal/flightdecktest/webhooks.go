@@ -153,12 +153,21 @@ func (s *Server) applyWebhookAttrs(h *Webhook, attrs map[string]any) (int, strin
 	if v, has := attrs["active"]; has {
 		h.Active = truthy(v)
 	}
+	// project_id: a blank means all projects. Anything that is not an id, and
+	// a project the token cannot see (worded the same for one that does not
+	// exist or is being deleted), is refused naming project_id. The project
+	// the webhook already has is always accepted back.
 	if v, has := attrs["project_id"]; has {
-		if v == nil {
+		if blankValue(v) {
 			h.ProjectID = nil
-		} else if pid, isNum := asInt64(v); isNum {
-			if s.liveProject(pid) == nil {
-				return http.StatusUnprocessableEntity, "validation_failed", "Project must belong to this workspace"
+		} else {
+			pid, refusal := idParam("project_id", v)
+			if refusal != "" {
+				return http.StatusUnprocessableEntity, "invalid_attribute", refusal
+			}
+			if (h.ProjectID == nil || *h.ProjectID != pid) && s.liveProject(pid) == nil {
+				return http.StatusUnprocessableEntity, "invalid_attribute",
+					fmt.Sprintf("project_id %d is not a project you can see in this workspace", pid)
 			}
 			h.ProjectID = &pid
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
@@ -217,6 +218,80 @@ func TestErrorAlertRule_planTimeValidation(t *testing.T) {
     notify_slack = true
   }`),
 				ExpectError: regexMust(`value must be one of`),
+			},
+			{
+				// The threshold trigger needs a count of at least 1.
+				Config: ruleConfig(env, identifier, `
+  name    = "x"
+  trigger = "occurrence_threshold"
+  condition = {
+    count          = 0
+    window_minutes = 5
+  }
+  action = {
+    notify_slack = true
+  }`),
+				ExpectError: regexMust(`(?s)condition.count.*must be at least 1`),
+			},
+			{
+				Config: ruleConfig(env, identifier, `
+  name    = "x"
+  trigger = "occurrence_threshold"
+  condition = {
+    window_minutes = 5
+  }
+  action = {
+    notify_slack = true
+  }`),
+				ExpectError: regexMust(`count required for occurrence_threshold`),
+			},
+			{
+				Config: ruleConfig(env, identifier, `
+  name    = "x"
+  trigger = "occurrence_threshold"
+  action = {
+    notify_slack = true
+  }`),
+				ExpectError: regexMust(`count required for occurrence_threshold`),
+			},
+		},
+	})
+}
+
+// Switching a rule to the threshold trigger is one of the moments the API
+// judges the count, so a rule that starts without one gains one with it.
+func TestErrorAlertRule_switchToThresholdCarriesACount(t *testing.T) {
+	env := newTestEnv(t, "error_alert_rule")
+	identifier := randIdentifier()
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: ruleConfig(env, identifier, `
+  name    = "Switches"
+  trigger = "new_group"
+  action = {
+    notify_slack = true
+  }`),
+				Check: resource.TestCheckNoResourceAttr(ruleRes, "condition.count"),
+			},
+			{
+				Config: ruleConfig(env, identifier, `
+  name    = "Switches"
+  trigger = "occurrence_threshold"
+  condition = {
+    count          = 1
+    window_minutes = 10
+  }
+  action = {
+    notify_slack = true
+  }`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(ruleRes, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(ruleRes, "trigger", "occurrence_threshold"),
+					resource.TestCheckResourceAttr(ruleRes, "condition.count", "1"),
+				),
 			},
 		},
 	})
@@ -606,4 +681,60 @@ func TestRawCountBrowserErrors(t *testing.T) {
 			t.Errorf("rawCountBrowserErrors(%s) = %s, want %s", tc.raw, got, tc.want)
 		}
 	}
+}
+
+// The API judges the threshold rule's count floor only when a rule is
+// created, its count changes, or it switches to the trigger, so a rule
+// stored with 0 before the floor existed stays saveable. The plan refuses
+// every config that would reach the floor, so this drives the fake directly.
+func TestErrorAlertRule_fakeJudgesTheCountFloorOnlyWhenItMoves(t *testing.T) {
+	env := newTestEnv(t, "error_alert_rule")
+	env.requireFake(t)
+	ctx := context.Background()
+	c, err := client.New(env.endpoint, env.token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := env.fake.AddProject("Rules", randIdentifier())
+	action := map[string]any{"notify_slack": true}
+	threshold := func(condition map[string]any) client.Fields {
+		return client.Fields{"name": "Threshold", "trigger": "occurrence_threshold", "condition": condition, "action": action}
+	}
+	refused := func(what string, err error) {
+		t.Helper()
+		if !client.HasCode(err, client.CodeValidationFailed) || !strings.Contains(apiMessage(err), "count of at least 1") {
+			t.Errorf("%s: got %v, want 422 validation_failed about the count", what, err)
+		}
+	}
+
+	_, err = c.CreateErrorAlertRule(ctx, project.ID, threshold(map[string]any{"window_minutes": 5}), client.RandomIdempotencyKey())
+	refused("create without a count", err)
+	_, err = c.CreateErrorAlertRule(ctx, project.ID, threshold(map[string]any{"count": 0}), client.RandomIdempotencyKey())
+	refused("create with count 0", err)
+
+	rule, err := c.CreateErrorAlertRule(ctx, project.ID, threshold(map[string]any{"count": 5}), client.RandomIdempotencyKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Stored with 0 before the floor existed: still renamable.
+	env.fake.SetErrorAlertRuleConditionOutOfBand(rule.ID, map[string]any{"count": 0})
+	renamed, err := c.UpdateErrorAlertRule(ctx, project.ID, rule.ID, client.Fields{"name": "Renamed"}, rule.LockVersion)
+	if err != nil {
+		t.Fatalf("renaming a rule stored with count 0: %v", err)
+	}
+	_, err = c.UpdateErrorAlertRule(ctx, project.ID, rule.ID, client.Fields{"condition": map[string]any{"count": 0, "window_minutes": 5}}, renamed.LockVersion)
+	if err != nil {
+		t.Fatalf("re-sending the stored count 0 is not a change: %v", err)
+	}
+	fresh, _ := c.GetErrorAlertRule(ctx, project.ID, rule.ID)
+	_, err = c.UpdateErrorAlertRule(ctx, project.ID, rule.ID, client.Fields{"condition": map[string]any{}}, fresh.LockVersion)
+	refused("dropping the count", err)
+
+	other, err := c.CreateErrorAlertRule(ctx, project.ID,
+		client.Fields{"name": "New groups", "trigger": "new_group", "action": action}, client.RandomIdempotencyKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.UpdateErrorAlertRule(ctx, project.ID, other.ID, client.Fields{"trigger": "occurrence_threshold"}, other.LockVersion)
+	refused("switching to the threshold trigger without a count", err)
 }

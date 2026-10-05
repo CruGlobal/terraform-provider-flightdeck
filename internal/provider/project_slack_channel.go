@@ -471,6 +471,9 @@ func writeSlackChannel(ctx context.Context, c *client.Client, projectID int64, c
 			return slackChannelKeepPlan(ctx, planned, fresh, diags), lockVersion
 		}
 		if err != nil {
+			if addIfProjectGone(ctx, c, projectID, "", err, diags) {
+				return types.ObjectNull(slackChannelAttrTypes), lockVersion
+			}
 			switch {
 			case client.IsNotFound(err):
 				diags.AddAttributeError(path.Root("slack_channel"), "Slack channel configuration is not available on this Flightdeck",

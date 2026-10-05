@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
@@ -309,17 +310,23 @@ func TestWebhook_lostCreateResponseIsRecovered(t *testing.T) {
 
 // An identical second declaration is one create to the API, refused while the
 // first webhook exists, and the first is left alone.
+//
+// The URL is new on every run. A webhook is workspace-wide, so its create's
+// idempotency key comes from the body alone, and the API keeps a key for 24
+// hours: with a fixed URL, a second live run within a day would replay the
+// first run's deleted webhook and never meet the refusal.
 func TestWebhook_duplicateDeclarationIsRefused(t *testing.T) {
 	env := newTestEnv(t, "webhook")
-	cfg := webhookConfig(env, `
-  url    = "https://ci.example.com/hooks/twin"
-  events = ["project.updated"]`)
-	twin := `
+	url := "https://ci.example.com/hooks/twin-" + strings.ToLower(acctest.RandString(8))
+	cfg := webhookConfig(env, fmt.Sprintf(`
+  url    = %q
+  events = ["project.updated"]`, url))
+	twin := fmt.Sprintf(`
 resource "flightdeck_webhook" "twin" {
-  url    = "https://ci.example.com/hooks/twin"
+  url    = %q
   events = ["project.updated"]
 }
-`
+`, url)
 	var id, secret string
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{

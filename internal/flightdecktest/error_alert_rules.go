@@ -81,6 +81,16 @@ func (s *Server) TouchErrorAlertRule(id int64, name string) {
 	}
 }
 
+// SetErrorAlertRuleConditionOutOfBand replaces a rule's stored condition
+// without the API's checks, the way a row saved before a rule existed looks.
+func (s *Server) SetErrorAlertRuleConditionOutOfBand(id int64, condition map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r := s.errorAlertRules().byID[id]; r != nil {
+		r.Condition = condition
+	}
+}
+
 // liveRule resolves @project.error_alert_rules.find(id): the rule must belong
 // to the (live) project in the path.
 func (s *Server) liveRule(projectID, id int64) *ErrorAlertRule {
@@ -157,8 +167,12 @@ func (s *Server) showErrorAlertRule(w http.ResponseWriter, r *http.Request) {
 
 // applyRuleAttrs mirrors the API's rule normalisation and validation.
 // wasOpening is the pre-write open_incident flag, for the incidents-feature gate.
-func (s *Server) applyRuleAttrs(rule *ErrorAlertRule, attrs map[string]any, project *Project) (int, string, string) {
+// creating says the rule is new, which is one of the moments the count floor
+// is judged.
+func (s *Server) applyRuleAttrs(rule *ErrorAlertRule, attrs map[string]any, project *Project, creating bool) (int, string, string) {
 	wasOpening := truthy(rule.Action["open_incident"])
+	wasTrigger := rule.Trigger
+	wasCount, hadCount := ruleCount(rule.Condition)
 	if v, has := attrs["name"]; has {
 		rule.Name = asString(v)
 	}
@@ -249,6 +263,17 @@ func (s *Server) applyRuleAttrs(rule *ErrorAlertRule, attrs map[string]any, proj
 	if level := asString(rule.Condition["min_level"]); level != "" && !contains(errorLevels, level) {
 		return http.StatusUnprocessableEntity, "validation_failed", "Condition has an invalid level"
 	}
+	// An occurrence_threshold rule needs a count of at least 1. Like the API,
+	// it is judged only when the rule is created, its count changes, or it
+	// switches to that trigger, so an older rule stored with 0 stays saveable.
+	if rule.Trigger == "occurrence_threshold" {
+		count, hasCount := ruleCount(rule.Condition)
+		judged := creating || wasTrigger != rule.Trigger || hadCount != hasCount || wasCount != count
+		if judged && (!hasCount || count < 1) {
+			return http.StatusUnprocessableEntity, "validation_failed",
+				"Condition needs a count of at least 1 for the occurrence threshold trigger"
+		}
+	}
 	var anyAction bool
 	for _, k := range alertActionKeys {
 		if truthy(rule.Action[k]) {
@@ -286,6 +311,16 @@ func (s *Server) applyRuleAttrs(rule *ErrorAlertRule, attrs map[string]any, proj
 	return 0, "", ""
 }
 
+// ruleCount reads condition.count as a whole number, and whether it is there.
+func ruleCount(condition map[string]any) (int64, bool) {
+	v, present := condition["count"]
+	if !present || v == nil {
+		return 0, false
+	}
+	n, ok := asInt64(v)
+	return n, ok
+}
+
 // conditionBoolean reads a boolean condition value in the API's spellings.
 func conditionBoolean(v any) (bool, bool) {
 	switch t := v.(type) {
@@ -320,7 +355,7 @@ func (s *Server) createErrorAlertRule(w http.ResponseWriter, r *http.Request) {
 			return http.StatusNotFound, errorBody("Not found", "not_found")
 		}
 		rule := &ErrorAlertRule{ID: s.id(), ProjectID: pid, Enabled: true, Trigger: "new_group", Condition: map[string]any{}, Action: map[string]any{}}
-		if status, code, msg := s.applyRuleAttrs(rule, attrs, project); status != 0 {
+		if status, code, msg := s.applyRuleAttrs(rule, attrs, project, true); status != 0 {
 			return status, errorBody(msg, code)
 		}
 		s.errorAlertRules().byID[rule.ID] = rule
@@ -352,7 +387,7 @@ func (s *Server) updateErrorAlertRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	candidate := *rule
-	if status, code, msg := s.applyRuleAttrs(&candidate, attrs, s.liveProject(rule.ProjectID)); status != 0 {
+	if status, code, msg := s.applyRuleAttrs(&candidate, attrs, s.liveProject(rule.ProjectID), false); status != 0 {
 		writeError(w, status, code, msg)
 		return
 	}

@@ -53,6 +53,11 @@ func decodeBody(w http.ResponseWriter, r *http.Request, root string) (map[string
 			writeError(w, http.StatusBadRequest, "bad_request", "malformed JSON body")
 			return nil, false
 		}
+		if hasLongNumber(envelope) {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				"Request body holds a number longer than 64 characters")
+			return nil, false
+		}
 	}
 	inner, ok := envelope[root].(map[string]any)
 	if !ok {
@@ -60,6 +65,32 @@ func decodeBody(w http.ResponseWriter, r *http.Request, root string) (map[string
 		return nil, false
 	}
 	return inner, true
+}
+
+// maxNumberLength is the longest JSON number the API reads. A longer one is
+// refused before the body is parsed at all.
+const maxNumberLength = 64
+
+// hasLongNumber reports whether a decoded body (numbers kept as json.Number)
+// holds a number longer than maxNumberLength anywhere.
+func hasLongNumber(v any) bool {
+	switch t := v.(type) {
+	case json.Number:
+		return len(t) > maxNumberLength
+	case map[string]any:
+		for _, inner := range t {
+			if hasLongNumber(inner) {
+				return true
+			}
+		}
+	case []any:
+		for _, inner := range t {
+			if hasLongNumber(inner) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pathID parses a numeric path segment; a non-numeric id is a 404, as in the API.
@@ -237,6 +268,57 @@ func (s *Server) idempotentlyWithheld(w http.ResponseWriter, r *http.Request, sc
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(encoded)
+}
+
+// --- ids and blanks, read the way the API reads them --------------------------
+
+// apiBlank is what the API strips before asking whether a string is blank.
+const apiBlank = "\x00\t\n\v\f\r "
+
+// blankValue is the API's "no opinion": null, or a string with nothing in it
+// but blank space.
+func blankValue(v any) bool {
+	if v == nil {
+		return true
+	}
+	s, ok := v.(string)
+	return ok && strings.Trim(s, apiBlank) == ""
+}
+
+// idParam reads an id the way the API does: a whole number of 0 or more, or
+// a string of digits (blank space at either end ignored, at most 64 digits).
+// Anything else is refused with the API's words, which repeat at most 40
+// characters of the value. A refusal is returned as a message, "" when v is
+// an id.
+func idParam(name string, v any) (int64, string) {
+	shown := func(s string) string {
+		if len(s) > 40 {
+			s = s[:37] + "..."
+		}
+		return s
+	}
+	switch t := v.(type) {
+	case []any:
+		return 0, name + " must be a single id, not a list"
+	case map[string]any:
+		return 0, name + " must be a single id, not an object"
+	case json.Number:
+		if !strings.ContainsAny(t.String(), ".eE-") {
+			if id, err := strconv.ParseInt(t.String(), 10, 64); err == nil {
+				return id, ""
+			}
+		}
+		return 0, fmt.Sprintf("%s must be an integer id of 0 or more, got %s", name, shown(t.String()))
+	case string:
+		digits := strings.Trim(t, apiBlank)
+		if digits != "" && len(digits) <= 64 && strings.Trim(digits, "0123456789") == "" {
+			if id, err := strconv.ParseInt(digits, 10, 64); err == nil {
+				return id, ""
+			}
+		}
+		return 0, fmt.Sprintf("%s must be an integer id of 0 or more, got %q", name, shown(t))
+	}
+	return 0, fmt.Sprintf("%s must be an integer id of 0 or more, got %s", name, shown(fmt.Sprint(v)))
 }
 
 // --- value coercion (permissive request params, as the API accepts them) -----

@@ -130,10 +130,15 @@ Full reference docs (generated from the provider schema) live in
   honours `Retry-After`.
 - Deletes carry `If-Match` too. A delete is not an overwrite, so a stale
   version there is answered by re-reading once and deleting with the
-  current version.
+  current version. A project delete carries no precondition; if it loses
+  a race to a write that added something to the project while it was
+  being deleted (a 409), it is sent once more.
 - A 404 always means "gone from this token's point of view" (including
-  ids in another workspace and projects mid-teardown) and removes the
-  resource from state.
+  ids in another workspace, anything in a project the token cannot see,
+  and projects mid-teardown) and removes the resource from state. On
+  destroy it counts as success: of two racing deletes, one is answered
+  and the other gets the 404.
+- Reads never carry a request body. Flightdeck refuses a `GET` with one.
 
 ### Importing existing resources
 

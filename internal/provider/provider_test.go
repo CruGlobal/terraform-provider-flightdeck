@@ -53,9 +53,7 @@ var liveReady = map[string]bool{
 	"github_integration":    true,
 	"workspace_member":      true,
 	"agent_work":            true,
-	// The teamspaces API is merged in Flightdeck but not yet on the acceptance
-	// server. Set to true once it is.
-	"teamspace": false,
+	"teamspace":             true,
 }
 
 // testEnv is what a test needs to point the provider at a backend.

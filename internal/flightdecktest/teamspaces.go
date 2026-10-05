@@ -212,8 +212,14 @@ func sortedKeys(m map[int64]teamspaceLink) []int64 {
 }
 
 func serializeTeamspace(t *Teamspace) map[string]any {
+	// A blank description reads back as null, however it was saved (the web
+	// form can store "").
+	var description any
+	if t.Description != nil && !blankValue(*t.Description) {
+		description = *t.Description
+	}
 	return map[string]any{
-		"id": t.ID, "name": t.Name, "description": t.Description, "lead_id": t.LeadID,
+		"id": t.ID, "name": t.Name, "description": description, "lead_id": t.LeadID,
 		"lock_version": t.LockVersion, "created_at": iso(t.CreatedAt), "updated_at": iso(t.UpdatedAt),
 	}
 }
@@ -338,6 +344,7 @@ func sqlLowerEqual(a, b string) bool {
 // and a blank or null lead clear them; a lead must be a workspace member.
 // Called with s.mu held.
 func (s *Server) applyTeamspaceAttrs(t *Teamspace, attrs map[string]any) (int, string, string) {
+	storedLead := t.LeadID
 	for _, key := range []string{"id", "created_at", "updated_at"} {
 		if _, has := attrs[key]; has {
 			return http.StatusUnprocessableEntity, "invalid_attribute", key + " is read-only over the API"
@@ -380,14 +387,17 @@ func (s *Server) applyTeamspaceAttrs(t *Teamspace, attrs map[string]any) (int, s
 			if refusal != "" {
 				return http.StatusUnprocessableEntity, "invalid_attribute", refusal
 			}
+			// The lead the team already has is always accepted back, even if
+			// that person has since left the workspace.
+			if (storedLead == nil || *storedLead != id) && !s.isWorkspaceUser(id) {
+				return http.StatusUnprocessableEntity, "invalid_attribute",
+					fmt.Sprintf("lead_id %d is not a member of this workspace; only workspace members can lead a teamspace", id)
+			}
 			t.LeadID = &id
 		}
 	}
 	if strings.TrimSpace(t.Name) == "" {
 		return http.StatusUnprocessableEntity, "validation_failed", "Name can't be blank"
-	}
-	if t.LeadID != nil && !s.isWorkspaceUser(*t.LeadID) {
-		return http.StatusUnprocessableEntity, "validation_failed", "Lead must be a member of the workspace"
 	}
 	return 0, "", ""
 }

@@ -1,6 +1,7 @@
 package flightdecktest
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 )
@@ -203,10 +204,20 @@ func (s *Server) createMember(w http.ResponseWriter, r *http.Request) {
 		if s.liveProject(pid) == nil {
 			return http.StatusNotFound, errorBody("Not found", "not_found")
 		}
-		userID, isNum := asInt64(attrs["user_id"])
-		if !isNum || s.workspaceUser(userID) == nil {
-			// A user outside the workspace is indistinguishable from a bad id.
-			return http.StatusNotFound, errorBody("Not found", "not_found")
+		// A blank user is a missing one. Anything that is not an id, and a user
+		// outside the workspace (worded the same whether or not the id names
+		// anybody), is refused naming user_id.
+		if blankValue(attrs["user_id"]) {
+			return http.StatusUnprocessableEntity, errorBody("User must exist", "validation_failed")
+		}
+		userID, refusal := idParam("user_id", attrs["user_id"])
+		if refusal != "" {
+			return http.StatusUnprocessableEntity, errorBody(refusal, "invalid_attribute")
+		}
+		if s.workspaceUser(userID) == nil {
+			return http.StatusUnprocessableEntity, errorBody(fmt.Sprintf(
+				"user_id %d is not a member of this workspace; only workspace members can be added to a project", userID),
+				"invalid_attribute")
 		}
 		m := &ProjectMember{ID: s.id(), ProjectID: pid, UserID: userID, Role: "member", BuiltinRole: "member"}
 		if v, has := attrs["role"]; has {

@@ -315,9 +315,17 @@ func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, strin
 			if refusal != "" {
 				return http.StatusUnprocessableEntity, "invalid_attribute", refusal
 			}
-			if id != p.LeadID && s.workspaceUser(id) == nil {
-				return http.StatusUnprocessableEntity, "invalid_attribute",
-					fmt.Sprintf("lead_id %d is not a member of this workspace; only workspace members can lead a project", id)
+			if id != p.LeadID {
+				u := s.workspaceUser(id)
+				if u == nil {
+					return http.StatusUnprocessableEntity, "invalid_attribute",
+						fmt.Sprintf("lead_id %d is not a member of this workspace; only workspace members can lead a project", id)
+				}
+				// A guest can't be made a lead; one who already leads stays.
+				if u.Role == "guest" {
+					return http.StatusUnprocessableEntity, "invalid_attribute",
+						fmt.Sprintf("lead_id %d is a guest in this workspace; guests can't lead a project", id)
+				}
 			}
 			p.LeadID = id
 		}

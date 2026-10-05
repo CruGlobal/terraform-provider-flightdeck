@@ -851,10 +851,49 @@ func TestProject_fakeReadsLeadIDLikeTheAPI(t *testing.T) {
 		!strings.Contains(apiMessage(err), "only workspace members can lead a project") {
 		t.Errorf("a lead outside the workspace: err = %v", err)
 	}
+	if _, err := patch(3); !client.HasCode(err, client.CodeInvalidAttribute) ||
+		!strings.Contains(apiMessage(err), "lead_id 3 is a guest in this workspace") {
+		t.Errorf("a guest as lead: err = %v", err)
+	}
 	if got, err := patch(" 2 "); err != nil || got.LeadID == nil || *got.LeadID != 2 {
 		t.Errorf("a digit string: got %+v, %v", got, err)
 	}
 	if got, err := patch(""); err != nil || got.LeadID != nil {
 		t.Errorf("a blank should clear the lead: got %+v, %v", got, err)
 	}
+}
+
+// The fake refuses a project member's user_id and a webhook's project_id the
+// way the API does: by name, as 422 invalid_attribute, for a value that is not
+// an id and for an id outside what the token can reach.
+func TestFake_readsMemberAndWebhookIDsLikeTheAPI(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	ctx := context.Background()
+	c, err := client.New(env.endpoint, env.token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := env.fake.AddProject("IDs", randIdentifier())
+	refused := func(what string, err error, want string) {
+		t.Helper()
+		if !client.HasCode(err, client.CodeInvalidAttribute) || !strings.Contains(apiMessage(err), want) {
+			t.Errorf("%s: err = %v, want 422 invalid_attribute saying %q", what, err, want)
+		}
+	}
+	member := func(user any) error {
+		_, err := c.AddProjectMember(ctx, p.ID, client.Fields{"user_id": user, "role": "member"}, client.RandomIdempotencyKey())
+		return err
+	}
+	refused("member user_id 7a", member("7a"), `user_id must be an integer id of 0 or more, got "7a"`)
+	refused("member outside the workspace", member(999999),
+		"user_id 999999 is not a member of this workspace; only workspace members can be added to a project")
+
+	hook := func(project any) error {
+		_, err := c.CreateWebhook(ctx, client.Fields{"url": "https://ci.example.com/hooks/ids", "events": []string{"project.updated"},
+			"project_id": project}, client.RandomIdempotencyKey())
+		return err
+	}
+	refused("webhook project_id list", hook([]any{p.ID}), "project_id must be a single id, not a list")
+	refused("webhook project you can't see", hook(999999), "project_id 999999 is not a project you can see in this workspace")
 }

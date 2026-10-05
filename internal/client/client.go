@@ -209,6 +209,14 @@ func WithIdempotencyKey(key string) RequestOption {
 	}
 }
 
+// safeToRepeat marks a POST the API itself makes safe to send twice: a link
+// create answers a repeat with 200 and the existing row instead of a second
+// one. Such a request is retried after a dropped connection or a gateway 5xx
+// like a GET, without an Idempotency-Key.
+func safeToRepeat() RequestOption {
+	return func(r *request) { r.replayable = true }
+}
+
 // WithIfMatch sends the resource's lock_version as an If-Match precondition.
 // The server answers 409 (code stale_object) if the resource moved on.
 func WithIfMatch(lockVersion int64) RequestOption {

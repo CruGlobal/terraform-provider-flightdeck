@@ -17,7 +17,8 @@ workflow states and labels, who has access, error-ingestion tokens,
 error and incident alert rules, the Events API routing keys external
 monitors use to open incidents, where incidents page, and outbound
 webhooks — can live in Terraform next to the rest of that application's
-infrastructure.
+infrastructure. It also manages teamspaces, the teams that say who owns
+a project, with their members and the projects they own.
 
 It deliberately does **not** manage runtime planning data (work items,
 sprints, epics, comments). Those belong to the people using the
@@ -38,12 +39,16 @@ project, not to infrastructure code.
 | `flightdeck_pagerduty_integration` | A project's link to a PagerDuty service, forwarding signals to PagerDuty's Events API v2. One per project; the credential is a write-only argument. |
 | `flightdeck_webhook` | An outbound webhook, workspace-wide or scoped to one project. |
 | `flightdeck_github_integration` | A project's link to a GitHub repository, with Flightdeck registering the repository webhook or the caller supplying the shared secret, and what a failed workflow run files. |
+| `flightdeck_teamspace` | A teamspace: a team in the workspace (name, description, lead). Names are not unique. |
+| `flightdeck_teamspace_member` | A workspace member's place on a teamspace. |
+| `flightdeck_teamspace_project` | A teamspace's ownership of a project. A project can belong to several teams. |
 
 | Data source | Resolves |
 | --- | --- |
 | `flightdeck_project` | A project by id or identifier. |
 | `flightdeck_states` | All workflow states of a project. |
-| `flightdeck_workspace_member` | Resolves a workspace member by email address to a numeric user id, for `project_member.user_id`, `project.lead_id` and `project.agent_work.agent_account_id`. |
+| `flightdeck_workspace_member` | Resolves a workspace member by email address to a numeric user id, for `project_member.user_id`, `project.lead_id`, `project.agent_work.agent_account_id`, `teamspace.lead_id` and `teamspace_member.user_id`. |
+| `flightdeck_teamspace` | A teamspace by id, or by name. Names are not unique, so a lookup by name fails unless exactly one team has it. |
 
 `flightdeck_project_member.user_id`, `flightdeck_project.lead_id` and
 `flightdeck_project.agent_work.agent_account_id` take a numeric user id;
@@ -142,8 +147,10 @@ Full reference docs (generated from the provider schema) live in
 
 ### Importing existing resources
 
-Projects import by numeric id or by identifier; states, labels, webhooks
-and GitHub integrations by their own numeric id; project members,
+Projects import by numeric id or by identifier; states, labels, webhooks,
+GitHub integrations and teamspaces by their own numeric id; a
+teamspace's members and projects by `<teamspace_id>/<user_id>` and
+`<teamspace_id>/<project_id>`; project members,
 ingestion tokens, error alert rules, incident alert rules and routing
 keys by `<project_id>/<id>` (members also by
 `<project_id>/user:<user_id>`); the PagerDuty link by the project id
@@ -157,6 +164,8 @@ terraform import flightdeck_project_member.deploy_bot 42/user:7
 terraform import flightdeck_error_alert_rule.new_errors 42/12
 terraform import flightdeck_incident_alert_rule.opened 42/13
 terraform import flightdeck_pagerduty_integration.app 42
+terraform import flightdeck_teamspace.platform 12
+terraform import flightdeck_teamspace_project.app 12/42
 ```
 
 Each resource's documentation page shows its import command.

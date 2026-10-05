@@ -270,6 +270,57 @@ func (s *Server) idempotentlyWithheld(w http.ResponseWriter, r *http.Request, sc
 	_, _ = w.Write(encoded)
 }
 
+// --- ids and blanks, read the way the API reads them --------------------------
+
+// apiBlank is what the API strips before asking whether a string is blank.
+const apiBlank = "\x00\t\n\v\f\r "
+
+// blankValue is the API's "no opinion": null, or a string with nothing in it
+// but blank space.
+func blankValue(v any) bool {
+	if v == nil {
+		return true
+	}
+	s, ok := v.(string)
+	return ok && strings.Trim(s, apiBlank) == ""
+}
+
+// idParam reads an id the way the API does: a whole number of 0 or more, or
+// a string of digits (blank space at either end ignored, at most 64 digits).
+// Anything else is refused with the API's words, which repeat at most 40
+// characters of the value. A refusal is returned as a message, "" when v is
+// an id.
+func idParam(name string, v any) (int64, string) {
+	shown := func(s string) string {
+		if len(s) > 40 {
+			s = s[:37] + "..."
+		}
+		return s
+	}
+	switch t := v.(type) {
+	case []any:
+		return 0, name + " must be a single id, not a list"
+	case map[string]any:
+		return 0, name + " must be a single id, not an object"
+	case json.Number:
+		if !strings.ContainsAny(t.String(), ".eE-") {
+			if id, err := strconv.ParseInt(t.String(), 10, 64); err == nil {
+				return id, ""
+			}
+		}
+		return 0, fmt.Sprintf("%s must be an integer id of 0 or more, got %s", name, shown(t.String()))
+	case string:
+		digits := strings.Trim(t, apiBlank)
+		if digits != "" && len(digits) <= 64 && strings.Trim(digits, "0123456789") == "" {
+			if id, err := strconv.ParseInt(digits, 10, 64); err == nil {
+				return id, ""
+			}
+		}
+		return 0, fmt.Sprintf("%s must be an integer id of 0 or more, got %q", name, shown(t))
+	}
+	return 0, fmt.Sprintf("%s must be an integer id of 0 or more, got %s", name, shown(fmt.Sprint(v)))
+}
+
 // --- value coercion (permissive request params, as the API accepts them) -----
 
 func truthy(v any) bool {

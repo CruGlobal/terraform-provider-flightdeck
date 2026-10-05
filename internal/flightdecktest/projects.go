@@ -1,6 +1,7 @@
 package flightdecktest
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
 	"sort"
@@ -206,11 +207,16 @@ func (s *Server) serializeProject(p *Project, detail bool) map[string]any {
 	for k, v := range s.projects().forcedFeatures {
 		features[k] = v
 	}
+	// No lead reads as null, as in the API; 0 is how the fake stores none.
+	var lead any
+	if p.LeadID != 0 {
+		lead = p.LeadID
+	}
 	out := map[string]any{
 		"id": p.ID, "name": p.Name, "identifier": p.Identifier,
 		"description": p.Description, "emoji": p.Emoji, "archived": p.Archived,
 		"features": features, "github_repo_full_name": p.GithubRepoFullName,
-		"lead_id": p.LeadID, "network": p.Network, "app": nullableString(p.App),
+		"lead_id": lead, "network": p.Network, "app": nullableString(p.App),
 		"lock_version": p.LockVersion,
 		"created_at":   iso(p.CreatedAt), "updated_at": iso(p.UpdatedAt),
 	}
@@ -297,13 +303,23 @@ func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, strin
 			p.App = app
 		}
 	}
+	// lead_id: a blank clears it; anything that is not an id is refused; a
+	// user outside the workspace is refused with the same words whether or not
+	// the id names anybody. The lead the project already has is always
+	// accepted back, even if that person has since left the workspace.
 	if v, ok := attrs["lead_id"]; ok {
-		if v == nil {
+		if blankValue(v) {
 			p.LeadID = 0
-		} else if id, isNum := asInt64(v); isNum && s.workspaceUser(id) != nil {
-			p.LeadID = id
 		} else {
-			return http.StatusNotFound, "not_found", "Not found"
+			id, refusal := idParam("lead_id", v)
+			if refusal != "" {
+				return http.StatusUnprocessableEntity, "invalid_attribute", refusal
+			}
+			if id != p.LeadID && s.workspaceUser(id) == nil {
+				return http.StatusUnprocessableEntity, "invalid_attribute",
+					fmt.Sprintf("lead_id %d is not a member of this workspace; only workspace members can lead a project", id)
+			}
+			p.LeadID = id
 		}
 	}
 	if v, ok := attrs["name"]; ok {

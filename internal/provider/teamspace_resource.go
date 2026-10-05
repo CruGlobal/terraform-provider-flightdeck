@@ -244,6 +244,15 @@ func (r *teamspaceResource) ImportState(ctx context.Context, req resource.Import
 // addTeamspaceWriteError reports a failed create or update. A 403 on these is
 // the workspace guest floor: any other member may write a teamspace.
 func addTeamspaceWriteError(diags *diag.Diagnostics, summary string, err error) {
+	if client.HasCode(err, client.CodeIdempotencyKeyReused) {
+		diags.AddError("Flightdeck refused this teamspace create's idempotency key",
+			"Flightdeck has already used this create's Idempotency-Key, in the last 24 hours, for a teamspace with "+
+				"different arguments, so it refused this create and made nothing. The provider builds the key from the "+
+				"arguments, so a different body under the same key means another client used that key. Change any "+
+				"argument (the description, say) to send a different key, or apply again once a day has passed since "+
+				"the other create.\n\nThe API said: "+apiMessage(err))
+		return
+	}
 	if client.IsForbidden(err) {
 		diags.AddError("Workspace guests cannot create or change teamspaces",
 			"Any member of the workspace except a guest can create and change a teamspace. Use a token whose user "+

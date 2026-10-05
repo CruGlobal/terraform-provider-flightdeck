@@ -230,7 +230,7 @@ func (s *Server) idempotentlyWithheld(w http.ResponseWriter, r *http.Request, sc
 		s.mu.Unlock()
 		if fingerprint != "" && stored.fingerprint != "" && stored.fingerprint != fingerprint {
 			writeError(w, http.StatusConflict, "idempotency_key_reused",
-				"This Idempotency-Key was already used for a create with different attributes. Send the original attributes to replay it, or a new key to create a separate resource.")
+				"This Idempotency-Key was already used for a create with different attributes. Retry with the original attributes to replay that result, or use a new key to create a separate resource.")
 			return
 		}
 		if liveID != 0 {

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/CruGlobal/terraform-provider-flightdeck/internal/flightdecktest"
 )
 
 func teamspaceListServer(t *testing.T, names ...string) (*Client, *atomic.Int32) {
@@ -79,5 +81,42 @@ func TestTeamspaceHas(t *testing.T) {
 	}
 	if !teamspaceHas(&Teamspace{Name: "Bare"}, Fields{"name": "Bare"}) {
 		t.Error("a team with no description or lead should match a create that sends neither")
+	}
+}
+
+// Like the API, the fake checks a teamspace create's body against its key:
+// the same key and body replay the first create, and the same key with a
+// different body is a 409 idempotency_key_reused that creates nothing.
+func TestFakeTeamspaceCreateIsFingerprinted(t *testing.T) {
+	fake := flightdecktest.New(t)
+	c, err := New(fake.URL, fake.Token())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	post := func(fields Fields) (*Teamspace, error) {
+		var out Teamspace
+		err := c.Post(ctx, teamspacesPath, map[string]any{teamspaceRoot: fields}, &out, WithIdempotencyKey("one-key"))
+		return &out, err
+	}
+	first, err := post(Fields{"name": "Platform"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := post(Fields{"name": "Platform"})
+	if err != nil || again.ID != first.ID {
+		t.Fatalf("the same key and body: got %+v, %v; want a replay of %d", again, err, first.ID)
+	}
+	for _, other := range []Fields{{"name": "Platform core"}, {"name": "Platform", "description": "Pipelines"}} {
+		if _, err := post(other); !HasCode(err, CodeIdempotencyKeyReused) {
+			t.Errorf("the same key with %v: err = %v, want 409 idempotency_key_reused", other, err)
+		}
+	}
+	teams, err := c.ListTeamspaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(teams) != 1 {
+		t.Errorf("teams = %+v, want only the first", teams)
 	}
 }

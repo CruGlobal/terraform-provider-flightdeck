@@ -291,8 +291,8 @@ func (s *Server) listTeamspaces(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	name := q.Get("name")
-	filtered := strings.Trim(name, rubyBlank) != ""
-	if filtered && utf8.RuneCountInString(strings.Trim(name, rubyBlank)) > 255 {
+	filtered := strings.Trim(name, apiBlank) != ""
+	if filtered && utf8.RuneCountInString(strings.Trim(name, apiBlank)) > 255 {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_attribute", "name must be 255 characters or fewer")
 		return
 	}
@@ -333,9 +333,6 @@ func sqlLowerEqual(a, b string) bool {
 	return lowerA == lowerB || strings.EqualFold(a, b)
 }
 
-// rubyBlank is what the API strips when it asks whether a string is blank.
-const rubyBlank = "\x00\t\n\v\f\r "
-
 // applyTeamspaceAttrs mirrors the API's applier: read-only keys and unknown
 // keys are refused by name; a blank name is no opinion; a blank description
 // and a blank or null lead clear them; a lead must be a workspace member.
@@ -357,7 +354,7 @@ func (s *Server) applyTeamspaceAttrs(t *Teamspace, attrs map[string]any) (int, s
 		if !isStr {
 			return http.StatusUnprocessableEntity, "invalid_attribute", fmt.Sprintf("name must be a string, got %T", v)
 		}
-		if strings.Trim(str, rubyBlank) != "" {
+		if strings.Trim(str, apiBlank) != "" {
 			t.Name = str
 		}
 	}
@@ -366,7 +363,7 @@ func (s *Server) applyTeamspaceAttrs(t *Teamspace, attrs map[string]any) (int, s
 		case nil:
 			t.Description = nil
 		case string:
-			if strings.Trim(d, rubyBlank) == "" {
+			if strings.Trim(d, apiBlank) == "" {
 				t.Description = nil
 			} else {
 				t.Description = &d
@@ -376,12 +373,12 @@ func (s *Server) applyTeamspaceAttrs(t *Teamspace, attrs map[string]any) (int, s
 		}
 	}
 	if v, has := attrs["lead_id"]; has {
-		if v == nil || isBlankString(v) {
+		if blankValue(v) {
 			t.LeadID = nil
 		} else {
-			id, ok := asInt64(v)
-			if !ok {
-				return http.StatusUnprocessableEntity, "invalid_attribute", fmt.Sprintf("lead_id must be an integer id, got %v", v)
+			id, refusal := idParam("lead_id", v)
+			if refusal != "" {
+				return http.StatusUnprocessableEntity, "invalid_attribute", refusal
 			}
 			t.LeadID = &id
 		}
@@ -406,12 +403,6 @@ func equalPtr[T comparable](a, b *T) bool {
 	return *a == *b
 }
 
-// isBlankString reports a string the API reads as blank.
-func isBlankString(v any) bool {
-	s, ok := v.(string)
-	return ok && strings.Trim(s, rubyBlank) == ""
-}
-
 func (s *Server) createTeamspace(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	refused := s.refuseGuest(w)
@@ -423,7 +414,16 @@ func (s *Server) createTeamspace(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.withIdempotency(w, r, "teamspace", func() (int, any) {
+	// Fingerprinted, like the API: the same key with a different body is a
+	// 409 idempotency_key_reused, and nothing is created. lock_version, which
+	// a create never reads, is left out of the fingerprint.
+	fingerprinted := map[string]any{}
+	for k, v := range attrs {
+		if k != "lock_version" {
+			fingerprinted[k] = v
+		}
+	}
+	s.withIdempotencyFingerprint(w, r, "teamspace", fingerprintOf(fingerprinted), func() (int, any) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		now := time.Now()
@@ -611,12 +611,12 @@ func linkTargetID(attrs map[string]any, key string) (int64, int, string) {
 		}
 	}
 	v, has := attrs[key]
-	if !has || v == nil || isBlankString(v) {
+	if !has || blankValue(v) {
 		return 0, http.StatusUnprocessableEntity, key + " is required"
 	}
-	id, ok := asInt64(v)
-	if !ok {
-		return 0, http.StatusUnprocessableEntity, fmt.Sprintf("%s must be an integer id, got %v", key, v)
+	id, refusal := idParam(key, v)
+	if refusal != "" {
+		return 0, http.StatusUnprocessableEntity, refusal
 	}
 	return id, 0, ""
 }

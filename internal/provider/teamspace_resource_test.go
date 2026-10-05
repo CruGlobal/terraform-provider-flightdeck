@@ -243,6 +243,24 @@ data "flightdeck_teamspace" "read" {
 	})
 }
 
+// Flightdeck refuses a create whose Idempotency-Key it already used for a
+// different body. The error says what happened and how to get past it.
+func TestTeamspace_reusedIdempotencyKeyIsExplained(t *testing.T) {
+	env := newTestEnv(t, "teamspace")
+	env.requireFake(t)
+	env.fake.RefuseNext(http.MethodPost, "/teamspaces", http.StatusConflict, "idempotency_key_reused",
+		"This Idempotency-Key was already used for a create with different attributes.")
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: teamspaceConfig(env, `  name = "Platform"`),
+				ExpectError: regexMust(`(?s)refused this teamspace create's idempotency key.*made\s+nothing.*Change\s+any\s+argument` +
+					`.*already\s+used\s+for\s+a\s+create\s+with\s+different\s+attributes`),
+			},
+		},
+	})
+}
+
 func TestTeamspace_staleWriteIsReported(t *testing.T) {
 	env := newTestEnv(t, "teamspace")
 	env.requireFake(t)

@@ -56,8 +56,30 @@ func addAPIError(diags *diag.Diagnostics, summary string, err error) {
 // When the refusal carries that code and the re-read still finds the state's
 // version, that is the likelier cause, and the message leads with it rather
 // than with an edit that may not have happened. A 409 without the code (an
-// older server's uniqueness conflict, say) keeps the plain message.
+// older server's uniqueness conflict, say) keeps the plain message. A refusal
+// that follows an earlier, unanswered send of the same write is most likely
+// that write's own doing, and says so first.
 func addStaleError(diags *diag.Diagnostics, what string, stateVersion int64, current *int64, err error) {
+	// An earlier attempt at this same write got no answer (it timed out, or
+	// the connection dropped) and was sent again. That earlier attempt may
+	// have been applied, and then it is what moved the version: blaming
+	// someone outside Terraform, or saying nothing was overwritten, would be
+	// wrong.
+	if apiErr, ok := client.AsError(err); ok && apiErr.EarlierSendUnanswered {
+		detail := fmt.Sprintf("An earlier attempt at this write to %s got no answer (it timed out, or the connection "+
+			"dropped), so it was sent again. The retry was refused because %s had changed since the last refresh "+
+			"(state has lock_version %d", what, what, stateVersion)
+		if current != nil {
+			detail += fmt.Sprintf(", the server now has %d", *current)
+		}
+		detail += "), most likely because the earlier attempt was applied. Run `terraform plan` again: if it shows " +
+			"no changes, the write was applied; otherwise it shows what is different."
+		if apiErr.Message != "" {
+			detail += "\n\nThe API said: " + apiErr.Message
+		}
+		diags.AddError(what+" may already have this change", detail)
+		return
+	}
 	var summary, detail string
 	if current != nil && *current == stateVersion && client.HasCode(err, client.CodeStaleObject) {
 		summary = what + " was not written: the write lost a race"

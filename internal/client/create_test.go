@@ -507,8 +507,13 @@ func TestGatewayErrorsRetryOnlyReplayableRequests(t *testing.T) {
 }
 
 func TestIsTransient(t *testing.T) {
-	if isTransient(context.Canceled) || isTransient(context.DeadlineExceeded) {
-		t.Error("context errors must not be transient")
+	if isTransient(context.Canceled) || isTransient(&url.Error{Op: "Get", Err: context.Canceled}) {
+		t.Error("cancellation must not be transient")
+	}
+	// The http.Client's own Timeout matches context.DeadlineExceeded; whether
+	// the caller's context ran out is checked separately, in do.
+	if !isTransient(context.DeadlineExceeded) || !isTransient(&url.Error{Op: "Get", Err: context.DeadlineExceeded}) {
+		t.Error("a deadline is one attempt timing out, and transient")
 	}
 	if !isTransient(&net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}) {
 		t.Error("connection refused should be transient")

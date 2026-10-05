@@ -133,6 +133,13 @@ Full reference docs (generated from the provider schema) live in
   re-run `terraform plan` to pick up the change.
 - Rate limiting (HTTP 429) is handled with client-side backoff that
   honours `Retry-After`.
+- Each attempt at a request has 60 seconds to be answered. One that times
+  out, or whose connection drops, before its answer arrives is sent again
+  with backoff when that is safe: a read, a delete, a create carrying its
+  `Idempotency-Key`, a teamspace member or project link (Flightdeck answers
+  a repeat with the existing link), or an update carrying `If-Match`. Any
+  other write is not resent, because the first attempt may have taken
+  effect.
 - Deletes carry `If-Match` too. A delete is not an overwrite, so a stale
   version there is answered by re-reading once and deleting with the
   current version. A project delete carries no precondition; if it loses

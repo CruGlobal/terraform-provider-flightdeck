@@ -94,6 +94,15 @@ type Server struct {
 	// refusals are requests to answer with a canned error instead of serving
 	// them, so nothing they ask for happens.
 	refusals []refusal
+	// slowResponses are requests to serve at once and then answer late.
+	slowResponses []slowResponse
+}
+
+// slowResponse holds back the answer to the next n requests matching it.
+type slowResponse struct {
+	method, pathSuffix string
+	delay              time.Duration
+	n                  int
 }
 
 // refusal is a one-shot canned error for the next request matching it.
@@ -219,6 +228,17 @@ func (s *Server) RefuseNext(method, pathSuffix string, status int, code, message
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refusals = append(s.refusals, refusal{method: method, pathSuffix: pathSuffix, status: status, code: code, message: message})
+}
+
+// DelayResponses makes the next n requests with the given method whose path
+// ends in pathSuffix take effect at once, as usual, and then hold their answer
+// back for delay before sending it: a server that did the work and answered
+// slowly. A client that gives up first sees a timeout for a request the
+// server did receive. The answer is dropped if the client has gone.
+func (s *Server) DelayResponses(method, pathSuffix string, delay time.Duration, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.slowResponses = append(s.slowResponses, slowResponse{method: method, pathSuffix: pathSuffix, delay: delay, n: n})
 }
 
 // OmitErrorCodes makes every error body prose-only (no `code`), like a
@@ -360,7 +380,35 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				break
 			}
 		}
+		var delay time.Duration
+		for i := range s.slowResponses {
+			if sr := &s.slowResponses[i]; !drop && sr.n > 0 && sr.method == r.Method && strings.HasSuffix(r.URL.Path, sr.pathSuffix) {
+				sr.n--
+				delay = sr.delay
+				break
+			}
+		}
 		s.mu.Unlock()
+		if delay > 0 {
+			// Serve now, so the work is done whatever happens to the answer,
+			// then hold the answer back.
+			held := &statusRecorder{ResponseWriter: discardWriter{header: http.Header{}}, status: http.StatusOK}
+			next.ServeHTTP(held, r)
+			select {
+			case <-time.After(delay):
+			case <-r.Context().Done():
+				// The client gave up; record what the server did and stop.
+				rec.status = held.status
+				rec.body.Write(held.body.Bytes())
+				return
+			}
+			for k, v := range held.Header() {
+				rec.Header()[k] = v
+			}
+			rec.WriteHeader(held.status)
+			_, _ = rec.Write(held.body.Bytes())
+			return
+		}
 		if drop {
 			// Serve into a recorder the client never sees, then hang up.
 			lost := &statusRecorder{ResponseWriter: discardWriter{header: http.Header{}}, status: http.StatusOK}

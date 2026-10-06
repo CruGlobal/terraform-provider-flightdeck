@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -93,8 +94,10 @@ func (r *projectMemberResource) Schema(_ context.Context, _ resource.SchemaReque
 			},
 			"user_id": schema.Int64Attribute{
 				MarkdownDescription: "Id of the workspace member, which a `flightdeck_workspace_member` data source resolves " +
-					"from an email address. Changing it replaces the membership.",
+					"from an email address. An id that isn't a member of the workspace fails the apply. Changing it " +
+					"replaces the membership.",
 				Required:      true,
+				Validators:    []validator.Int64{int64validator.AtLeast(1)},
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 			},
 			"name": schema.StringAttribute{
@@ -133,6 +136,10 @@ func (r *projectMemberResource) Create(ctx context.Context, req resource.CreateR
 	fields := client.Fields{"user_id": plan.UserID.ValueInt64(), "role": plan.Role.ValueString()}
 	created, err := r.client.AddProjectMember(ctx, projectID, fields, client.PayloadKey("project_member", strconv.FormatInt(projectID, 10), fields))
 	if err != nil {
+		if addRefusedID(&resp.Diagnostics, "user_id", "Cannot add this user to the project",
+			"Only members of the workspace can be added to a project. Nothing was added.", err) {
+			return
+		}
 		addAPIError(&resp.Diagnostics, "Error adding Flightdeck project member", err)
 		return
 	}

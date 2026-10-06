@@ -47,7 +47,7 @@ resource "flightdeck_project_member" "deploy_bot" {
 
 - `project_id` (Number) Id of the project. Changing it replaces the membership.
 - `role` (String) Project role: a built-in (`guest`, `member`, `admin`, `commenter`) or a custom role key from the workspace's permission scheme.
-- `user_id` (Number) Id of the workspace member, which a `flightdeck_workspace_member` data source resolves from an email address. Changing it replaces the membership.
+- `user_id` (Number) Id of the workspace member, which a `flightdeck_workspace_member` data source resolves from an email address. An id that isn't a member of the workspace fails the apply. Changing it replaces the membership.
 
 ### Read-Only
 

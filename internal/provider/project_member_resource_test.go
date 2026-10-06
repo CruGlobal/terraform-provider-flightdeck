@@ -200,7 +200,8 @@ func TestProjectMember_removedOutOfBandIsRecreated(t *testing.T) {
 }
 
 // A user who isn't in the workspace is refused. Flightdeck answers 422
-// invalid_attribute naming user_id; versions before that answered 404.
+// invalid_attribute naming user_id, reported against user_id; versions before
+// that answered 404, which gets the generic error.
 func TestProjectMember_unknownUserIsRefused(t *testing.T) {
 	env := newTestEnv(t, "project_member")
 	identifier := randIdentifier()
@@ -208,8 +209,8 @@ func TestProjectMember_unknownUserIsRefused(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: memberConfig(env, identifier, 999999999, "member"),
-				ExpectError: regexMust(`(?s)Error adding Flightdeck project member.*HTTP\s+(404\s+\(not_found\)|422\s+\(invalid_attribute\)` +
-					`.*user_id\s+999999999\s+is\s+not\s+a\s+member\s+of\s+this\s+workspace)`),
+				ExpectError: regexMust(`(?s)(Error adding Flightdeck project member.*HTTP\s+404\s+\(not_found\)|` +
+					`Cannot\s+add\s+this\s+user\s+to\s+the\s+project.*user_id\s+999999999\s+is\s+not\s+a\s+member\s+of\s+this\s+workspace)`),
 			},
 		},
 	})

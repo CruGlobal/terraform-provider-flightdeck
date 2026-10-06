@@ -38,6 +38,21 @@ func (s *Server) AddServiceAccount(name, email string) User {
 	return u
 }
 
+// RemoveWorkspaceMember takes a person out of the workspace, the way a
+// workspace admin removing them would. Like the API, nothing clears the
+// project or teamspace leads that still name them: a lead who has left stays
+// stored, and is accepted back on a write that sends it unchanged.
+func (s *Server) RemoveWorkspaceMember(userID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, m := range s.members {
+		if m.ID == userID {
+			s.members = append(s.members[:i], s.members[i+1:]...)
+			return
+		}
+	}
+}
+
 // kindOf defaults an unset kind to human, so seeded users need not spell it.
 func kindOf(u User) string {
 	if u.Kind == "" {

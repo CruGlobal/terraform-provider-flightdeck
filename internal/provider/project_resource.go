@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -103,11 +104,15 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Validators:  []validator.Map{featureKeys{}},
 			},
 			"lead_id": schema.Int64Attribute{
-				MarkdownDescription: "User id of the project lead; must be a workspace member, and a " +
-					"`flightdeck_workspace_member` data source resolves one from an email address. Defaults to the " +
-					"token's user on create. When unset, the current lead is kept.",
+				MarkdownDescription: "User id of the project lead, which a `flightdeck_workspace_member` data source " +
+					"resolves from an email address. A new lead must be a member of the workspace and not a guest; " +
+					"Flightdeck checks the role, so naming a guest fails the apply rather than the plan. The lead the " +
+					"project already has is always accepted back: a guest who was named before Flightdeck refused " +
+					"guests or was made a guest since, and someone who has left the workspace. Defaults to the token's " +
+					"user on create. When unset, the current lead is kept.",
 				Optional:      true,
 				Computed:      true,
+				Validators:    []validator.Int64{int64validator.AtLeast(1)},
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
 			"github_repo_full_name": schema.StringAttribute{
@@ -123,7 +128,8 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				MarkdownDescription: "Project visibility: `public_project` (every workspace member can see it) or " +
 					"`private_project` (explicit members only). New projects are public. When unset, the current " +
 					"value is kept. Making a project private also gives the token's user and the project lead admin " +
-					"memberships so nobody is locked out; members who lose implicit access are not notified.",
+					"memberships so nobody is locked out (the lead only while they are a workspace member and not a " +
+					"guest); members who lose implicit access are not notified.",
 				Optional:      true,
 				Computed:      true,
 				Validators:    []validator.String{stringvalidator.OneOf(client.ProjectNetworks...)},
@@ -434,6 +440,12 @@ func addIfProjectGone(ctx context.Context, c *client.Client, projectID int64, id
 // which is what decides whether a 403 is the app's workspace-admin bar or the
 // token lacking the project role every other update needs.
 func addProjectWriteError(diags *diag.Diagnostics, summary string, changingApp bool, err error) {
+	if addRefusedID(diags, "lead_id", "Flightdeck refused this project lead",
+		"A new lead must be a member of the workspace and not a guest. A `flightdeck_workspace_member` data "+
+			"source finds a member's id from an email address, but it can't tell a guest from a member, so "+
+			"Flightdeck is what checks the role. Nothing was saved.", err) {
+		return
+	}
 	apiErr, _ := client.AsError(err)
 	switch {
 	case client.HasCode(err, client.CodeAppTaken):

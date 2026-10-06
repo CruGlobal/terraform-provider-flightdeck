@@ -178,7 +178,8 @@ func (r *stateResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	s, err := r.client.GetState(ctx, state.ID.ValueInt64())
 	if err != nil {
 		if client.IsNotFound(err) {
-			resp.State.RemoveResource(ctx)
+			removeGone(ctx, r.client, resp, state.ProjectID.ValueInt64(), fmt.Sprintf("workflow state %d", state.ID.ValueInt64()),
+				fmt.Sprint(state.ID.ValueInt64()))
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error reading Flightdeck state", err)

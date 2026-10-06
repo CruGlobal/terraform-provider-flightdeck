@@ -320,7 +320,8 @@ func (r *pagerDutyIntegrationResource) Read(ctx context.Context, req resource.Re
 	pd, err := r.client.GetPagerDuty(ctx, state.ProjectID.ValueInt64())
 	if err != nil {
 		if client.IsNotFound(err) {
-			resp.State.RemoveResource(ctx)
+			removeGone(ctx, r.client, resp, state.ProjectID.ValueInt64(), fmt.Sprintf("project %d's PagerDuty link", state.ProjectID.ValueInt64()),
+				fmt.Sprint(state.ProjectID.ValueInt64()))
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error reading Flightdeck PagerDuty link", err)

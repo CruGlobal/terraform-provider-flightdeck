@@ -70,6 +70,10 @@ type Project struct {
 	// Deleting mirrors projects.deleting_at: the row still exists but every
 	// /api/v1 lookup goes through .not_deleting and 404s.
 	Deleting bool
+	// Hidden is a project the token's user can no longer see (removed from
+	// it, or it was made private). It answers 404 everywhere, like one that
+	// does not exist, but still holds its identifier and app.
+	Hidden bool
 }
 
 type projectStore struct {
@@ -187,10 +191,23 @@ func (s *Server) DeleteProjectOutOfBand(id int64) {
 	}
 }
 
-// liveProject resolves a project the way the API does: .not_deleting.find.
+// HideProjectFromToken takes away (hidden) or gives back the token user's
+// access to a project, the way removing them from a private project, or
+// making a project private, does. A project the token cannot see answers 404
+// on every route, the project's own and everything in it, never 403.
+func (s *Server) HideProjectFromToken(id int64, hidden bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.projects().byID[id]; p != nil {
+		p.Hidden = hidden
+	}
+}
+
+// liveProject resolves a project the way the API does for the token:
+// .not_deleting, among the projects it can see.
 func (s *Server) liveProject(id int64) *Project {
 	p := s.projects().byID[id]
-	if p == nil || p.Deleting {
+	if p == nil || p.Deleting || p.Hidden {
 		return nil
 	}
 	return p
@@ -230,7 +247,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	var live []*Project
 	for _, p := range s.projects().byID {
-		if !p.Deleting {
+		if s.liveProject(p.ID) != nil {
 			live = append(live, p)
 		}
 	}

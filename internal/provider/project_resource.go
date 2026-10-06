@@ -265,8 +265,9 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 	if err != nil {
 		if client.IsNotFound(err) {
 			// Deleted (or mid-teardown, or no longer visible to this token):
-			// gone as far as Terraform is concerned.
-			resp.State.RemoveResource(ctx)
+			// gone as far as Terraform is concerned, with a warning, since a
+			// 404 can't say which.
+			removeGoneProject(ctx, resp, state.ID.ValueInt64(), state.Identifier.ValueString())
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error reading Flightdeck project", err)

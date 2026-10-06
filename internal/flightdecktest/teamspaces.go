@@ -224,8 +224,13 @@ func serializeTeamspace(t *Teamspace) map[string]any {
 	}
 }
 
-// projectAccess is the token's access to a project. Called with s.mu held.
+// projectAccess is the token's access to a project. A project hidden from the
+// token (HideProjectFromToken) is ProjectAccessHidden whatever SetProjectAccess
+// said. Called with s.mu held.
 func (s *Server) projectAccess(projectID int64) ProjectAccess {
+	if p := s.projects().byID[projectID]; p != nil && p.Hidden {
+		return ProjectAccessHidden
+	}
 	return s.teamspaces().access[projectID]
 }
 
@@ -483,8 +488,10 @@ func (s *Server) destroyTeamspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	blocking := 0
+	// Every owned project not being deleted counts, the ones the token cannot
+	// see included.
 	for pid := range s.teamspaces().projects[t.ID] {
-		if s.liveProject(pid) != nil && s.projectAccess(pid).missingLinkCapability() != "" {
+		if p := s.projects().byID[pid]; p != nil && !p.Deleting && s.projectAccess(pid).missingLinkCapability() != "" {
 			blocking++
 		}
 	}

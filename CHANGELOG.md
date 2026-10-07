@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.7.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.6.0...v0.7.0) (2026-10-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* never send a body on a read, require a count on threshold error rules, and explain lost races and 404s ([#34](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/34))
+
+### Added
+
+* manage a project's agent work settings (flightdeck_project.agent_work) ([#33](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/33)) ([c66955b](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/c66955b1ab70f17f5544e999d262e4f989838bf1))
+* manage teamspaces, their members and the projects they own (needs Flightdeck's teamspaces API) ([#35](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/35)) ([c0c7380](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/c0c7380f7ea18dc52d13a270a349269a1ddfa9a7))
+* set condition.count_browser_errors on error alert rules ([#30](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/30)) ([4fe2ce9](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/4fe2ce926507cf68a02e193e765538205b3a0ae5))
+
+
+### Fixed
+
+* never send a body on a read, require a count on threshold error rules, and explain lost races and 404s ([#34](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/34)) ([60391d5](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/60391d50cecf4128f22a04e6a2b0a30091afd267))
+* recover a lost create response, never revoke a live secret on replay, and warn when Slack needs an invite ([#32](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/32)) ([c53a3ac](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/c53a3ac029b29681062d00ec83d521a245a3ca81))
+* refuse label, state and repository names longer than Flightdeck stores, at plan time (needs Flightdeck's name limits) ([#36](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/36)) ([d47c867](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/d47c8676ce9c3eb256f20066a590130163792ea4))
+* report a refused lead, member or webhook project id against its attribute, and refuse ids below 1 at plan time (the clearer errors need Flightdeck's newer id checks) ([#38](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/38)) ([0919263](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/091926310071dfe69f80de53ef6d733fa894d057))
+* retry a request that times out, when it is safe to send again ([#37](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/37)) ([5398d04](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/5398d042c3bad81c0acd4227e86a0ccd4225b8eb))
+* warn when a resource leaves state because its project is gone or the token can no longer see it ([#39](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/39)) ([6da1c04](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/6da1c04ed1b005f108f9d2aa43c0eff1238f9e50))
+
 ## [0.6.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.5.0...v0.6.0) (2026-09-28)
 
 

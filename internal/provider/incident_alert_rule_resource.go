@@ -506,7 +506,8 @@ func (r *incidentAlertRuleResource) Read(ctx context.Context, req resource.ReadR
 	rule, err := r.client.GetIncidentAlertRule(ctx, state.ProjectID.ValueInt64(), state.ID.ValueInt64())
 	if err != nil {
 		if client.IsNotFound(err) {
-			resp.State.RemoveResource(ctx)
+			removeGone(ctx, r.client, resp, state.ProjectID.ValueInt64(), fmt.Sprintf("incident alert rule %d", state.ID.ValueInt64()),
+				fmt.Sprintf("%d/%d", state.ProjectID.ValueInt64(), state.ID.ValueInt64()))
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error reading Flightdeck incident alert rule", err)

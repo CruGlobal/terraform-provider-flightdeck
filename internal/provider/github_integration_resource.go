@@ -227,7 +227,8 @@ func (r *githubIntegrationResource) Read(ctx context.Context, req resource.ReadR
 	g, err := r.client.GetGithubIntegration(ctx, state.ID.ValueInt64())
 	if err != nil {
 		if client.IsNotFound(err) {
-			resp.State.RemoveResource(ctx)
+			removeGone(ctx, r.client, resp, state.ProjectID.ValueInt64(), fmt.Sprintf("GitHub integration %d", state.ID.ValueInt64()),
+				fmt.Sprint(state.ID.ValueInt64()))
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error reading Flightdeck GitHub integration", err)

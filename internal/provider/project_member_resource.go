@@ -156,7 +156,9 @@ func (r *projectMemberResource) Read(ctx context.Context, req resource.ReadReque
 	m, err := r.client.GetProjectMember(ctx, state.ProjectID.ValueInt64(), state.ID.ValueInt64())
 	if err != nil {
 		if client.IsNotFound(err) {
-			resp.State.RemoveResource(ctx)
+			removeGone(ctx, r.client, resp, state.ProjectID.ValueInt64(),
+				fmt.Sprintf("membership %d (user %d)", state.ID.ValueInt64(), state.UserID.ValueInt64()),
+				fmt.Sprintf("%d/%d", state.ProjectID.ValueInt64(), state.ID.ValueInt64()))
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error reading Flightdeck project member", err)

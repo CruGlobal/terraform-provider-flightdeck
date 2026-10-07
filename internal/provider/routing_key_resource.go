@@ -220,7 +220,8 @@ func (r *routingKeyResource) Read(ctx context.Context, req resource.ReadRequest,
 	k, err := r.client.GetRoutingKey(ctx, state.ProjectID.ValueInt64(), state.ID.ValueInt64())
 	if err != nil {
 		if client.IsNotFound(err) {
-			resp.State.RemoveResource(ctx)
+			removeGone(ctx, r.client, resp, state.ProjectID.ValueInt64(), fmt.Sprintf("routing key %d", state.ID.ValueInt64()),
+				fmt.Sprintf("%d/%d", state.ProjectID.ValueInt64(), state.ID.ValueInt64()))
 			return
 		}
 		addAPIError(&resp.Diagnostics, "Error reading Flightdeck routing key", err)

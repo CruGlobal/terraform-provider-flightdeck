@@ -61,7 +61,19 @@ func (p *flightdeckProvider) Schema(_ context.Context, _ provider.SchemaRequest,
 			"instance manages exactly that workspace; configure a second aliased provider to manage another. " +
 			"The token acts as the user who created it and is subject to the same per-project role checks as the UI.\n\n" +
 			"Both attributes fall back to environment variables (`FLIGHTDECK_ENDPOINT`, `FLIGHTDECK_TOKEN`); " +
-			"keeping the token out of configuration files is recommended.",
+			"keeping the token out of configuration files is recommended.\n\n" +
+			"## When the token can no longer see a project\n\n" +
+			"Flightdeck answers `404`, never `403`, for a project the token's user can't see, and for everything in " +
+			"it. So if that user is removed from a private project, or a project is made private without them, a " +
+			"refresh can't tell the project from a deleted one. The project and its resources (states, labels, " +
+			"members, ingestion tokens, alert rules, routing keys, integrations and teamspace links) **disappear from " +
+			"state**, and the next plan offers to create them again. The provider warns when a project leaves state " +
+			"this way, and when a resource in a project does while its project doesn't read back either.\n\n" +
+			"Don't apply that plan while the project still exists. Creating the resources again would fail (the " +
+			"hidden project still holds its identifier) or make copies. Instead, restore the token user's access to " +
+			"the project, then bring each resource back into state with `terraform import`, using the import id the " +
+			"warning names or the one on the resource's page. Routing keys and ingestion tokens come back without " +
+			"their secret, which Flightdeck returns only once.",
 		Attributes: map[string]schema.Attribute{
 			"endpoint": schema.StringAttribute{
 				MarkdownDescription: "Base URL of the Flightdeck deployment, for example `https://flightdeck.example.com`. " +

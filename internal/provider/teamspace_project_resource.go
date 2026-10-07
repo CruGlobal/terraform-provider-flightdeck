@@ -133,7 +133,7 @@ func (r *teamspaceProjectResource) Read(ctx context.Context, req resource.ReadRe
 		switch {
 		case client.IsNotFound(err):
 			// Unlinked, the team is gone, or the project is gone or cannot be seen.
-			resp.State.RemoveResource(ctx)
+			removeGone(ctx, r.client, resp, projectID, fmt.Sprintf("teamspace %d's link to project %d", teamspaceID, projectID), state.ID.ValueString())
 		case client.IsForbidden(err):
 			// Not gone and not readable: say so rather than guess either way.
 			resp.Diagnostics.AddError(fmt.Sprintf("Cannot read teamspace %d's link to project %d", teamspaceID, projectID),

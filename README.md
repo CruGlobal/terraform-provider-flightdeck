@@ -149,8 +149,34 @@ Full reference docs (generated from the provider schema) live in
   ids in another workspace, anything in a project the token cannot see,
   and projects mid-teardown) and removes the resource from state. On
   destroy it counts as success: of two racing deletes, one is answered
-  and the other gets the 404.
+  and the other gets the 404. That includes a project the token has lost
+  access to; see below.
 - Reads never carry a request body. Flightdeck refuses a `GET` with one.
+
+### When the token can no longer see a project
+
+Flightdeck answers 404, never 403, for a project the token's user can't
+see, and for everything in it. So if that user is removed from a private
+project, or a project is made private without them, the provider can't
+tell the project from a deleted one. **The project and its resources
+disappear from state, and the next plan offers to create them again.**
+The provider warns when a project leaves state this way, and when a
+resource in a project does while its project doesn't read back either.
+
+Don't apply that plan while the project still exists: creating the
+resources again would fail (the hidden project still holds its
+identifier) or make copies. Instead:
+
+1. Restore the token user's access to the project.
+2. Bring each resource back into state with `terraform import`. The
+   warning names each one's import id, and the commands are below.
+   Routing keys and ingestion tokens come back without their secret,
+   which Flightdeck returns only once.
+3. Run `terraform plan` and check it creates nothing. An imported
+   project lists every feature toggle, so unless the configuration
+   names them all, the plan also shows an in-place update to the
+   project's `features`. That only stops Terraform tracking the keys
+   the configuration leaves out.
 
 ### Importing existing resources
 

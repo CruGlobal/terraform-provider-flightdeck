@@ -111,8 +111,8 @@ func TestTeamspace_planTimeValidation(t *testing.T) {
 }
 
 // A lead must be a member of the workspace. The API answers anything else
-// with a 422 invalid_attribute naming lead_id, and the provider passes the
-// reason on.
+// with a 422 invalid_attribute naming lead_id, and the provider reports it
+// against lead_id with the API's reason.
 func TestTeamspace_leadOutsideTheWorkspaceIsRefused(t *testing.T) {
 	env := newTestEnv(t, "teamspace")
 	runTest(t, resource.TestCase{
@@ -121,7 +121,7 @@ func TestTeamspace_leadOutsideTheWorkspaceIsRefused(t *testing.T) {
 				Config: teamspaceConfig(env, fmt.Sprintf(`
   name    = %q
   lead_id = 999999999`, randName("Team"))),
-				ExpectError: regexMust(`(?s)Error creating Flightdeck teamspace.*HTTP\s+422\s+\(invalid_attribute\)` +
+				ExpectError: regexMust(`(?s)Cannot\s+make\s+this\s+user\s+the\s+team's\s+lead` +
 					`.*lead_id\s+999999999\s+is\s+not\s+a\s+member\s+of\s+this\s+workspace`),
 			},
 		},

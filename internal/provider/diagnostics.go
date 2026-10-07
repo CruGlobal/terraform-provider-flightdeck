@@ -3,6 +3,7 @@ package provider
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -134,6 +135,23 @@ func addReplayWithheldError(diags *diag.Diagnostics, at path.Path, summary strin
 		detail += "\n\nThe API said: " + cause.Message
 	}
 	diags.AddAttributeError(at, summary, detail)
+	return true
+}
+
+// addRefusedID reports a 422 invalid_attribute refusing the id sent as attr,
+// against that attribute, so the error points at the line to fix and reads as
+// a bad argument rather than a missing resource. Flightdeck starts each such
+// refusal with the field's name ("lead_id 7 is not a member of this
+// workspace; ..."); that prefix is only used to pick the attribute, and a
+// refusal without it (or without the code, from an older deployment) is left
+// to the caller's generic handling. why says what the attribute must name and
+// what happened to the write. It reports whether it added the error.
+func addRefusedID(diags *diag.Diagnostics, attr, summary, why string, err error) bool {
+	apiErr, ok := client.AsError(err)
+	if !ok || apiErr.Code != client.CodeInvalidAttribute || !strings.HasPrefix(apiErr.Message, attr+" ") {
+		return false
+	}
+	diags.AddAttributeError(path.Root(attr), summary, why+"\n\nThe API said: "+apiErr.Message)
 	return true
 }
 

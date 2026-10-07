@@ -131,6 +131,18 @@ func (s *Server) SetNetwork(projectID int64, network string) {
 	}
 }
 
+// SetProjectLeadOutOfBand stores a lead without asking the API's lead rules,
+// bumping lock_version: a lead named before Flightdeck refused guests as
+// leads, or someone who was a member when they were named.
+func (s *Server) SetProjectLeadOutOfBand(projectID, userID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.projects().byID[projectID]; p != nil {
+		p.LeadID = userID
+		p.LockVersion++
+	}
+}
+
 // BindApp sets a project's app the way the deploy pipeline's first release
 // event naming one does: only while it is unset, bumping lock_version.
 func (s *Server) BindApp(projectID int64, app string) {

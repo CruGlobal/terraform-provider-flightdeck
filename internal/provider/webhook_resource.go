@@ -6,6 +6,7 @@ import (
 	"regexp"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -134,8 +135,11 @@ func (r *webhookResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				PlanModifiers:       []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
 			"project_id": schema.Int64Attribute{
-				MarkdownDescription: "Restrict the webhook to events from this project. Omit for the whole workspace.",
-				Optional:            true,
+				MarkdownDescription: "Restrict the webhook to events from this project, which must be one the token can " +
+					"see and not one being deleted. The project the webhook already has is accepted back even while it " +
+					"is being deleted, so the webhook can still be changed. Omit for the whole workspace.",
+				Optional:   true,
+				Validators: []validator.Int64{int64validator.AtLeast(1)},
 			},
 			"url": schema.StringAttribute{
 				MarkdownDescription: "http(s) endpoint to deliver to. Internal and private addresses are rejected by the API.",
@@ -199,6 +203,9 @@ func (r *webhookResource) Create(ctx context.Context, req resource.CreateRequest
 			}, err) {
 			return
 		}
+		if addRefusedWebhookProject(&resp.Diagnostics, err) {
+			return
+		}
 		addAPIError(&resp.Diagnostics, "Error creating Flightdeck webhook", err)
 		return
 	}
@@ -248,6 +255,9 @@ func (r *webhookResource) Update(ctx context.Context, req resource.UpdateRequest
 			addStaleError(&resp.Diagnostics, fmt.Sprintf("Webhook %d", id), state.LockVersion.ValueInt64(), current, err)
 			return
 		}
+		if addRefusedWebhookProject(&resp.Diagnostics, err) {
+			return
+		}
 		addAPIError(&resp.Diagnostics, "Error updating Flightdeck webhook", err)
 		return
 	}
@@ -291,6 +301,14 @@ func (r *webhookResource) ImportState(ctx context.Context, req resource.ImportSt
 		"The API returns a webhook's signing secret only when it is created, so `secret` is null for an imported webhook. "+
 			"Replace the webhook (`terraform apply -replace=...`) if Terraform needs to hold the secret.")
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+// addRefusedWebhookProject reports a project_id Flightdeck refused, against
+// that attribute. It reports whether err was that refusal.
+func addRefusedWebhookProject(diags *diag.Diagnostics, err error) bool {
+	return addRefusedID(diags, "project_id", "Cannot scope the webhook to this project",
+		"project_id must name a project the token can see in this workspace, and not one being deleted. Leave it "+
+			"out for a webhook that covers every project. Nothing was saved.", err)
 }
 
 func joinBackticked(items []string) string {

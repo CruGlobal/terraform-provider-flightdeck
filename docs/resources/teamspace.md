@@ -47,7 +47,7 @@ resource "flightdeck_teamspace" "platform" {
 ### Optional
 
 - `description` (String) Free-text description. Leave it out for none; removing it clears the description. It must not be blank, because Flightdeck stores a blank description as none.
-- `lead_id` (Number) User id of the team's lead, who must be a member of the workspace. A `flightdeck_workspace_member` data source resolves one from an email address. Leave it out for no lead; removing it clears the lead.
+- `lead_id` (Number) User id of the team's lead, who must be a member of the workspace. A `flightdeck_workspace_member` data source resolves one from an email address. The lead the team already has is accepted back even after they leave the workspace, so a team whose lead left can still be changed. Leave it out for no lead; removing it clears the lead.
 
 ### Read-Only
 

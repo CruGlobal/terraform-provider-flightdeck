@@ -66,7 +66,7 @@ resource "flightdeck_webhook" "app_intake" {
 ### Optional
 
 - `active` (Boolean) Whether deliveries are sent. A new webhook is active. When unset, the webhook's current value is kept (so importing a paused webhook does not plan to reactivate it).
-- `project_id` (Number) Restrict the webhook to events from this project. Omit for the whole workspace.
+- `project_id` (Number) Restrict the webhook to events from this project, which must be one the token can see and not one being deleted. The project the webhook already has is accepted back even while it is being deleted, so the webhook can still be changed. Omit for the whole workspace.
 
 ### Read-Only
 

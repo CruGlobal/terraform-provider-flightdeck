@@ -122,8 +122,9 @@ func (r *teamspaceResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			},
 			"lead_id": schema.Int64Attribute{
 				MarkdownDescription: "User id of the team's lead, who must be a member of the workspace. A " +
-					"`flightdeck_workspace_member` data source resolves one from an email address. Leave it out for no " +
-					"lead; removing it clears the lead.",
+					"`flightdeck_workspace_member` data source resolves one from an email address. The lead the team " +
+					"already has is accepted back even after they leave the workspace, so a team whose lead left can " +
+					"still be changed. Leave it out for no lead; removing it clears the lead.",
 				Optional:   true,
 				Validators: []validator.Int64{int64validator.AtLeast(1)},
 			},
@@ -257,6 +258,10 @@ func addTeamspaceWriteError(diags *diag.Diagnostics, summary string, err error) 
 		diags.AddError("Workspace guests cannot create or change teamspaces",
 			"Any member of the workspace except a guest can create and change a teamspace. Use a token whose user "+
 				"is a workspace member, or ask a workspace admin to make this user one.\n\nThe API said: "+apiMessage(err))
+		return
+	}
+	if addRefusedID(diags, "lead_id", "Cannot make this user the team's lead",
+		"The lead must be a member of the workspace. Nothing was saved.", err) {
 		return
 	}
 	addAPIError(diags, summary, err)

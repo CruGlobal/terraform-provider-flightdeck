@@ -204,27 +204,32 @@ func (s *Server) createMember(w http.ResponseWriter, r *http.Request) {
 		if s.liveProject(pid) == nil {
 			return http.StatusNotFound, errorBody("Not found", "not_found")
 		}
-		// A blank user is a missing one. Anything that is not an id, and a user
-		// outside the workspace (worded the same whether or not the id names
-		// anybody), is refused naming user_id.
-		if blankValue(attrs["user_id"]) {
-			return http.StatusUnprocessableEntity, errorBody("User must exist", "validation_failed")
-		}
-		userID, refusal := idParam("user_id", attrs["user_id"])
-		if refusal != "" {
-			return http.StatusUnprocessableEntity, errorBody(refusal, "invalid_attribute")
-		}
-		if s.workspaceUser(userID) == nil {
-			return http.StatusUnprocessableEntity, errorBody(fmt.Sprintf(
-				"user_id %d is not a member of this workspace; only workspace members can be added to a project", userID),
-				"invalid_attribute")
+		// A blank user is a missing one, which only the save refuses, after the
+		// role has been read. Anything that is not an id, and a user outside the
+		// workspace (worded the same whether or not the id names anybody), is
+		// refused naming user_id, before the role.
+		var userID int64
+		missingUser := blankValue(attrs["user_id"])
+		if !missingUser {
+			id, refusal := idParam("user_id", attrs["user_id"])
+			if refusal != "" {
+				return http.StatusUnprocessableEntity, errorBody(refusal, "invalid_attribute")
+			}
+			if s.workspaceUser(id) == nil {
+				return http.StatusUnprocessableEntity, errorBody(fmt.Sprintf(
+					"user_id %d is not a member of this workspace; only workspace members can be added to a project", id),
+					"invalid_attribute")
+			}
+			userID = id
 		}
 		m := &ProjectMember{ID: s.id(), ProjectID: pid, UserID: userID, Role: "member", BuiltinRole: "member"}
 		if v, has := attrs["role"]; has {
 			if !s.applyRole(m, asString(v)) {
-				return http.StatusUnprocessableEntity, map[string]any{
-					"error": "unknown role: " + asString(v), "code": "invalid_attribute"}
+				return http.StatusUnprocessableEntity, errorBody("unknown role: "+asString(v), "invalid_attribute")
 			}
+		}
+		if missingUser {
+			return http.StatusUnprocessableEntity, errorBody("User must exist", "validation_failed")
 		}
 		if s.memberForUserLocked(pid, userID) != nil {
 			return http.StatusUnprocessableEntity, map[string]any{
@@ -258,8 +263,17 @@ func (s *Server) updateMember(w http.ResponseWriter, r *http.Request) {
 	if !checkIfMatch(w, r, m.LockVersion) {
 		return
 	}
-	if v, has := attrs["user_id"]; has {
-		if requested, _ := asInt64(v); requested != m.UserID {
+	// user_id on an existing membership: a blank leaves it alone, anything
+	// that is not an id is refused as on a create, the stored id in any
+	// spelling of an id is accepted back, and any other id is a change, which
+	// is refused.
+	if v, has := attrs["user_id"]; has && !blankValue(v) {
+		requested, refusal := idParam("user_id", v)
+		if refusal != "" {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_attribute", refusal)
+			return
+		}
+		if requested != m.UserID {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_attribute",
 				"user_id cannot be changed on an existing membership — DELETE it and POST a new one")
 			return

@@ -648,7 +648,7 @@ func TestProject_leadIDIsSettableAndDefaultsToTheCreator(t *testing.T) {
 				Config: projectConfig(env, identifier, `
   name    = "Led"
   lead_id = 999999`),
-				ExpectError: regexMust(`(?s)HTTP\s+422\s+\(invalid_attribute\).*lead_id\s+999999\s+is\s+not\s+a\s+member\s+of\s+this\s+workspace`),
+				ExpectError: regexMust(`(?s)Flightdeck\s+refused\s+this\s+project\s+lead.*lead_id\s+999999\s+is\s+not\s+a\s+member\s+of\s+this\s+workspace`),
 			},
 		},
 	})
@@ -809,7 +809,10 @@ func TestProject_leadOutsideTheWorkspaceKeepsTheProject(t *testing.T) {
 				Config: projectConfig(env, identifier, fmt.Sprintf(`
   name    = %q
   lead_id = 999999999`, name)),
-				ExpectError: regexMust(`(?s)Error updating Flightdeck project.*HTTP\s+(404\s+\(not_found\)|422\s+\(invalid_attribute\))`),
+				// The 422 is reported against lead_id; an older Flightdeck's 404
+				// gets the generic error.
+				ExpectError: regexMust(`(?s)(Error updating Flightdeck project.*HTTP\s+404\s+\(not_found\)|` +
+					`Flightdeck\s+refused\s+this\s+project\s+lead.*lead_id\s+999999999\s+is\s+not\s+a\s+member\s+of\s+this\s+workspace)`),
 			},
 			{
 				// Still in state, unchanged: nothing to do.

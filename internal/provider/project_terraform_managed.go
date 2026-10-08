@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -37,14 +38,17 @@ const terraformManagedDescription = "Whether Terraform manages this project's se
 	"Setting or changing it needs a token whose user is a **workspace owner or admin**, on a create too. Sending " +
 	"the value Flightdeck already has is fine for any token, so a token that is not an owner or admin can still " +
 	"update a project whose flag already matches the configuration. Such a token can create a project only with " +
-	"`terraform_managed = false`.\n\n" +
+	"`terraform_managed = false`. To leave an existing project's flag as it is, add " +
+	"`lifecycle { ignore_changes = [terraform_managed] }` to it.\n\n" +
 	"Removing a project from Terraform without destroying it (a `removed` block, or `terraform state rm`) leaves " +
 	"the flag on, so the project stays read only in the app. To hand a project back to the app, apply " +
 	"`terraform_managed = false` first, then remove it from Terraform.\n\n" +
 	"Importing a project that is not marked yet plans an update that sets it to `true`.\n\n" +
 	"Needs a Flightdeck that supports `terraform_managed`. Against an older one, a project that already exists " +
-	"keeps working while this is unset: it reads as null and the provider does not send it. Creating a project, " +
-	"or setting this explicitly, fails there with an error asking you to upgrade Flightdeck."
+	"keeps working while this is unset: it reads as null and the provider does not send it. Creating a project " +
+	"(even with `terraform_managed = false`, since a create always sends it), or setting this explicitly, fails " +
+	"there with an error asking you to upgrade Flightdeck. The `flightdeck_project` data source tells the two " +
+	"apart: its `terraform_managed` is null on a Flightdeck without the setting."
 
 // terraformManagedAttribute is the resource's terraform_managed attribute. Its
 // default is planned by planTerraformManaged rather than a schema Default: a
@@ -99,8 +103,9 @@ func keepUnsentTerraformManaged(state, plan *projectModel) {
 }
 
 // projectAdminChanges says which settings a project write sets or changes
-// that only a workspace owner or admin may. It is what decides whether a 403
-// is that bar or the project role every other update needs.
+// that only a workspace owner or admin may. With the API's message, it is
+// what decides whether a 403 is that bar or the project role every other
+// write needs.
 type projectAdminChanges struct {
 	// app is whether the write sets or changes the app. The app is only
 	// sent when it does.
@@ -131,6 +136,16 @@ func projectAdminChangesOf(fields client.Fields, prior *projectModel) projectAdm
 	return changes
 }
 
+// refusesTerraformManaged reports whether a 403 is Flightdeck's refusal of a
+// change to terraform_managed, which always names the setting ("Only a
+// workspace owner or admin can set or change a project's terraform_managed.").
+// A 403 that doesn't name it is some other bar, such as a guest's create or a
+// project role that can't update the project, even on a write that changes
+// the flag.
+func refusesTerraformManaged(apiErr *client.Error) bool {
+	return strings.Contains(apiErr.Message, "terraform_managed")
+}
+
 // addTerraformManagedForbidden reports a 403 to a write that sets or changes
 // terraform_managed, against the attribute, saying how to get past it: a
 // workspace owner's or admin's token, or a configuration that leaves the flag
@@ -146,21 +161,35 @@ func addTerraformManagedForbidden(diags *diag.Diagnostics, managed bool, apiErr 
 			instead+". Nothing was saved.\n\nThe API said: "+apiErr.Error())
 }
 
-// addTerraformManagedUnsupportedError explains a refused write that named
+// terraformManagedUnknownNote closes the generic error for a refused write
+// that named terraform_managed when a read couldn't tell whether this
+// Flightdeck knows the setting.
+const terraformManagedUnknownNote = "If the API calls terraform_managed an unknown key, this Flightdeck is older " +
+	"than the version that added it: upgrade Flightdeck first."
+
+// checkTerraformManagedUnsupported explains a refused write that named
 // terraform_managed to a Flightdeck too old to know it. Such a Flightdeck
 // refuses the key as unknown, in prose, so rather than match the wording a
 // read is asked whether it reports the setting, as the self-healing block
-// does for its newer settings. projectID is 0 for a create. It reports
-// whether it added a diagnostic; false leaves the error to the caller.
-func addTerraformManagedUnsupportedError(ctx context.Context, c *client.Client, projectID int64, sent client.Fields, err error, diags *diag.Diagnostics) bool {
+// does for its newer settings. projectID is 0 for a create.
+//
+// It reports whether it added a diagnostic; false leaves the error to the
+// caller. When the read can't tell (a create in a workspace that lists no
+// project, or a read that fails), it returns a note for the caller's generic
+// error instead, since the API's own words may still say what happened.
+func checkTerraformManagedUnsupported(ctx context.Context, c *client.Client, projectID int64, sent client.Fields, err error, diags *diag.Diagnostics) (added bool, note string) {
 	if !client.IsValidation(err) {
-		return false
+		return false, ""
 	}
 	if _, named := sent["terraform_managed"]; !named {
-		return false
+		return false, ""
 	}
-	if supported, known := terraformManagedSupported(ctx, c, projectID); supported || !known {
-		return false
+	supported, known := terraformManagedSupported(ctx, c, projectID)
+	switch {
+	case !known:
+		return false, terraformManagedUnknownNote
+	case supported:
+		return false, ""
 	}
 	detail := "This Flightdeck refused terraform_managed as an unknown setting: it is older than the version that " +
 		"added it. Upgrade Flightdeck first, then apply again."
@@ -169,12 +198,17 @@ func addTerraformManagedUnsupportedError(ctx context.Context, c *client.Client, 
 			"creating a project needs a Flightdeck that supports it. Projects that already exist keep working " +
 			"against this one while their configuration leaves terraform_managed unset."
 	} else {
-		detail += " Nothing was saved.\n\nUntil then, leave terraform_managed unset for this project: while this " +
-			"Flightdeck has never reported it, the provider does not send it."
+		// The plan sent it because the configuration sets it, or because the
+		// state still held a value this Flightdeck reported before it lost the
+		// setting (rolled back, with a plan made from state that wasn't
+		// refreshed since, such as one made with -refresh=false).
+		detail += " Nothing was saved.\n\nUntil then, leave terraform_managed out of this project's configuration " +
+			"and run `terraform plan` again with refresh on (not `-refresh=false`). The refresh finds no " +
+			"terraform_managed on this Flightdeck, and the provider stops sending it."
 	}
 	diags.AddAttributeError(path.Root("terraform_managed"), "This Flightdeck does not support terraform_managed yet",
 		detail+"\n\nThe API said: "+apiMessage(err))
-	return true
+	return true, ""
 }
 
 // terraformManagedSupported asks Flightdeck whether it knows terraform_managed:

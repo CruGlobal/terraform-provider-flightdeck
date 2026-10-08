@@ -28,7 +28,7 @@ project, not to infrastructure code.
 
 | Resource | Manages |
 | --- | --- |
-| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing configuration, Slack channel configuration, agent work settings, and whether Terraform manages it (`terraform_managed`, which makes those settings read only in Flightdeck's app); reports the (read-only) GitHub repository link. |
+| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing configuration, Slack channel configuration, agent work settings, and whether Terraform manages it (`terraform_managed`, which makes the name, identifier, description, emoji, lead, visibility, deployed app, feature toggles, Slack channel and agent work settings read only in Flightdeck's app and turns off archive and restore there; self-healing stays editable); reports the (read-only) GitHub repository link. |
 | `flightdeck_state` | A workflow state within a project (name, group, color, default, position). |
 | `flightdeck_label` | A label within a project. |
 | `flightdeck_project_member` | A user's membership of a project (by membership id) and their role. |
@@ -169,17 +169,51 @@ Flightdeck's API, which the provider uses, still writes everything.
   fine for any token, so a token that isn't an owner or admin can still
   update a project whose flag already matches. Otherwise use such a
   token, or set `terraform_managed = false`.
+- **To leave one project's flag as it is**, for example with a token that
+  isn't an owner or admin, add this to the project:
+
+  ```hcl
+  lifecycle {
+    ignore_changes = [terraform_managed]
+  }
+  ```
+
+  That only covers a project that already exists. A create always sends
+  the flag, `true` unless the configuration says `false`.
 - **To hand a project back to the app**, apply `terraform_managed = false`
   first, then remove it from Terraform. A `removed` block or
   `terraform state rm` on its own leaves the flag on, and the project
   stays read only in the app.
+- **If you already removed it without that step**, bring it back with
+  `terraform import` (or an `import` block), apply
+  `terraform_managed = false`, and then remove it again.
 - **Importing** a project that isn't marked yet plans an update that sets
   the flag.
-- **Flightdeck version.** The flag needs a Flightdeck that supports it.
-  Against an older one, projects that already exist keep working while
-  their configuration leaves `terraform_managed` unset (it reads as null
-  and isn't sent), but creating a project, or setting the flag explicitly,
-  fails with an error asking you to upgrade Flightdeck.
+
+#### Upgrading to a provider with `terraform_managed`
+
+The flag needs a Flightdeck that supports it. To check, read any project
+with the `flightdeck_project` data source: its `terraform_managed` is
+null on a Flightdeck without it, and `true` or `false` on one with it.
+
+Do it in this order:
+
+1. Upgrade Flightdeck.
+2. Make the token's user a workspace owner or admin, or mark the projects
+   that should stay unmarked with `terraform_managed = false` or the
+   `ignore_changes` above.
+3. Run `terraform plan` and apply. The first plan after Flightdeck gains
+   the flag updates every existing project in place: `terraform_managed`
+   goes from `false` to `true`, and `lock_version` shows as known after
+   apply. Nothing else about the projects changes.
+
+Against a Flightdeck without the flag, projects that already exist keep
+working while their configuration leaves `terraform_managed` unset: it
+reads as null and isn't sent. But creating any project fails, even with
+`terraform_managed = false`, because a create always sends the flag, and
+so does setting it explicitly. The error asks you to upgrade Flightdeck.
+If Flightdeck is rolled back below the flag, plan with refresh on (not
+`-refresh=false`) so the provider sees that the flag is gone.
 
 ### When the token can no longer see a project
 

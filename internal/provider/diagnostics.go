@@ -18,10 +18,24 @@ func pathRoot(name string) path.Path { return path.Root(name) }
 // when the API sent one, and the server's message, so a user can tell a
 // permissions problem from a validation error without guessing.
 func addAPIError(diags *diag.Diagnostics, summary string, err error) {
+	addAPIErrorNote(diags, summary, err, "")
+}
+
+// addAPIErrorNote is addAPIError with a closing note, for a caller that knows
+// something the API's answer does not say. An empty note adds nothing.
+func addAPIErrorNote(diags *diag.Diagnostics, summary string, err error, note string) {
+	detail := apiErrorDetail(err)
+	if note != "" {
+		detail += "\n\n" + note
+	}
+	diags.AddError(summary, detail)
+}
+
+// apiErrorDetail is addAPIError's detail for err.
+func apiErrorDetail(err error) string {
 	var apiErr *client.Error
 	if !errors.As(err, &apiErr) {
-		diags.AddError(summary, err.Error())
-		return
+		return err.Error()
 	}
 	detail := apiErr.Error()
 	switch {
@@ -42,7 +56,7 @@ func addAPIError(diags *diag.Diagnostics, summary string, err error) {
 	case apiErr.Status == 429:
 		detail += "\n\nThe API rate limit was still exceeded after the provider's retries; re-run the operation, or reduce parallelism with -parallelism."
 	}
-	diags.AddError(summary, detail)
+	return detail
 }
 
 // addStaleError reports a lost optimistic-locking race. The provider never

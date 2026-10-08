@@ -421,7 +421,8 @@ func TestProjectTerraformManaged_olderFlightdeck(t *testing.T) {
 				Config: config("Rolled back, renamed", "  terraform_managed = true\n"),
 				ExpectError: regexMust(`(?s)This Flightdeck does not support terraform_managed yet.*` +
 					`older\s+than\s+the\s+version\s+that\s+added\s+it.*Upgrade\s+Flightdeck\s+first.*Nothing\s+was\s+saved.*` +
-					`leave\s+terraform_managed\s+unset.*unknown key: terraform_managed`),
+					`leave\s+terraform_managed\s+out\s+of\s+this\s+project's\s+configuration\s+and\s+run\s+` +
+					"`terraform\\s+plan`" + `\s+again\s+with\s+refresh\s+on.*unknown key: terraform_managed`),
 			},
 			{
 				Config: config("Rolled back, renamed", ""),
@@ -552,7 +553,7 @@ func TestProjectTerraformManaged_olderFlightdeckThenUpgraded(t *testing.T) {
 
 // With no project to read, a create refused by an older Flightdeck can't be
 // told apart from any other refusal, so it gets the generic error, which
-// quotes the API's own "unknown key".
+// quotes the API's own "unknown key", with a note saying what that means.
 func TestProjectTerraformManaged_olderFlightdeckWithNoProjectsToAsk(t *testing.T) {
 	env := newTestEnv(t, "project")
 	env.requireFake(t)
@@ -560,11 +561,136 @@ func TestProjectTerraformManaged_olderFlightdeckWithNoProjectsToAsk(t *testing.T
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
 			{
-				Config:      projectConfig(env, randIdentifier(), `  name = "First"`),
-				ExpectError: regexMust(`(?s)Error creating Flightdeck project.*HTTP 422 \(invalid_attribute\).*unknown key: terraform_managed`),
+				Config: projectConfig(env, randIdentifier(), `  name = "First"`),
+				ExpectError: regexMust(`(?s)Error creating Flightdeck project.*HTTP 422 \(invalid_attribute\).*unknown key: terraform_managed.*` +
+					`If\s+the\s+API\s+calls\s+terraform_managed\s+an\s+unknown\s+key,\s+this\s+Flightdeck\s+is\s+older\s+than\s+the\s+version\s+` +
+					`that\s+added\s+it:\s+upgrade\s+Flightdeck\s+first\.`),
 			},
 		},
 	})
+}
+
+// Rolled back below the setting between a plan and its apply: the plan,
+// made from state that still held the flag, sends it, and the refusal says to
+// re-plan with refresh on rather than claiming the configuration sets it. A
+// plan made with -refresh=false after a rollback gets the same answer.
+func TestProjectTerraformManaged_rolledBackBetweenPlanAndApply(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	var id string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: projectConfig(env, identifier, `  name = "Rolled back"`),
+				Check:  captureAttr(projectRes, "id", &id),
+			},
+			{
+				PreConfig: func() {
+					env.fake.OnNextRequest(http.MethodPatch, "/api/v1/projects/"+id, func() { env.fake.SetProjectsLegacy(true) })
+				},
+				Config: projectConfig(env, identifier, `  name = "Rolled back, renamed"`),
+				ExpectError: regexMust(`(?s)This Flightdeck does not support terraform_managed yet.*Nothing\s+was\s+saved.*` +
+					"run\\s+`terraform\\s+plan`\\s+again\\s+with\\s+refresh\\s+on\\s+\\(not\\s+`-refresh=false`\\)"),
+			},
+			{
+				// The refreshed plan reads no flag, so only the rename is left.
+				Config: projectConfig(env, identifier, `  name = "Rolled back, renamed"`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "name", "Rolled back, renamed"),
+					resource.TestCheckNoResourceAttr(projectRes, "terraform_managed"),
+				),
+			},
+		},
+	})
+}
+
+// A 403 on a create that turns the flag on, but that doesn't name the flag,
+// is some other bar (here a guest's create) and gets the generic error.
+func TestProjectTerraformManaged_otherRefusalsAreNotTheFlags(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	var id string
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				PreConfig: func() {
+					env.fake.RefuseNext(http.MethodPost, "/api/v1/projects", http.StatusForbidden, "forbidden",
+						"Guests can't create projects in this workspace.")
+				},
+				Config: projectConfig(env, identifier, `  name = "Guest"`),
+				ExpectError: regexMust(`(?s)Error creating Flightdeck project.*HTTP 403 \(forbidden\): Guests can't create projects.*` +
+					`lacks the project or workspace role`),
+			},
+			{
+				Config: projectConfig(env, identifier, `  name = "Guest"`),
+				Check:  captureAttr(projectRes, "id", &id),
+			},
+			{
+				// And on an update that turns it off, a project role's 403.
+				PreConfig: func() {
+					env.fake.RefuseNext(http.MethodPatch, "/api/v1/projects/"+id, http.StatusForbidden, "forbidden",
+						"Your project role does not permit this action.")
+				},
+				Config: projectConfig(env, identifier, `
+  name              = "Guest"
+  terraform_managed = false`),
+				ExpectError: regexMust(`(?s)Error updating Flightdeck project.*HTTP 403 \(forbidden\): Your project role.*` +
+					`lacks the project or workspace role`),
+			},
+		},
+	})
+}
+
+// lifecycle { ignore_changes = [terraform_managed] } leaves a project's flag
+// as it is, so a token that is not a workspace owner or admin can keep
+// managing a project stored with it off.
+func TestProjectTerraformManaged_ignoreChangesLeavesTheFlag(t *testing.T) {
+	env := newTestEnv(t, "project")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	p := env.fake.AddProject("Left alone", identifier)
+	env.fake.SetWorkspaceAdmin(false)
+	config := func(name string) string {
+		return projectConfig(env, identifier, fmt.Sprintf(`
+  name = %q
+  lifecycle {
+    ignore_changes = [terraform_managed]
+  }`, name))
+	}
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			importStep(config("Left alone"), projectRes, func() string { return identifier }, nil),
+			{
+				// Import lists every feature toggle; this apply drops the ones the
+				// configuration leaves out, and leaves the flag off.
+				Config: config("Left alone"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{expectTerraformManagedPlanned(false)},
+				},
+			},
+			{
+				Config: config("Left alone, renamed"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{expectTerraformManagedPlanned(false)},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "name", "Left alone, renamed"),
+					resource.TestCheckResourceAttr(projectRes, "terraform_managed", "false"),
+				),
+			},
+			{
+				Config: config("Left alone, renamed"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+			},
+		},
+	})
+	if got := env.fake.Project(p.ID); got == nil || got.TerraformManaged || got.Name != "Left alone, renamed" {
+		t.Fatalf("stored project %+v", got)
+	}
 }
 
 func TestProjectFields_terraformManagedSentWheneverPlanned(t *testing.T) {
@@ -657,6 +783,7 @@ func TestAddProjectWriteError_terraformManagedRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		changes projectAdminChanges
+		note    string
 		err     error
 		want    []want
 	}{
@@ -667,18 +794,34 @@ func TestAddProjectWriteError_terraformManagedRefusals(t *testing.T) {
 				[]string{"turns terraform_managed off", "remove `terraform_managed = false`", tmRefusal}}},
 		},
 		{
-			// Both need the bar, so both are named, whichever Flightdeck checked.
-			name: "changing it and the app", changes: projectAdminChanges{app: true, terraformManaged: &on},
-			err: forbidden(http.MethodPatch, "Only a workspace owner or admin can set or change a project's app."),
-			want: []want{
-				{path.Root("app"), "Setting a project's app requires a workspace owner or admin", []string{"sets or changes `app`"}},
-				{path.Root("terraform_managed"), "Changing terraform_managed requires a workspace owner or admin", []string{"turns terraform_managed on"}},
-			},
+			// Flightdeck checks the app first, so a refusal naming the app is
+			// the app's, even on a write that changes the flag too.
+			name: "changing it and the app, refused for the app", changes: projectAdminChanges{app: true, terraformManaged: &on},
+			err:  forbidden(http.MethodPatch, "Only a workspace owner or admin can set or change a project's app."),
+			want: []want{{path.Root("app"), "Setting a project's app requires a workspace owner or admin", []string{"sets or changes `app`"}}},
+		},
+		{
+			// A refusal naming the flag means the app passed.
+			name: "changing it and the app, refused for the flag", changes: projectAdminChanges{app: true, terraformManaged: &on},
+			err: forbidden(http.MethodPatch, tmRefusal), want: []want{tmOn},
+		},
+		{
+			// A guest can't create a project at all: not the flag's bar, though
+			// the create turns it on.
+			name: "a guest's create", changes: projectAdminChanges{terraformManaged: &on},
+			err:  forbidden(http.MethodPost, "Guests can't create projects in this workspace."),
+			want: []want{{path.Empty(), "Error updating Flightdeck project", []string{"lacks the project or workspace role", "Guests can't create projects"}}},
+		},
+		{
+			// A project role that can't update the project at all.
+			name: "a project-role 403 on a write turning it off", changes: projectAdminChanges{terraformManaged: &off},
+			err:  forbidden(http.MethodPatch, "Your project role does not permit this action."),
+			want: []want{{path.Empty(), "Error updating Flightdeck project", []string{"lacks the project or workspace role"}}},
 		},
 		{
 			// A 403 from the read that verifies a create is the project role.
 			name: "403 from the verifying read", changes: projectAdminChanges{terraformManaged: &on},
-			err:  forbidden(http.MethodGet, "Your project role does not permit this action."),
+			err:  forbidden(http.MethodGet, tmRefusal),
 			want: []want{{path.Empty(), "Error updating Flightdeck project", []string{"lacks the project or workspace role"}}},
 		},
 		{
@@ -686,10 +829,17 @@ func TestAddProjectWriteError_terraformManagedRefusals(t *testing.T) {
 			err:  forbidden(http.MethodPatch, "Your project role does not permit this action."),
 			want: []want{{path.Empty(), "Error updating Flightdeck project", []string{"lacks the project or workspace role"}}},
 		},
+		{
+			// The note closes the generic error, and only that.
+			name: "a refusal the reads couldn't explain", note: terraformManagedUnknownNote,
+			err: &client.Error{Method: http.MethodPost, Path: "/projects", Status: http.StatusUnprocessableEntity, Code: client.CodeInvalidAttribute,
+				Message: "unknown key: terraform_managed (settable: name)"},
+			want: []want{{path.Empty(), "Error updating Flightdeck project", []string{"unknown key: terraform_managed", terraformManagedUnknownNote}}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var diags diag.Diagnostics
-			addProjectWriteError(&diags, "Error updating Flightdeck project", tc.changes, tc.err)
+			addProjectWriteError(&diags, "Error updating Flightdeck project", tc.changes, tc.note, tc.err)
 			if diags.ErrorsCount() != len(tc.want) {
 				t.Fatalf("expected %d errors, got %v", len(tc.want), diags)
 			}

@@ -293,7 +293,7 @@ func TestPagerDutyIntegration_requiresWorkspaceAdmin(t *testing.T) {
 			{
 				PreConfig:   func() { env.fake.SetWorkspaceAdmin(false) },
 				Config:      pagerDutyConfig(env, identifier, fmt.Sprintf(`  routing_key = %q`, pdKeyA)),
-				ExpectError: regexMust(`(?s)Error linking PagerDuty.*HTTP 403`),
+				ExpectError: regexMust(`(?s)Error linking PagerDuty.*POST /projects/\d+/pagerduty: HTTP 403`),
 			},
 		},
 	})

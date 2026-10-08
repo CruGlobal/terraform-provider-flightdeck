@@ -435,7 +435,7 @@ func TestAddProjectWriteError_appRefusals(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var diags diag.Diagnostics
-			addProjectWriteError(&diags, "Error updating Flightdeck project", projectAdminChanges{app: tc.changingApp}, tc.err)
+			addProjectWriteError(&diags, "Error updating Flightdeck project", projectAdminChanges{app: tc.changingApp}, "", tc.err)
 			if diags.ErrorsCount() != 1 {
 				t.Fatalf("expected one error, got %v", diags)
 			}

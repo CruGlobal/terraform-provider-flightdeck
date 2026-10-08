@@ -176,13 +176,13 @@ Nothing provisions at all when `available` is false (the workspace has no connec
 A write here bumps the project's `lock_version`. Attributes map onto the API's keys by dropping the `slack_` prefix (`enabled` is `slack_channel_enabled`, `notifications_enabled` is `slack_notifications_enabled`, `name` is `slack_channel_name`, `event_filter` is `slack_event_filter`). (see [below for nested schema](#nestedatt--slack_channel))
 - `terraform_managed` (Boolean) Whether Terraform manages this project's settings. While it is `true`, Flightdeck's web app makes the settings Terraform owns read only (name, identifier, description, emoji, lead, visibility, deployed app, feature toggles, the Slack channel and agent work settings) and turns off archiving and restoring the project, and Flightdeck's MCP tools refuse to change them, because a change made by hand would be undone by the next apply. Flightdeck's API, which this provider uses, still writes everything. Members, states, labels and the rest stay editable in the app. Defaults to `true`; set it to `false` to leave the project editable in the app.
 
-Setting or changing it needs a token whose user is a **workspace owner or admin**, on a create too. Sending the value Flightdeck already has is fine for any token, so a token that is not an owner or admin can still update a project whose flag already matches the configuration. Such a token can create a project only with `terraform_managed = false`.
+Setting or changing it needs a token whose user is a **workspace owner or admin**, on a create too. Sending the value Flightdeck already has is fine for any token, so a token that is not an owner or admin can still update a project whose flag already matches the configuration. Such a token can create a project only with `terraform_managed = false`. To leave an existing project's flag as it is, add `lifecycle { ignore_changes = [terraform_managed] }` to it.
 
 Removing a project from Terraform without destroying it (a `removed` block, or `terraform state rm`) leaves the flag on, so the project stays read only in the app. To hand a project back to the app, apply `terraform_managed = false` first, then remove it from Terraform.
 
 Importing a project that is not marked yet plans an update that sets it to `true`.
 
-Needs a Flightdeck that supports `terraform_managed`. Against an older one, a project that already exists keeps working while this is unset: it reads as null and the provider does not send it. Creating a project, or setting this explicitly, fails there with an error asking you to upgrade Flightdeck.
+Needs a Flightdeck that supports `terraform_managed`. Against an older one, a project that already exists keeps working while this is unset: it reads as null and the provider does not send it. Creating a project (even with `terraform_managed = false`, since a create always sends it), or setting this explicitly, fails there with an error asking you to upgrade Flightdeck. The `flightdeck_project` data source tells the two apart: its `terraform_managed` is null on a Flightdeck without the setting.
 
 ### Read-Only
 

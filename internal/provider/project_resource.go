@@ -248,18 +248,20 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	if err != nil {
 		// A Flightdeck older than terraform_managed refuses every create, which
 		// always names it.
-		if addTerraformManagedUnsupportedError(ctx, r.client, 0, fields, err, &resp.Diagnostics) {
+		added, note := checkTerraformManagedUnsupported(ctx, r.client, 0, fields, err, &resp.Diagnostics)
+		if added {
 			return
 		}
 		// Creating a project needs only workspace membership, so a 403 on a
-		// create that sets the app or turns terraform_managed on is that
+		// create that sets the app or turns terraform_managed on may be that
 		// setting's own bar.
-		addProjectWriteError(&resp.Diagnostics, "Error creating Flightdeck project", projectAdminChangesOf(fields, nil), err)
+		addProjectWriteError(&resp.Diagnostics, "Error creating Flightdeck project", projectAdminChangesOf(fields, nil), note, err)
 		return
 	}
 
+	// A create always plans terraform_managed (true unless configured), so
+	// unlike an update it never leaves it unsent.
 	state := projectToModel(ctx, created, &plan, featuresFromPrior, &resp.Diagnostics)
-	keepUnsentTerraformManaged(&state, &plan)
 	reconcileFeatures(ctx, &state, &plan, &resp.Diagnostics)
 	block, lockVersion := writeSelfHealing(ctx, r.client, created.ID, created.Identifier, config.SelfHealing, created.LockVersion, &resp.Diagnostics)
 	state.SelfHealing = block
@@ -350,13 +352,14 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 		}
 		// A configured terraform_managed is sent to a Flightdeck that has never
 		// reported it, and one older than the setting refuses it.
-		if addTerraformManagedUnsupportedError(ctx, r.client, id, fields, err, &resp.Diagnostics) {
+		added, note := checkTerraformManagedUnsupported(ctx, r.client, id, fields, err, &resp.Diagnostics)
+		if added {
 			return
 		}
 		// The app is only sent when it changes, so a 403 on a write naming it
-		// is the app's own bar; so is one on a write that changes
-		// terraform_managed.
-		addProjectWriteError(&resp.Diagnostics, "Error updating Flightdeck project", projectAdminChangesOf(fields, &state), err)
+		// is the app's own bar; one on a write that changes terraform_managed
+		// may be the flag's.
+		addProjectWriteError(&resp.Diagnostics, "Error updating Flightdeck project", projectAdminChangesOf(fields, &state), note, err)
 		return
 	}
 
@@ -459,11 +462,13 @@ func addIfProjectGone(ctx context.Context, c *client.Client, projectID int64, id
 // addProjectWriteError reports a failed project create or update. The app has
 // two refusals of its own, and terraform_managed one, and each says what to
 // change rather than only quoting the API. changes says which of those two the
-// write sets or changes, which is what decides whether a 403 is their
-// workspace-admin bar or the token lacking the project role every other update
-// needs. A write that changes both gets an error on each, since each needs
-// that bar.
-func addProjectWriteError(diags *diag.Diagnostics, summary string, changes projectAdminChanges, err error) {
+// write sets or changes, which decides whether a 403 may be their
+// workspace-admin bar rather than the project role every other write needs.
+// The flag's refusal is claimed only when the API's message names it (see
+// refusesTerraformManaged), and it comes first: Flightdeck checks the app
+// before the flag, so a refusal naming the flag means the app passed. note,
+// if any, closes the generic error.
+func addProjectWriteError(diags *diag.Diagnostics, summary string, changes projectAdminChanges, note string, err error) {
 	if addRefusedID(diags, "lead_id", "Flightdeck refused this project lead",
 		"A new lead must be a member of the workspace and not a guest. A `flightdeck_workspace_member` data "+
 			"source finds a member's id from an email address, but it can't tell a guest from a member, so "+
@@ -473,25 +478,22 @@ func addProjectWriteError(diags *diag.Diagnostics, summary string, changes proje
 	apiErr, _ := client.AsError(err)
 	// Only the write itself: a 403 from the read that verifies a create is the
 	// project role, and says nothing about the app or terraform_managed.
-	adminBar := client.IsForbidden(err) && apiErr.Method != http.MethodGet && (changes.app || changes.terraformManaged != nil)
+	forbiddenWrite := client.IsForbidden(err) && apiErr.Method != http.MethodGet
 	switch {
 	case client.HasCode(err, client.CodeAppTaken):
 		diags.AddAttributeError(path.Root("app"), "App already belongs to another project",
 			"An app belongs to at most one project in a workspace. Point this project at a different app, or have a "+
 				"workspace owner or admin change the other project's app first. Nothing was written.\n\n"+
 				"The API said: "+apiErr.Error())
-	case adminBar:
-		if changes.app {
-			diags.AddAttributeError(path.Root("app"), "Setting a project's app requires a workspace owner or admin",
-				"This write sets or changes `app`, which needs a workspace owner or admin token even where the token "+
-					"could otherwise update the project. Use such a token, or remove `app` from the configuration and let "+
-					"the first release event that names an app bind it.\n\nThe API said: "+apiErr.Error())
-		}
-		if changes.terraformManaged != nil {
-			addTerraformManagedForbidden(diags, *changes.terraformManaged, apiErr)
-		}
+	case forbiddenWrite && changes.terraformManaged != nil && refusesTerraformManaged(apiErr):
+		addTerraformManagedForbidden(diags, *changes.terraformManaged, apiErr)
+	case forbiddenWrite && changes.app:
+		diags.AddAttributeError(path.Root("app"), "Setting a project's app requires a workspace owner or admin",
+			"This write sets or changes `app`, which needs a workspace owner or admin token even where the token "+
+				"could otherwise update the project. Use such a token, or remove `app` from the configuration and let "+
+				"the first release event that names an app bind it.\n\nThe API said: "+apiErr.Error())
 	default:
-		addAPIError(diags, summary, err)
+		addAPIErrorNote(diags, summary, err, note)
 	}
 }
 

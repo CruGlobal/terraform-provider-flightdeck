@@ -280,17 +280,20 @@ func TestPagerDutyIntegration_recreateAfterDestroy(t *testing.T) {
 }
 
 // Every PagerDuty route is workspace-admin, create included — it is the one
-// that spends a paging credential.
+// that spends a paging credential. The project is made by an admin first, so
+// the 403 is the link's and not the project's (a token that is not a
+// workspace admin can't create a project marked terraform_managed).
 func TestPagerDutyIntegration_requiresWorkspaceAdmin(t *testing.T) {
 	env := newTestEnv(t, "pagerduty_integration")
 	env.requireFake(t)
 	identifier := randIdentifier()
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
+			{Config: projectFixture(env, identifier)},
 			{
 				PreConfig:   func() { env.fake.SetWorkspaceAdmin(false) },
 				Config:      pagerDutyConfig(env, identifier, fmt.Sprintf(`  routing_key = %q`, pdKeyA)),
-				ExpectError: regexMust(`(?s)HTTP 403`),
+				ExpectError: regexMust(`(?s)Error linking PagerDuty.*HTTP 403`),
 			},
 		},
 	})

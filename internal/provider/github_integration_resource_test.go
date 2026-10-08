@@ -312,14 +312,18 @@ func TestGithubIntegration_staleWriteIsReported(t *testing.T) {
 	})
 }
 
+// The project is made by an admin first, so the refusal is the link's: a
+// token that is not a workspace admin can't create a project marked
+// terraform_managed.
 func TestGithubIntegration_requiresWorkspaceAdmin(t *testing.T) {
 	env := newTestEnv(t, "github_integration")
 	env.requireFake(t)
-	env.fake.SetWorkspaceAdmin(false)
 	identifier := randIdentifier()
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
+			{Config: projectFixture(env, identifier)},
 			{
+				PreConfig:   func() { env.fake.SetWorkspaceAdmin(false) },
 				Config:      githubIntegrationConfig(env, identifier, `  repo_full_name = "example-org/app"`),
 				ExpectError: regexMust(`Linking a GitHub repository requires a workspace admin`),
 			},

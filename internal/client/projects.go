@@ -32,14 +32,24 @@ type Project struct {
 	// Null until someone sets it or the first release event naming an app
 	// binds it. Writable by a workspace owner or admin only, and a blank is
 	// "no opinion", so the API can set or change it but never clear it.
-	App         *string `json:"app"`
-	LockVersion int64   `json:"lock_version"`
-	CreatedAt   string  `json:"created_at"`
-	UpdatedAt   string  `json:"updated_at"`
+	App *string `json:"app"`
+	// TerraformManaged says Terraform manages the project's settings, which
+	// makes them read only in Flightdeck's web app and refused over MCP. Only
+	// a workspace owner or admin may set or change it, and a blank is "no
+	// opinion". Nil on a Flightdeck older than the setting: its reads have no
+	// such key, and it refuses any write naming it as an unknown key.
+	TerraformManaged *bool  `json:"terraform_managed"`
+	LockVersion      int64  `json:"lock_version"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
 }
 
 // ResourceID implements Identified.
 func (p *Project) ResourceID() int64 { return p.ID }
+
+// ReportsTerraformManaged reports whether the Flightdeck that answered knows
+// the terraform_managed setting: a read from one that does always has the key.
+func (p *Project) ReportsTerraformManaged() bool { return p.TerraformManaged != nil }
 
 // ProjectNetworks are the visibility values (Project.networks), which the API
 // accepts in exactly these spellings.

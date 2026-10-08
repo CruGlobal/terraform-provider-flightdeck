@@ -11,3 +11,8 @@ data "flightdeck_project" "by_id" {
 output "app_project_id" {
   value = data.flightdeck_project.app.id
 }
+
+# Whether Terraform manages the project (its settings are read only in the app).
+output "app_terraform_managed" {
+  value = data.flightdeck_project.app.terraform_managed
+}

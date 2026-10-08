@@ -14,6 +14,20 @@ resource "flightdeck_project" "app" {
     intake = true
     errors = true
   }
+
+  # terraform_managed defaults to true, which makes the settings Terraform owns
+  # read only in Flightdeck's app (a change made there would be undone by the
+  # next apply). Setting it needs a workspace owner or admin token.
+}
+
+# A project whose settings stay editable in Flightdeck's app. Before removing a
+# project from Terraform without destroying it (a `removed` block or
+# `terraform state rm`), apply terraform_managed = false like this, or it stays
+# read only in the app.
+resource "flightdeck_project" "sandbox" {
+  name              = "Sandbox"
+  identifier        = "SBX"
+  terraform_managed = false
 }
 
 # Self-healing (workspace admins only). `rollback` is the loop's mode:

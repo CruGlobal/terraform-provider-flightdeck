@@ -91,6 +91,12 @@ func (d *projectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				MarkdownDescription: "The deployed app the project belongs to, as the deploy pipeline's release events name it, if any.",
 				Computed:            true,
 			},
+			"terraform_managed": schema.BoolAttribute{
+				MarkdownDescription: "Whether Terraform manages this project's settings, which makes them read only in " +
+					"Flightdeck's web app (see the `flightdeck_project` resource's `terraform_managed`). Null on a Flightdeck " +
+					"that predates the setting.",
+				Computed: true,
+			},
 			"lock_version": schema.Int64Attribute{
 				MarkdownDescription: "Optimistic-locking version the API bumps on every change.",
 				Computed:            true,

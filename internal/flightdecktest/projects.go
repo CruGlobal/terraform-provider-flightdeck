@@ -53,6 +53,9 @@ type Project struct {
 	Network            string
 	// App is the deployed app the project belongs to; empty is unset.
 	App string
+	// TerraformManaged says Terraform manages the project's settings. The
+	// column defaults to false, and only /api/v1 sets or clears it.
+	TerraformManaged bool
 	// SelfHealing holds the stored jsonb overrides; reads resolve defaults.
 	SelfHealing map[string]any
 	// Slack channel configuration, all on the project row (see
@@ -81,7 +84,19 @@ type projectStore struct {
 	// forcedFeatures are toggles the server reports at a fixed value
 	// whatever a client writes, like a plan-gated feature.
 	forcedFeatures map[string]bool
+	// legacy simulates a Flightdeck from before terraform_managed: reads have
+	// no such key, and a write naming it (even as null) is refused as an
+	// unknown key, so nothing in it is saved.
+	legacy bool
 }
+
+// projectWritableBeforeTerraformManaged is the settable set an older
+// Flightdeck lists when it refuses terraform_managed as an unknown key.
+const projectWritableBeforeTerraformManaged = "name, description, identifier, emoji, archived, lead_id, features, network, app"
+
+// terraformManagedForbidden is the API's refusal of a change to
+// terraform_managed from a token that is not a workspace owner or admin.
+const terraformManagedForbidden = "Only a workspace owner or admin can set or change a project's terraform_managed."
 
 func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
@@ -112,6 +127,28 @@ func (s *Server) ForceFeature(key string, value bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.projects().forcedFeatures[key] = value
+}
+
+// SetProjectsLegacy makes the project routes behave like a Flightdeck from
+// before terraform_managed (see projectStore.legacy). Turning it on after
+// projects exist is a Flightdeck rolled back below the setting: the stored
+// flags are kept but no longer reported.
+func (s *Server) SetProjectsLegacy(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.projects().legacy = on
+}
+
+// SetTerraformManagedOutOfBand sets a project's terraform_managed the way
+// another /api/v1 caller would (only the API sets or clears it), bumping
+// lock_version.
+func (s *Server) SetTerraformManagedOutOfBand(projectID int64, managed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.projects().byID[projectID]; p != nil {
+		p.TerraformManaged = managed
+		p.LockVersion++
+	}
 }
 
 // LinkGithubRepo sets the read-only repository mapping the way Settings ->
@@ -249,6 +286,9 @@ func (s *Server) serializeProject(p *Project, detail bool) map[string]any {
 		"lock_version": p.LockVersion,
 		"created_at":   iso(p.CreatedAt), "updated_at": iso(p.UpdatedAt),
 	}
+	if !s.projects().legacy {
+		out["terraform_managed"] = p.TerraformManaged
+	}
 	if detail {
 		out["urls"] = []any{}
 	}
@@ -301,6 +341,12 @@ func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, strin
 	if _, named := attrs["self_healing"]; named {
 		return http.StatusUnprocessableEntity, "invalid_attribute", "self_healing is managed at PATCH /api/v1/projects/:id/self-healing"
 	}
+	// An older Flightdeck's strict root refuses a key it doesn't know before
+	// it reads any value, a null included.
+	if _, named := attrs["terraform_managed"]; named && s.projects().legacy {
+		return http.StatusUnprocessableEntity, "invalid_attribute",
+			"unknown key: terraform_managed (settable: " + projectWritableBeforeTerraformManaged + ")"
+	}
 	// network is writable with the enum's exact spellings; null is "no opinion".
 	if v, ok := attrs["network"]; ok && v != nil {
 		token := strings.TrimSpace(asString(v))
@@ -330,6 +376,22 @@ func (s *Server) applyProjectAttrs(p *Project, attrs map[string]any) (int, strin
 				}
 			}
 			p.App = app
+		}
+	}
+	// terraform_managed: a strict boolean (the feature values' words), and a
+	// blank is "no opinion". Re-sending the stored value is always fine; a
+	// change needs a workspace owner or admin, on a create too, where the
+	// stored value is the column default, false.
+	if v, ok := attrs["terraform_managed"]; ok && !blankValue(v) {
+		managed, valid := strictBoolean(v)
+		if !valid {
+			return http.StatusUnprocessableEntity, "invalid_attribute", "terraform_managed must be true or false, got " + inspect(v)
+		}
+		if managed != p.TerraformManaged {
+			if !s.workspaceAdmin {
+				return http.StatusForbidden, "forbidden", terraformManagedForbidden
+			}
+			p.TerraformManaged = managed
 		}
 	}
 	// lead_id: a blank clears it; anything that is not an id is refused; a
@@ -536,6 +598,33 @@ func (s *Server) destroyProject(w http.ResponseWriter, r *http.Request) {
 		"id": id, "status": "deleting",
 		"message": "Project marked for deletion and hidden immediately; its rows are being torn down in the background. It is already unreachable through the API.",
 	})
+}
+
+// strictBoolean reads a boolean the way the API reads a feature value or
+// terraform_managed: true, false, or a string spelling one ("true"/"false",
+// "1"/"0", "t"/"f", "on"/"off", any case, blank space at either end ignored).
+// Anything else, a number included, is not a boolean.
+func strictBoolean(v any) (value, ok bool) {
+	switch t := v.(type) {
+	case bool:
+		return t, true
+	case string:
+		switch strings.ToLower(strings.Trim(t, apiBlank)) {
+		case "true", "1", "t", "on":
+			return true, true
+		case "false", "0", "f", "off":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// inspect renders a refused value the way the API's messages repeat it.
+func inspect(v any) string {
+	if s, ok := v.(string); ok {
+		return fmt.Sprintf("%q", s)
+	}
+	return fmt.Sprint(v)
 }
 
 func nullableString(s string) any {

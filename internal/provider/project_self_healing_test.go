@@ -153,7 +153,10 @@ func TestProjectSelfHealing_nonAdminToken(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				// Not reported to this token: the block is null and nothing is sent.
-				Config: projectConfig(env, identifier, `  name = "Non-admin"`),
+				// Such a token can only create a project with terraform_managed off.
+				Config: projectConfig(env, identifier, `
+  name              = "Non-admin"
+  terraform_managed = false`),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckNoResourceAttr(projectRes, "self_healing.%"),
 				),
@@ -161,7 +164,8 @@ func TestProjectSelfHealing_nonAdminToken(t *testing.T) {
 			{
 				// Configuring thresholds without the role is a clear 403.
 				Config: projectConfig(env, identifier, `
-  name = "Non-admin"
+  name              = "Non-admin"
+  terraform_managed = false
   self_healing = {
     bake_minutes = 30
   }`),

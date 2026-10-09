@@ -28,7 +28,7 @@ project, not to infrastructure code.
 
 | Resource | Manages |
 | --- | --- |
-| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing configuration, Slack channel configuration, agent work settings; reports the (read-only) GitHub repository link. |
+| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing configuration, Slack channel configuration, agent work settings, and whether Terraform manages it (`terraform_managed`, which makes the name, identifier, description, emoji, lead, visibility, deployed app, feature toggles, Slack channel and agent work settings read only in Flightdeck's app and turns off archive and restore there; self-healing stays editable); reports the (read-only) GitHub repository link. |
 | `flightdeck_state` | A workflow state within a project (name, group, color, default, position). |
 | `flightdeck_label` | A label within a project. |
 | `flightdeck_project_member` | A user's membership of a project (by membership id) and their role. |
@@ -153,6 +153,68 @@ Full reference docs (generated from the provider schema) live in
   access to; see below.
 - Reads never carry a request body. Flightdeck refuses a `GET` with one.
 
+### Projects Terraform manages
+
+Every project `flightdeck_project` manages is marked `terraform_managed`
+unless its configuration says `terraform_managed = false`. While the flag
+is on, Flightdeck's web app shows the settings Terraform owns as read only
+(name, identifier, description, emoji, lead, visibility, deployed app,
+feature toggles, the Slack channel and agent work settings) and turns off
+archiving and restoring the project, and its MCP tools refuse to change
+them. A change made there would only be undone by the next apply.
+Flightdeck's API, which the provider uses, still writes everything.
+
+- **The token needs a workspace owner or admin** to set or change the
+  flag, on a create too. Sending back the value Flightdeck already has is
+  fine for any token, so a token that isn't an owner or admin can still
+  update a project whose flag already matches. Otherwise use such a
+  token, or set `terraform_managed = false`.
+- **To leave one project's flag as it is**, for example with a token that
+  isn't an owner or admin, add this to the project:
+
+  ```hcl
+  lifecycle {
+    ignore_changes = [terraform_managed]
+  }
+  ```
+
+  That only covers a project that already exists. A create always sends
+  the flag, `true` unless the configuration says `false`.
+- **To hand a project back to the app**, apply `terraform_managed = false`
+  first, then remove it from Terraform. A `removed` block or
+  `terraform state rm` on its own leaves the flag on, and the project
+  stays read only in the app.
+- **If you already removed it without that step**, bring it back with
+  `terraform import` (or an `import` block), apply
+  `terraform_managed = false`, and then remove it again.
+- **Importing** a project that isn't marked yet plans an update that sets
+  the flag.
+
+#### Upgrading to a provider with `terraform_managed`
+
+The flag needs a Flightdeck that supports it. To check, read any project
+with the `flightdeck_project` data source: its `terraform_managed` is
+null on a Flightdeck without it, and `true` or `false` on one with it.
+
+Do it in this order:
+
+1. Upgrade Flightdeck.
+2. Make the token's user a workspace owner or admin, or mark the projects
+   that should stay unmarked with `terraform_managed = false` or the
+   `ignore_changes` above.
+3. Run `terraform plan` and apply. The first plan after Flightdeck gains
+   the flag updates every existing project in place: `terraform_managed`
+   goes from `false` to `true`, and `lock_version` shows as known after
+   apply. Nothing else about the projects changes.
+
+Against a Flightdeck without the flag, projects that already exist keep
+working while their configuration leaves `terraform_managed` unset: it
+reads as null and isn't sent. But creating any project fails, even with
+`terraform_managed = false`, because a create always sends the flag, and
+so does setting it explicitly. The error asks you to upgrade Flightdeck.
+If Flightdeck is rolled back below the flag, plan with refresh on (not
+`-refresh=false`) so the provider sees that the flag is gone.
+
 ### When the token can no longer see a project
 
 Flightdeck answers 404, never 403, for a project the token's user can't
@@ -237,7 +299,10 @@ without a deployment. The terraform CLI must be on `PATH`.
 
 The same tests run against a live Flightdeck when `TF_ACC=1` and
 `FLIGHTDECK_ENDPOINT` / `FLIGHTDECK_TOKEN` point at a **dedicated test
-workspace** (they create and delete projects). The member tests also need
+workspace** (they create and delete projects). The token's user must be a
+**workspace owner or admin**, because every project the tests create is
+marked `terraform_managed`, and that Flightdeck must support the flag.
+The member tests also need
 `FLIGHTDECK_ACC_MEMBER_USER_ID`, the numeric user id of another member of
 that workspace — a user id rather than an email so the tests do not
 depend on a particular address — and the managed-mode GitHub-link tests

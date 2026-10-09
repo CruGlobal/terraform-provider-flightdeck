@@ -59,6 +59,7 @@ type projectModel struct {
 	LeadID             types.Int64  `tfsdk:"lead_id"`
 	Network            types.String `tfsdk:"network"`
 	App                types.String `tfsdk:"app"`
+	TerraformManaged   types.Bool   `tfsdk:"terraform_managed"`
 	LockVersion        types.Int64  `tfsdk:"lock_version"`
 	SelfHealing        types.Object `tfsdk:"self_healing"`
 	SlackChannel       types.Object `tfsdk:"slack_channel"`
@@ -98,6 +99,7 @@ func projectToModel(ctx context.Context, p *client.Project, prior *projectModel,
 		LeadID:             types.Int64Null(),
 		Network:            types.StringNull(),
 		App:                stringPointerValue(p.App),
+		TerraformManaged:   types.BoolPointerValue(p.TerraformManaged),
 		LockVersion:        types.Int64Value(p.LockVersion),
 		SelfHealing:        types.ObjectNull(selfHealingAttrTypes),
 		SlackChannel:       types.ObjectNull(slackChannelAttrTypes),
@@ -176,6 +178,13 @@ func stringPointerValue(s *string) types.String {
 // it differs from the prior state: re-sending private_project re-runs the
 // server's lock-out guard (it re-creates the actor's and lead's admin
 // membership rows if missing), a side effect an unchanged apply should not have.
+//
+// terraform_managed is sent whenever the plan has a value: on every create and
+// every update. Sending back the stored value is fine for any token, so an
+// unchanged flag costs nothing. The plan has no value only for a project whose
+// Flightdeck has never reported the setting, while the configuration leaves it
+// unset (see planTerraformManaged): that Flightdeck is older than the
+// setting and would refuse the whole write.
 func projectFields(ctx context.Context, plan, prior *projectModel, diags *diag.Diagnostics) client.Fields {
 	fields := client.Fields{
 		"name":       plan.Name.ValueString(),
@@ -202,6 +211,9 @@ func projectFields(ctx context.Context, plan, prior *projectModel, diags *diag.D
 		if prior == nil || !plan.App.Equal(prior.App) {
 			fields["app"] = plan.App.ValueString()
 		}
+	}
+	if !plan.TerraformManaged.IsNull() && !plan.TerraformManaged.IsUnknown() {
+		fields["terraform_managed"] = plan.TerraformManaged.ValueBool()
 	}
 	if !plan.Features.IsNull() && !plan.Features.IsUnknown() {
 		var features map[string]bool

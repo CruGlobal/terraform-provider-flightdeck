@@ -303,14 +303,16 @@ func TestProjectApp_needsAWorkspaceAdminToChange(t *testing.T) {
 				ExpectError: regexMust(`(?s)Setting a project's app requires a workspace\s+owner\s+or\s+admin`),
 			},
 			{
-				// So is naming one on create.
+				// So is naming one on create (with terraform_managed off, which is
+				// the stored default, so the only bar is the app's).
 				Config: projectConfig(env, identifier, `
   name = "Admin set, renamed"
   app  = "admin-set"`) + fmt.Sprintf(`
 resource "flightdeck_project" "other" {
-  name       = "Member create"
-  identifier = %q
-  app        = "member-create"
+  name              = "Member create"
+  identifier        = %q
+  app               = "member-create"
+  terraform_managed = false
 }
 `, other),
 				ExpectError: regexMust(`(?s)Setting a project's app requires a workspace\s+owner\s+or\s+admin`),
@@ -433,7 +435,7 @@ func TestAddProjectWriteError_appRefusals(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var diags diag.Diagnostics
-			addProjectWriteError(&diags, "Error updating Flightdeck project", tc.changingApp, tc.err)
+			addProjectWriteError(&diags, "Error updating Flightdeck project", projectAdminChanges{app: tc.changingApp}, "", tc.err)
 			if diags.ErrorsCount() != 1 {
 				t.Fatalf("expected one error, got %v", diags)
 			}

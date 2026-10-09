@@ -86,7 +86,8 @@ tasks:
   # Acceptance tests run the same test bodies as `task test`, but against a
   # live Flightdeck instead of the mock. They need a dedicated test workspace
   # (they create and delete projects) and a personal access token minted in
-  # the Flightdeck UI by a member of that workspace:
+  # the Flightdeck UI by a workspace owner or admin (every project the tests
+  # create is marked terraform_managed, which only they may set):
   #
   #   FLIGHTDECK_ENDPOINT          — base URL, e.g. https://flightdeck.example.com
   #   FLIGHTDECK_TOKEN             — fd_pat_… token bound to the test workspace

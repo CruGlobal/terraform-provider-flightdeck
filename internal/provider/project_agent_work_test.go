@@ -496,13 +496,17 @@ func TestProjectAgentWork_requiresWorkspaceAdmin(t *testing.T) {
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
 			{
-				// Unconfigured, the block is simply null for a non-admin.
-				Config: projectConfig(env, identifier, `  name = "Not an admin"`),
-				Check:  resource.TestCheckNoResourceAttr(projectRes, "agent_work.%"),
+				// Unconfigured, the block is simply null for a non-admin, who can
+				// only create a project with terraform_managed off.
+				Config: projectConfig(env, identifier, `
+  name              = "Not an admin"
+  terraform_managed = false`),
+				Check: resource.TestCheckNoResourceAttr(projectRes, "agent_work.%"),
 			},
 			{
 				Config: projectConfig(env, identifier, `
-  name = "Not an admin"
+  name              = "Not an admin"
+  terraform_managed = false
   agent_work = {
     max_in_progress = 2
   }`),

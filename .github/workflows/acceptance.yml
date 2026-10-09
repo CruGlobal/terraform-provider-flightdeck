@@ -18,9 +18,11 @@ name: acceptance
 #   FLIGHTDECK_TOKEN             — a personal access token (fd_pat_…) minted in
 #                                  the Flightdeck UI by a member of the test
 #                                  workspace; it is bound to that workspace.
-#                                  Webhook and self-healing tests additionally
-#                                  need the token's user to be a workspace
-#                                  admin.
+#                                  The token's user must be a workspace owner
+#                                  or admin: every project the tests create is
+#                                  marked terraform_managed, which only they
+#                                  may set (webhook and self-healing tests
+#                                  needed that already).
 #   FLIGHTDECK_ACC_MEMBER_USER_ID — numeric user id of another member of the
 #                                   test workspace (other than the token's
 #                                   owner), used by the project_member tests.

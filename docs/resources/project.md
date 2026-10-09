@@ -6,6 +6,7 @@ description: |-
   Manages a Flightdeck project — the container for an application's work items, states, labels, members and integrations.
   Creating a project seeds it the way the web form does (default workflow states, Task/Epic work item types, starter labels) and makes the token's user its admin. Deleting a project marks it for deletion and tears it down asynchronously; it disappears from the API immediately.
   Updates carry the project's lock_version as an If-Match precondition. If the project was changed elsewhere since the last plan, the apply fails without overwriting anything; re-run terraform plan.
+  Every project this resource manages is marked terraform_managed unless its configuration says terraform_managed = false, which makes the settings Terraform owns read only in Flightdeck's web app. Setting that flag needs a workspace owner or admin token. Apply terraform_managed = false before removing a project from Terraform without destroying it, or it stays read only in the app.
   A project can be imported by numeric id or by identifier: terraform import flightdeck_project.app APP.
 ---
 
@@ -16,6 +17,8 @@ Manages a Flightdeck project — the container for an application's work items, 
 Creating a project seeds it the way the web form does (default workflow states, Task/Epic work item types, starter labels) and makes the token's user its admin. Deleting a project marks it for deletion and tears it down asynchronously; it disappears from the API immediately.
 
 Updates carry the project's `lock_version` as an `If-Match` precondition. If the project was changed elsewhere since the last plan, the apply fails without overwriting anything; re-run `terraform plan`.
+
+Every project this resource manages is marked `terraform_managed` unless its configuration says `terraform_managed = false`, which makes the settings Terraform owns read only in Flightdeck's web app. Setting that flag needs a workspace owner or admin token. Apply `terraform_managed = false` before removing a project from Terraform without destroying it, or it stays read only in the app.
 
 A project can be imported by numeric id or by identifier: `terraform import flightdeck_project.app APP`.
 
@@ -38,6 +41,20 @@ resource "flightdeck_project" "app" {
     intake = true
     errors = true
   }
+
+  # terraform_managed defaults to true, which makes the settings Terraform owns
+  # read only in Flightdeck's app (a change made there would be undone by the
+  # next apply). Setting it needs a workspace owner or admin token.
+}
+
+# A project whose settings stay editable in Flightdeck's app. Before removing a
+# project from Terraform without destroying it (a `removed` block or
+# `terraform state rm`), apply terraform_managed = false like this, or it stays
+# read only in the app.
+resource "flightdeck_project" "sandbox" {
+  name              = "Sandbox"
+  identifier        = "SBX"
+  terraform_managed = false
 }
 
 # Self-healing (workspace admins only). `rollback` is the loop's mode:
@@ -157,6 +174,15 @@ Once the check passes, Flightdeck saves the configuration and enqueues a job tha
 Nothing provisions at all when `available` is false (the workspace has no connected Slack integration) or `scopes_sufficient` is false (the connection predates the channel scopes). Both are fixed by re-authorizing Slack under Settings → Integrations, which the API cannot do; the provider warns rather than failing, since the configuration is still stored.
 
 A write here bumps the project's `lock_version`. Attributes map onto the API's keys by dropping the `slack_` prefix (`enabled` is `slack_channel_enabled`, `notifications_enabled` is `slack_notifications_enabled`, `name` is `slack_channel_name`, `event_filter` is `slack_event_filter`). (see [below for nested schema](#nestedatt--slack_channel))
+- `terraform_managed` (Boolean) Whether Terraform manages this project's settings. While it is `true`, Flightdeck's web app makes the settings Terraform owns read only (name, identifier, description, emoji, lead, visibility, deployed app, feature toggles, the Slack channel and agent work settings) and turns off archiving and restoring the project, and Flightdeck's MCP tools refuse to change them, because a change made by hand would be undone by the next apply. Flightdeck's API, which this provider uses, still writes everything. Members, states, labels and the rest stay editable in the app. Defaults to `true`; set it to `false` to leave the project editable in the app.
+
+Setting or changing it needs a token whose user is a **workspace owner or admin**, on a create too. Sending the value Flightdeck already has is fine for any token, so a token that is not an owner or admin can still update a project whose flag already matches the configuration. Such a token can create a project only with `terraform_managed = false`. To leave an existing project's flag as it is, add `lifecycle { ignore_changes = [terraform_managed] }` to it.
+
+Removing a project from Terraform without destroying it (a `removed` block, or `terraform state rm`) leaves the flag on, so the project stays read only in the app. To hand a project back to the app, apply `terraform_managed = false` first, then remove it from Terraform.
+
+Importing a project that is not marked yet plans an update that sets it to `true`.
+
+Needs a Flightdeck that supports `terraform_managed`. Against an older one, a project that already exists keeps working while this is unset: it reads as null and the provider does not send it. Creating a project (even with `terraform_managed = false`, since a create always sends it), or setting this explicitly, fails there with an error asking you to upgrade Flightdeck. The `flightdeck_project` data source tells the two apart: its `terraform_managed` is null on a Flightdeck without the setting.
 
 ### Read-Only
 

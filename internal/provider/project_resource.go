@@ -54,6 +54,10 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"down asynchronously; it disappears from the API immediately.\n\n" +
 			"Updates carry the project's `lock_version` as an `If-Match` precondition. If the project was changed " +
 			"elsewhere since the last plan, the apply fails without overwriting anything; re-run `terraform plan`.\n\n" +
+			"Every project this resource manages is marked `terraform_managed` unless its configuration says " +
+			"`terraform_managed = false`, which makes the settings Terraform owns read only in Flightdeck's web app. " +
+			"Setting that flag needs a workspace owner or admin token. Apply `terraform_managed = false` before " +
+			"removing a project from Terraform without destroying it, or it stays read only in the app.\n\n" +
 			"A project can be imported by numeric id or by identifier: `terraform import flightdeck_project.app APP`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
@@ -152,6 +156,7 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Validators:    []validator.String{stringvalidator.RegexMatches(appNamePattern, "must be 1-100 letters, digits, '.', '_' or '-'")},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
+			"terraform_managed": terraformManagedAttribute(),
 			"lock_version": schema.Int64Attribute{
 				MarkdownDescription: "Optimistic-locking version the API bumps on every change (including self-healing and " +
 					"Slack channel writes, and the deploy pipeline binding the project's `app`). " +
@@ -165,8 +170,9 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	}
 }
 
-// ModifyPlan keeps the deprecated self_healing.armed in step with the planned
-// mode and agent_work's computed attributes in step with its settings, and
+// ModifyPlan plans terraform_managed's default (see planTerraformManaged),
+// keeps the deprecated self_healing.armed in step with the planned mode and
+// agent_work's computed attributes in step with its settings, and
 // warns about what ValidateConfig cannot see: an apply that turns
 // auto-rollback or agent work on, which needs the prior value, and the
 // self-healing burn-rate windows and agent work limits as the API will MERGE
@@ -186,6 +192,7 @@ func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 	creating := req.State.Raw.IsNull()
 	prior := types.ObjectNull(selfHealingAttrTypes)
 	priorAgentWork := types.ObjectNull(agentWorkAttrTypes)
+	var priorProject *projectModel
 	if !creating {
 		var state projectModel
 		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -194,7 +201,9 @@ func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 		}
 		prior = state.SelfHealing
 		priorAgentWork = state.AgentWork
+		priorProject = &state
 	}
+	planTerraformManaged(ctx, config.TerraformManaged, priorProject, &plan, resp)
 	if planned := planArmed(ctx, plan.SelfHealing, &resp.Diagnostics); !planned.Equal(plan.SelfHealing) {
 		plan.SelfHealing = planned
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("self_healing"), planned)...)
@@ -237,13 +246,21 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 
 	created, err := r.client.CreateProject(ctx, fields, client.PayloadKey("project", "", fields))
 	if err != nil {
+		// A Flightdeck older than terraform_managed refuses every create, which
+		// always names it.
+		added, note := checkTerraformManagedUnsupported(ctx, r.client, 0, fields, err, &resp.Diagnostics)
+		if added {
+			return
+		}
 		// Creating a project needs only workspace membership, so a 403 on a
-		// create that names an app is the app's own bar.
-		_, settingApp := fields["app"]
-		addProjectWriteError(&resp.Diagnostics, "Error creating Flightdeck project", settingApp, err)
+		// create that sets the app or turns terraform_managed on may be that
+		// setting's own bar.
+		addProjectWriteError(&resp.Diagnostics, "Error creating Flightdeck project", projectAdminChangesOf(fields, nil), note, err)
 		return
 	}
 
+	// A create always plans terraform_managed (true unless configured), so
+	// unlike an update it never leaves it unsent.
 	state := projectToModel(ctx, created, &plan, featuresFromPrior, &resp.Diagnostics)
 	reconcileFeatures(ctx, &state, &plan, &resp.Diagnostics)
 	block, lockVersion := writeSelfHealing(ctx, r.client, created.ID, created.Identifier, config.SelfHealing, created.LockVersion, &resp.Diagnostics)
@@ -333,14 +350,21 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 				return
 			}
 		}
+		// A configured terraform_managed is sent to a Flightdeck that has never
+		// reported it, and one older than the setting refuses it.
+		added, note := checkTerraformManagedUnsupported(ctx, r.client, id, fields, err, &resp.Diagnostics)
+		if added {
+			return
+		}
 		// The app is only sent when it changes, so a 403 on a write naming it
-		// is the app's own bar.
-		_, changingApp := fields["app"]
-		addProjectWriteError(&resp.Diagnostics, "Error updating Flightdeck project", changingApp, err)
+		// is the app's own bar; one on a write that changes terraform_managed
+		// may be the flag's.
+		addProjectWriteError(&resp.Diagnostics, "Error updating Flightdeck project", projectAdminChangesOf(fields, &state), note, err)
 		return
 	}
 
 	newState := projectToModel(ctx, updated, &plan, featuresFromPrior, &resp.Diagnostics)
+	keepUnsentTerraformManaged(&newState, &plan)
 	reconcileFeatures(ctx, &newState, &plan, &resp.Diagnostics)
 	// Each block's write pins the lock_version the previous call produced and
 	// bumps it again; the state keeps the final value.
@@ -436,11 +460,15 @@ func addIfProjectGone(ctx context.Context, c *client.Client, projectID int64, id
 }
 
 // addProjectWriteError reports a failed project create or update. The app has
-// two refusals of its own, and each says what to change rather than only
-// quoting the API. changingApp is whether the write sets or changes the app,
-// which is what decides whether a 403 is the app's workspace-admin bar or the
-// token lacking the project role every other update needs.
-func addProjectWriteError(diags *diag.Diagnostics, summary string, changingApp bool, err error) {
+// two refusals of its own, and terraform_managed one, and each says what to
+// change rather than only quoting the API. changes says which of those two the
+// write sets or changes, which decides whether a 403 may be their
+// workspace-admin bar rather than the project role every other write needs.
+// The flag's refusal is claimed only when the API's message names it (see
+// refusesTerraformManaged), and it comes first: Flightdeck checks the app
+// before the flag, so a refusal naming the flag means the app passed. note,
+// if any, closes the generic error.
+func addProjectWriteError(diags *diag.Diagnostics, summary string, changes projectAdminChanges, note string, err error) {
 	if addRefusedID(diags, "lead_id", "Flightdeck refused this project lead",
 		"A new lead must be a member of the workspace and not a guest. A `flightdeck_workspace_member` data "+
 			"source finds a member's id from an email address, but it can't tell a guest from a member, so "+
@@ -448,21 +476,24 @@ func addProjectWriteError(diags *diag.Diagnostics, summary string, changingApp b
 		return
 	}
 	apiErr, _ := client.AsError(err)
+	// Only the write itself: a 403 from the read that verifies a create is the
+	// project role, and says nothing about the app or terraform_managed.
+	forbiddenWrite := client.IsForbidden(err) && apiErr.Method != http.MethodGet
 	switch {
 	case client.HasCode(err, client.CodeAppTaken):
 		diags.AddAttributeError(path.Root("app"), "App already belongs to another project",
 			"An app belongs to at most one project in a workspace. Point this project at a different app, or have a "+
 				"workspace owner or admin change the other project's app first. Nothing was written.\n\n"+
 				"The API said: "+apiErr.Error())
-	// Only the write itself: a 403 from the read that verifies a create is the
-	// project role, and says nothing about the app.
-	case changingApp && client.IsForbidden(err) && apiErr.Method != http.MethodGet:
+	case forbiddenWrite && changes.terraformManaged != nil && refusesTerraformManaged(apiErr):
+		addTerraformManagedForbidden(diags, *changes.terraformManaged, apiErr)
+	case forbiddenWrite && changes.app:
 		diags.AddAttributeError(path.Root("app"), "Setting a project's app requires a workspace owner or admin",
 			"This write sets or changes `app`, which needs a workspace owner or admin token even where the token "+
 				"could otherwise update the project. Use such a token, or remove `app` from the configuration and let "+
 				"the first release event that names an app bind it.\n\nThe API said: "+apiErr.Error())
 	default:
-		addAPIError(diags, summary, err)
+		addAPIErrorNote(diags, summary, err, note)
 	}
 }
 

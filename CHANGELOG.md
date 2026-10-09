@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.8.0...v0.9.0) (2026-10-09)
+
+
+### Added
+
+* manage the agent work research label and allow the fix-error and research kinds ([#44](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/44)) ([780482f](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/780482f0e52b62fb2f30bb004944d75288a4c1fb))
+
 ## [0.8.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.7.0...v0.8.0) (2026-10-09)
 
 

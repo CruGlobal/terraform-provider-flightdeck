@@ -5,7 +5,7 @@
 
 ### ⚠ BREAKING CHANGES
 
-* flightdeck_project now sends terraform_managed on every create and update. Creating any project fails against a Flightdeck without terraform_managed (FD-1171), even with terraform_managed = false. Once Flightdeck has it, every existing project plans terraform_managed false -> true, and applying that needs a token whose user is a workspace owner or admin; set terraform_managed = false or add lifecycle { ignore_changes = [terraform_managed] } to leave a project's flag off.
+* flightdeck_project now sends terraform_managed on every create and update. Creating any project fails against a Flightdeck without terraform_managed, even with terraform_managed = false. Once Flightdeck has it, every existing project plans terraform_managed false -> true, and applying that needs a token whose user is a workspace owner or admin; set terraform_managed = false or add lifecycle { ignore_changes = [terraform_managed] } to leave a project's flag off.
 
 ### Added
 

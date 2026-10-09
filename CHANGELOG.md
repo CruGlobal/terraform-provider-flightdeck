@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.7.0...v0.8.0) (2026-10-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* flightdeck_project now sends terraform_managed on every create and update. Creating any project fails against a Flightdeck without terraform_managed (FD-1171), even with terraform_managed = false. Once Flightdeck has it, every existing project plans terraform_managed false -> true, and applying that needs a token whose user is a workspace owner or admin; set terraform_managed = false or add lifecycle { ignore_changes = [terraform_managed] } to leave a project's flag off.
+
+### Added
+
+* mark the projects flightdeck_project manages as terraform_managed (needs Flightdeck's terraform_managed and a workspace owner or admin token) ([#40](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/40)) ([04c796b](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/04c796b7db399a255b4b199fbff3b9e3e793f653))
+
+
+### Fixed
+
+* build with Go 1.26.9 and golang.org/x/net v0.60.0 to clear GO-2026-6611 through GO-2026-6617 ([#42](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/42)) ([76b697e](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/76b697e1e9c3cc05cac60c6b7c5bcff3b4375a80))
+
 ## [0.7.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.6.0...v0.7.0) (2026-10-07)
 
 

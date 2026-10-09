@@ -223,5 +223,6 @@ func (s *Server) destroyLabel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(s.labels().byID, id)
+	s.forgetAgentWorkLabel(id)
 	w.WriteHeader(http.StatusNoContent)
 }

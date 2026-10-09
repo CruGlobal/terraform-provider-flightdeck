@@ -41,11 +41,12 @@ import (
 //     and a write here never bumps the project's. A project whose settings were
 //     never saved reads the defaults at version 0; the first write that
 //     changes something creates the row at 1.
-//   - The write MERGES and reads a blank as "no opinion" — except label_id and
-//     agent_account_id, where a blank or null CLEARS the choice. So only the
-//     configured settings are ever sent, and an unset label_id or
-//     agent_account_id is left out of the write rather than sent as null:
-//     otherwise every apply that did not mention them would clear them.
+//   - The write MERGES and reads a blank as "no opinion", except label_id,
+//     research_label_id and agent_account_id, where a blank or null CLEARS the
+//     choice. So only the configured settings are ever sent, and an unset
+//     label_id, research_label_id or agent_account_id is left out of the write
+//     rather than sent as null: otherwise every apply that did not mention
+//     them would clear them.
 //   - `blockers` (what would stop Flightdeck sending work right now) changes
 //     with the project and the day, like self-healing's rollback_blockers. It
 //     is reported as warnings on refresh and apply while agent work is on,
@@ -57,37 +58,43 @@ import (
 
 // agentWorkModel is the Terraform shape of the block.
 type agentWorkModel struct {
-	Enabled             types.Bool    `tfsdk:"enabled"`
-	Kinds               types.Set     `tfsdk:"kinds"`
-	LabelID             types.Int64   `tfsdk:"label_id"`
-	LabelChosenAt       types.String  `tfsdk:"label_chosen_at"`
-	AcceptMachineLabels types.Bool    `tfsdk:"accept_machine_labels"`
-	AgentAccountID      types.Int64   `tfsdk:"agent_account_id"`
-	BaseRef             types.String  `tfsdk:"base_ref"`
-	MaxInProgress       types.Int64   `tfsdk:"max_in_progress"`
-	DailyBudgetUSD      types.Float64 `tfsdk:"daily_budget_usd"`
-	TaskMaxUSD          types.Float64 `tfsdk:"task_max_usd"`
-	TaskMaxMinutes      types.Int64   `tfsdk:"task_max_minutes"`
-	QueueMinutes        types.Int64   `tfsdk:"queue_minutes"`
-	Runbook             types.String  `tfsdk:"runbook"`
-	LockVersion         types.Int64   `tfsdk:"lock_version"`
+	Enabled             types.Bool   `tfsdk:"enabled"`
+	Kinds               types.Set    `tfsdk:"kinds"`
+	LabelID             types.Int64  `tfsdk:"label_id"`
+	LabelChosenAt       types.String `tfsdk:"label_chosen_at"`
+	AcceptMachineLabels types.Bool   `tfsdk:"accept_machine_labels"`
+	// ResearchLabelID and ResearchLabelChosenAt work like LabelID and
+	// LabelChosenAt, for the label that sends an item for research first.
+	ResearchLabelID       types.Int64   `tfsdk:"research_label_id"`
+	ResearchLabelChosenAt types.String  `tfsdk:"research_label_chosen_at"`
+	AgentAccountID        types.Int64   `tfsdk:"agent_account_id"`
+	BaseRef               types.String  `tfsdk:"base_ref"`
+	MaxInProgress         types.Int64   `tfsdk:"max_in_progress"`
+	DailyBudgetUSD        types.Float64 `tfsdk:"daily_budget_usd"`
+	TaskMaxUSD            types.Float64 `tfsdk:"task_max_usd"`
+	TaskMaxMinutes        types.Int64   `tfsdk:"task_max_minutes"`
+	QueueMinutes          types.Int64   `tfsdk:"queue_minutes"`
+	Runbook               types.String  `tfsdk:"runbook"`
+	LockVersion           types.Int64   `tfsdk:"lock_version"`
 }
 
 var agentWorkAttrTypes = map[string]attr.Type{
-	"enabled":               types.BoolType,
-	"kinds":                 types.SetType{ElemType: types.StringType},
-	"label_id":              types.Int64Type,
-	"label_chosen_at":       types.StringType,
-	"accept_machine_labels": types.BoolType,
-	"agent_account_id":      types.Int64Type,
-	"base_ref":              types.StringType,
-	"max_in_progress":       types.Int64Type,
-	"daily_budget_usd":      types.Float64Type,
-	"task_max_usd":          types.Float64Type,
-	"task_max_minutes":      types.Int64Type,
-	"queue_minutes":         types.Int64Type,
-	"runbook":               types.StringType,
-	"lock_version":          types.Int64Type,
+	"enabled":                  types.BoolType,
+	"kinds":                    types.SetType{ElemType: types.StringType},
+	"label_id":                 types.Int64Type,
+	"label_chosen_at":          types.StringType,
+	"accept_machine_labels":    types.BoolType,
+	"research_label_id":        types.Int64Type,
+	"research_label_chosen_at": types.StringType,
+	"agent_account_id":         types.Int64Type,
+	"base_ref":                 types.StringType,
+	"max_in_progress":          types.Int64Type,
+	"daily_budget_usd":         types.Float64Type,
+	"task_max_usd":             types.Float64Type,
+	"task_max_minutes":         types.Int64Type,
+	"queue_minutes":            types.Int64Type,
+	"runbook":                  types.StringType,
+	"lock_version":             types.Int64Type,
 }
 
 // The API's ranges for the settings it holds to one.
@@ -138,20 +145,20 @@ func agentWorkSchema() schema.Attribute {
 	}
 	return schema.SingleNestedAttribute{
 		MarkdownDescription: "Agent work settings, managed through the project's `agent-work` API resource: whether " +
-			"AutoPilot, the AI agents Flightdeck sends work to, may take this project's work items, which label marks an " +
+			"AutoPilot, the AI agents Flightdeck sends work to, may take this project's work items, which labels mark an " +
 			"item for them, the service account they work as, and how much they may spend and run. An agent works on a " +
 			"copy of the project's GitHub repository and opens a pull request for a person to review. Reading and " +
 			"writing these settings requires the token's user to be a **workspace owner or admin**; for other tokens, " +
 			"and on a Flightdeck version without the endpoint, the block is null.\n\n" +
 			"Agent work is off until `enabled` turns it on. A plan that turns it on carries a warning saying so, and " +
 			"while it is on, each thing that stops Flightdeck sending work right now (the API's `blockers`: no " +
-			"label chosen, no linked GitHub repository, the day's budget spent, and so on) is shown as a warning on " +
-			"refresh and after apply rather than stored, because it changes as the project does.\n\n" +
+			"agent label or research label chosen, no linked GitHub repository, the day's budget spent, and so on) is " +
+			"shown as a warning on refresh and after apply rather than stored, because it changes as the project does.\n\n" +
 			"The endpoint merges, so this block only ever sends what you configure, and a setting you never name keeps " +
 			"whatever the project has, including a value changed on the settings page. `label_id` and " +
 			"`agent_account_id` are never sent unless configured, because the API reads an empty value for either as " +
 			"\"clear it\"; removing one from configuration therefore leaves the stored choice in place (clear it on " +
-			"the project's **Agent work** settings page).\n\n" +
+			"the project's **Agent work** settings page). `research_label_id` works the same way.\n\n" +
 			"These settings have their own `lock_version`, separate from the project's: a write here never conflicts " +
 			"with a project update and does not bump the project's `lock_version`.",
 		Optional: true,
@@ -161,9 +168,10 @@ func agentWorkSchema() schema.Attribute {
 		},
 		Attributes: map[string]schema.Attribute{
 			"enabled": schema.BoolAttribute{
-				MarkdownDescription: "Whether AutoPilot agents may take this project's work items. Off by default. Turning it " +
-					"on lets agents take each work item a person marks with the agent label and open pull requests " +
-					"for it, as soon as nothing in `blockers` stands in the way; a plan that turns it on warns. " +
+				MarkdownDescription: "Whether AutoPilot agents may take this project's work items. Off by default. Once it " +
+					"is on and nothing in `blockers` stands in the way, agents take each work item a person marks with " +
+					"the agent label and open pull requests for it, and, while `research` is one of the kinds, research " +
+					"each item marked with the research label and post a report on it. A plan that turns it on warns. " +
 					"Flightdeck posts the change to the project's Slack updates. When unset, the project's current " +
 					"value is kept; set it explicitly, even to `false`, for Terraform to own it.",
 				Optional:      true,
@@ -172,7 +180,9 @@ func agentWorkSchema() schema.Attribute {
 			},
 			"kinds": schema.SetAttribute{
 				MarkdownDescription: "The kinds of work agents may do. Known kinds: `" + joinBackticked(client.AgentWorkKinds) +
-					"`. None by default, and an empty set clears the list. When unset, the project's current list is kept.",
+					"`. None by default, and an empty set clears the list. Add `fix-error` or `research` only once " +
+					"AutoPilot allows that kind for the project: if AutoPilot refuses a kind, it holds all of the " +
+					"project's agent work, other kinds included. When unset, the project's current list is kept.",
 				ElementType:   types.StringType,
 				Optional:      true,
 				Computed:      true,
@@ -195,12 +205,29 @@ func agentWorkSchema() schema.Attribute {
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"accept_machine_labels": schema.BoolAttribute{
-				MarkdownDescription: "Whether the agent label counts even when a machine added it (an automation rule, an " +
-					"import, a service account). Off by default, so only a label a person adds sends an item to an agent. " +
-					"When unset, the project's current value is kept.",
+				MarkdownDescription: "Whether the agent label and the research label count even when a machine added them " +
+					"(an automation rule, an import, a service account). Off by default, so only a label a person adds " +
+					"sends an item to an agent. When unset, the project's current value is kept.",
 				Optional:      true,
 				Computed:      true,
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"research_label_id": reference("Id of the label in this project that sends a work item to an agent for " +
+				"**research** first, rather than to be built: the agent looks into it and posts a report on the item as a " +
+				"comment. It must be a different label from `label_id`. The plan fails when the configuration sets both " +
+				"to the same id, and Flightdeck refuses it when one of them matches the other's stored value. Like the " +
+				"agent label, only a label a person adds after it is chosen here counts (see `research_label_chosen_at`), " +
+				"unless `accept_machine_labels` says otherwise. Flightdeck sends an item as research only while " +
+				"`research` is in the project's kinds of work. When unset, the stored label is kept; it is never sent " +
+				"empty, because the API would read that as clearing it.\n\n" +
+				"Needs the Flightdeck release that added the agent work research label. A label in this project forms the " +
+				"same dependency cycle as `label_id`, and the same data source breaks it."),
+			"research_label_chosen_at": schema.StringAttribute{
+				MarkdownDescription: "When `research_label_id` was last set to a label (RFC 3339), or null while none is " +
+					"chosen. Only a label a person adds after this time counts. Read-only: Flightdeck sets it whenever " +
+					"`research_label_id` changes.",
+				Computed:      true,
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"agent_account_id": reference("User id of the workspace **service account** agents work as: a claimed item " +
 				"is assigned to it while an agent works on it, so it also needs a project role that can edit work " +
@@ -226,8 +253,9 @@ func agentWorkSchema() schema.Attribute {
 			"task_max_minutes": whole("The most minutes one task may run (default 30).", agentWorkMaxTaskMinutes),
 			"queue_minutes":    whole("How many minutes a task may wait to start before it is dropped (default 60).", agentWorkMaxQueue),
 			"runbook": schema.StringAttribute{
-				MarkdownDescription: "The steps the agent follows. Known runbooks: `" + joinBackticked(client.AgentWorkRunbooks) +
-					"` (the default). When unset, the project's current value is kept.",
+				MarkdownDescription: "The steps the agent follows for `implement-work-item`. Known runbooks: `" +
+					joinBackticked(client.AgentWorkRunbooks) + "` (the default). `fix-error` and `research` always use " +
+					"their own runbook. When unset, the project's current value is kept.",
 				Optional:      true,
 				Computed:      true,
 				Validators:    []validator.String{stringvalidator.OneOf(client.AgentWorkRunbooks...)},
@@ -251,20 +279,22 @@ func agentWorkDataSourceSchema() datasourceschema.Attribute {
 			"workspace owner or admin and the Flightdeck version exposes the endpoint.",
 		Computed: true,
 		Attributes: map[string]datasourceschema.Attribute{
-			"enabled":               datasourceschema.BoolAttribute{MarkdownDescription: "Whether agents may take the project's work items.", Computed: true},
-			"kinds":                 datasourceschema.SetAttribute{MarkdownDescription: "The kinds of work agents may do.", ElementType: types.StringType, Computed: true},
-			"label_id":              datasourceschema.Int64Attribute{MarkdownDescription: "Id of the label that marks an item for an agent, if one is chosen.", Computed: true},
-			"label_chosen_at":       datasourceschema.StringAttribute{MarkdownDescription: "When `label_id` was last set to a label (RFC 3339).", Computed: true},
-			"accept_machine_labels": datasourceschema.BoolAttribute{MarkdownDescription: "Whether the agent label counts when a machine added it.", Computed: true},
-			"agent_account_id":      datasourceschema.Int64Attribute{MarkdownDescription: "User id of the service account agents work as, if one is chosen.", Computed: true},
-			"base_ref":              datasourceschema.StringAttribute{MarkdownDescription: "The branch agents start from.", Computed: true},
-			"max_in_progress":       datasourceschema.Int64Attribute{MarkdownDescription: "How many items agents may work on at once.", Computed: true},
-			"daily_budget_usd":      datasourceschema.Float64Attribute{MarkdownDescription: "The most agent work may cost the project in one UTC day, in US dollars.", Computed: true},
-			"task_max_usd":          datasourceschema.Float64Attribute{MarkdownDescription: "The most one task may cost, in US dollars.", Computed: true},
-			"task_max_minutes":      datasourceschema.Int64Attribute{MarkdownDescription: "The most minutes one task may run.", Computed: true},
-			"queue_minutes":         datasourceschema.Int64Attribute{MarkdownDescription: "How many minutes a task may wait to start.", Computed: true},
-			"runbook":               datasourceschema.StringAttribute{MarkdownDescription: "The steps the agent follows.", Computed: true},
-			"lock_version":          datasourceschema.Int64Attribute{MarkdownDescription: "Optimistic-locking version of these settings, separate from the project's.", Computed: true},
+			"enabled":                  datasourceschema.BoolAttribute{MarkdownDescription: "Whether agents may take the project's work items.", Computed: true},
+			"kinds":                    datasourceschema.SetAttribute{MarkdownDescription: "The kinds of work agents may do.", ElementType: types.StringType, Computed: true},
+			"label_id":                 datasourceschema.Int64Attribute{MarkdownDescription: "Id of the label that marks an item for an agent, if one is chosen.", Computed: true},
+			"label_chosen_at":          datasourceschema.StringAttribute{MarkdownDescription: "When `label_id` was last set to a label (RFC 3339).", Computed: true},
+			"accept_machine_labels":    datasourceschema.BoolAttribute{MarkdownDescription: "Whether the agent label and the research label count when a machine added them.", Computed: true},
+			"research_label_id":        datasourceschema.Int64Attribute{MarkdownDescription: "Id of the label that sends an item for research first, if one is chosen.", Computed: true},
+			"research_label_chosen_at": datasourceschema.StringAttribute{MarkdownDescription: "When `research_label_id` was last set to a label (RFC 3339).", Computed: true},
+			"agent_account_id":         datasourceschema.Int64Attribute{MarkdownDescription: "User id of the service account agents work as, if one is chosen.", Computed: true},
+			"base_ref":                 datasourceschema.StringAttribute{MarkdownDescription: "The branch agents start from.", Computed: true},
+			"max_in_progress":          datasourceschema.Int64Attribute{MarkdownDescription: "How many items agents may work on at once.", Computed: true},
+			"daily_budget_usd":         datasourceschema.Float64Attribute{MarkdownDescription: "The most agent work may cost the project in one UTC day, in US dollars.", Computed: true},
+			"task_max_usd":             datasourceschema.Float64Attribute{MarkdownDescription: "The most one task may cost, in US dollars.", Computed: true},
+			"task_max_minutes":         datasourceschema.Int64Attribute{MarkdownDescription: "The most minutes one task may run.", Computed: true},
+			"queue_minutes":            datasourceschema.Int64Attribute{MarkdownDescription: "How many minutes a task may wait to start.", Computed: true},
+			"runbook":                  datasourceschema.StringAttribute{MarkdownDescription: "The steps the agent follows for `implement-work-item`.", Computed: true},
+			"lock_version":             datasourceschema.Int64Attribute{MarkdownDescription: "Optimistic-locking version of these settings, separate from the project's.", Computed: true},
 		},
 	}
 }
@@ -315,16 +345,25 @@ func decimalPlaces(amount float64) int {
 	return len(s) - dot - 1
 }
 
-// validateAgentWorkConfig checks the cross-field rule the API enforces (a task
-// may not cost more than the day) when both sides are configured. The API
-// checks it against the MERGED row, so a write naming one side can still be
-// refused by the other's stored value; warnAgentWorkBudget looks for that.
+// validateAgentWorkConfig checks the cross-field rules the API enforces when
+// both sides are configured: a task may not cost more than the day, and the
+// research label must be a different label from the agent label. The API
+// checks both against the MERGED row, so a write naming one side can still be
+// refused by the other's stored value; warnAgentWorkBudget looks for that on
+// the budget, and the API's refusal of a label clash lands on the attribute
+// (addAgentWorkWriteError).
 func validateAgentWorkConfig(ctx context.Context, block types.Object, diags *diag.Diagnostics) {
 	if block.IsNull() || block.IsUnknown() {
 		return
 	}
 	var m agentWorkModel
 	diags.Append(block.As(ctx, &m, objectAsOptions)...)
+	if known(m.LabelID) && known(m.ResearchLabelID) && m.LabelID.ValueInt64() == m.ResearchLabelID.ValueInt64() {
+		diags.AddAttributeError(path.Root("agent_work").AtName("research_label_id"), "The research label must be a different label",
+			fmt.Sprintf("research_label_id and label_id are both %d. One label cannot mean both \"build it\" and "+
+				"\"research it first\", so Flightdeck refuses the same label for both. Pick a different label for one of them.",
+				m.ResearchLabelID.ValueInt64()))
+	}
 	if !known(m.TaskMaxUSD) || !known(m.DailyBudgetUSD) {
 		return
 	}
@@ -370,11 +409,12 @@ func warnAgentWorkBudget(ctx context.Context, configBlock, planBlock types.Objec
 			"from the last refresh.", set, formatMoney(setValue), held, formatMoney(heldValue)))
 }
 
-// planAgentWorkComputed keeps the two computed attributes honest in a plan.
-// Both carry UseStateForUnknown, so a plan would otherwise promise their prior
-// values: lock_version moves on whenever a write changes a setting, and
-// label_chosen_at whenever label_id changes. Each becomes unknown exactly
-// then, so an apply that changes nothing here plans nothing here.
+// planAgentWorkComputed keeps the three computed attributes honest in a plan.
+// All carry UseStateForUnknown, so a plan would otherwise promise their prior
+// values: lock_version moves on whenever a write changes a setting,
+// label_chosen_at whenever label_id changes, and research_label_chosen_at
+// whenever research_label_id does. Each becomes unknown exactly then, so an
+// apply that changes nothing here plans nothing here.
 func planAgentWorkComputed(ctx context.Context, priorBlock, planBlock types.Object, diags *diag.Diagnostics) types.Object {
 	if planBlock.IsNull() || planBlock.IsUnknown() {
 		return planBlock
@@ -394,6 +434,9 @@ func planAgentWorkComputed(ctx context.Context, priorBlock, planBlock types.Obje
 	if !priorKnown || planned.LabelID.IsUnknown() || !planned.LabelID.Equal(prior.LabelID) {
 		planned.LabelChosenAt = types.StringUnknown()
 	}
+	if !priorKnown || planned.ResearchLabelID.IsUnknown() || !planned.ResearchLabelID.Equal(prior.ResearchLabelID) {
+		planned.ResearchLabelChosenAt = types.StringUnknown()
+	}
 	obj, d := types.ObjectValueFrom(ctx, agentWorkAttrTypes, planned)
 	diags.Append(d...)
 	return obj
@@ -411,7 +454,8 @@ func sameAgentWorkSettings(a, b agentWorkModel) bool {
 	}
 	same := func(x, y attr.Value) bool { return !x.IsUnknown() && !y.IsUnknown() && x.Equal(y) }
 	return same(a.Enabled, b.Enabled) && same(a.Kinds, b.Kinds) && same(a.LabelID, b.LabelID) &&
-		same(a.AcceptMachineLabels, b.AcceptMachineLabels) && same(a.AgentAccountID, b.AgentAccountID) &&
+		same(a.AcceptMachineLabels, b.AcceptMachineLabels) && same(a.ResearchLabelID, b.ResearchLabelID) &&
+		same(a.AgentAccountID, b.AgentAccountID) &&
 		same(a.BaseRef, b.BaseRef) && same(a.MaxInProgress, b.MaxInProgress) &&
 		sameFloat(a.DailyBudgetUSD, b.DailyBudgetUSD) && sameFloat(a.TaskMaxUSD, b.TaskMaxUSD) &&
 		same(a.TaskMaxMinutes, b.TaskMaxMinutes) && same(a.QueueMinutes, b.QueueMinutes) && same(a.Runbook, b.Runbook)
@@ -423,7 +467,9 @@ func known(v attr.Value) bool { return !v.IsNull() && !v.IsUnknown() }
 // agentWorkActs is what the plan-time warning says agents will do.
 const agentWorkActs = "AutoPilot agents may then take each of this project's work items that a person marks with the " +
 	"agent label, work on a copy of its GitHub repository as the agent account, and open pull requests for people " +
-	"to review, within the daily budget and the per-task limits."
+	"to review. If research is one of the kinds, an item a person marks with the research label is researched " +
+	"instead, and the agent posts its report on the item as a comment. All of this stays within the daily budget " +
+	"and the per-task limits."
 
 // warnAgentWorkEnabled is the plan-time warning for an apply that turns agent
 // work on: one that moves `enabled` to true, or may (a value not known until
@@ -501,20 +547,22 @@ func agentWorkToObject(ctx context.Context, aw *client.AgentWork, diags *diag.Di
 	set, d := types.SetValueFrom(ctx, types.StringType, kinds)
 	diags.Append(d...)
 	obj, d := types.ObjectValue(agentWorkAttrTypes, map[string]attr.Value{
-		"enabled":               types.BoolValue(aw.Enabled),
-		"kinds":                 set,
-		"label_id":              types.Int64PointerValue(aw.LabelID),
-		"label_chosen_at":       types.StringPointerValue(aw.LabelChosenAt),
-		"accept_machine_labels": types.BoolValue(aw.AcceptMachineLabels),
-		"agent_account_id":      types.Int64PointerValue(aw.AgentAccountID),
-		"base_ref":              types.StringValue(aw.BaseRef),
-		"max_in_progress":       types.Int64Value(aw.MaxInProgress),
-		"daily_budget_usd":      types.Float64Value(aw.DailyBudgetUSD),
-		"task_max_usd":          types.Float64Value(aw.TaskMaxUSD),
-		"task_max_minutes":      types.Int64Value(aw.TaskMaxMinutes),
-		"queue_minutes":         types.Int64Value(aw.QueueMinutes),
-		"runbook":               types.StringValue(aw.Runbook),
-		"lock_version":          types.Int64Value(aw.LockVersion),
+		"enabled":                  types.BoolValue(aw.Enabled),
+		"kinds":                    set,
+		"label_id":                 types.Int64PointerValue(aw.LabelID),
+		"label_chosen_at":          types.StringPointerValue(aw.LabelChosenAt),
+		"accept_machine_labels":    types.BoolValue(aw.AcceptMachineLabels),
+		"research_label_id":        types.Int64PointerValue(aw.ResearchLabelID),
+		"research_label_chosen_at": types.StringPointerValue(aw.ResearchLabelChosenAt),
+		"agent_account_id":         types.Int64PointerValue(aw.AgentAccountID),
+		"base_ref":                 types.StringValue(aw.BaseRef),
+		"max_in_progress":          types.Int64Value(aw.MaxInProgress),
+		"daily_budget_usd":         types.Float64Value(aw.DailyBudgetUSD),
+		"task_max_usd":             types.Float64Value(aw.TaskMaxUSD),
+		"task_max_minutes":         types.Int64Value(aw.TaskMaxMinutes),
+		"queue_minutes":            types.Int64Value(aw.QueueMinutes),
+		"runbook":                  types.StringValue(aw.Runbook),
+		"lock_version":             types.Int64Value(aw.LockVersion),
 	})
 	diags.Append(d...)
 	return obj
@@ -522,10 +570,10 @@ func agentWorkToObject(ctx context.Context, aw *client.AgentWork, diags *diag.Di
 
 // agentWorkFields returns the settings to send from the CONFIGURED block, or
 // nil when the configuration has no block. Only known, non-null settings are
-// sent. That is what makes the merge safe, and for label_id and
-// agent_account_id it is what keeps an apply from clearing them: the API
-// reads a null for either as "clear the choice", so an unset one is left out,
-// never sent as null.
+// sent. That is what makes the merge safe, and for label_id,
+// research_label_id and agent_account_id it is what keeps an apply from
+// clearing them: the API reads a null for any of them as "clear the choice",
+// so an unset one is left out, never sent as null.
 func agentWorkFields(ctx context.Context, block types.Object, diags *diag.Diagnostics) client.Fields {
 	if block.IsNull() || block.IsUnknown() {
 		return nil
@@ -557,11 +605,11 @@ func agentWorkFields(ctx context.Context, block types.Object, diags *diag.Diagno
 	if known(m.Kinds) {
 		kinds := []string{}
 		diags.Append(m.Kinds.ElementsAs(ctx, &kinds, false)...)
-		sort.Strings(kinds)
-		fields["kinds"] = kinds
+		fields["kinds"] = kindsInAPIOrder(kinds)
 	}
 	putInt("label_id", m.LabelID)
 	putBool("accept_machine_labels", m.AcceptMachineLabels)
+	putInt("research_label_id", m.ResearchLabelID)
 	putInt("agent_account_id", m.AgentAccountID)
 	putString("base_ref", m.BaseRef)
 	putInt("max_in_progress", m.MaxInProgress)
@@ -571,6 +619,69 @@ func agentWorkFields(ctx context.Context, block types.Object, diags *diag.Diagno
 	putInt("queue_minutes", m.QueueMinutes)
 	putString("runbook", m.Runbook)
 	return fields
+}
+
+// kindsInAPIOrder returns kinds in the API's own order (client.AgentWorkKinds),
+// which is the order Flightdeck's settings page saves them in. Flightdeck
+// stores the list as sent and counts a reordered list as a change, so a list
+// sent in any other order would record a change, and move lock_version, every
+// time the page and Terraform took turns. A kind the API doesn't list (the
+// plan refuses one) goes last, in name order.
+func kindsInAPIOrder(kinds []string) []string {
+	rank := func(kind string) int {
+		for i, k := range client.AgentWorkKinds {
+			if k == kind {
+				return i
+			}
+		}
+		return len(client.AgentWorkKinds)
+	}
+	out := append([]string{}, kinds...)
+	sort.SliceStable(out, func(i, j int) bool {
+		ri, rj := rank(out[i]), rank(out[j])
+		if ri != rj {
+			return ri < rj
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
+// kindsUnchangedInState reports whether the write sends kinds and the
+// configured set is the one in state. Only then may kinds be left out of the
+// write, and only once the server confirms it holds that set too
+// (serverHoldsKinds): state is not always what Flightdeck holds. A create
+// whose settings Flightdeck refused keeps the planned kinds in state, and a
+// plan made with -refresh=false never looks.
+func kindsUnchangedInState(ctx context.Context, settings client.Fields, priorBlock types.Object, diags *diag.Diagnostics) bool {
+	sent, ok := settings["kinds"].([]string)
+	if !ok || priorBlock.IsNull() || priorBlock.IsUnknown() {
+		return false
+	}
+	var prior agentWorkModel
+	diags.Append(priorBlock.As(ctx, &prior, objectAsOptions)...)
+	if !known(prior.Kinds) {
+		return false
+	}
+	held := []string{}
+	diags.Append(prior.Kinds.ElementsAs(ctx, &held, false)...)
+	return !diags.HasError() && sameKinds(held, sent)
+}
+
+// serverHoldsKinds reports whether the server's settings, read at the
+// version the write will pin, hold the kinds the write would send. Then
+// resending them changes nothing but, in another order, would still count as
+// a change there: it would move lock_version, which the plan promised would
+// stay, and record a change nobody made. A different version is left to the
+// write, whose If-Match makes it the usual stale-settings error.
+func serverHoldsKinds(current *client.AgentWork, lockVersion int64, settings client.Fields) bool {
+	sent, ok := settings["kinds"].([]string)
+	return ok && current != nil && current.LockVersion == lockVersion && sameKinds(current.Kinds, sent)
+}
+
+// sameKinds reports whether two lists hold the same kinds, in any order.
+func sameKinds(a, b []string) bool {
+	return strings.Join(kindsInAPIOrder(a), ",") == strings.Join(kindsInAPIOrder(b), ",")
 }
 
 // readAgentWork fetches the block for a project, and the API's answer for
@@ -605,8 +716,10 @@ const (
 )
 
 // writeAgentWork PATCHes the configured settings (if any) under the settings
-// row's own lock_version, and returns the block. With nothing configured it
-// just reads. priorBlock is the block in state before this apply (null on
+// row's own lock_version, and returns the block. kinds is left out when it
+// is the set in state and the server holds that set too
+// (kindsUnchangedInState, serverHoldsKinds). With nothing to send it just
+// reads. priorBlock is the block in state before this apply (null on
 // create), whose lock_version is the If-Match; without one, the current
 // version is read first. planned is the planned block, which a create-time
 // refusal hands back so the apply stays consistent with its plan. Either way,
@@ -623,14 +736,30 @@ func writeAgentWork(ctx context.Context, c *client.Client, projectID int64, iden
 		return block
 	}
 
+	// One read serves both needs: the version to pin when state has none, and
+	// whether the server already holds the kinds state says it does. The
+	// If-Match stays the state's whenever state has one.
 	lockVersion, ok := agentWorkLockVersion(ctx, priorBlock, diags)
-	if !ok {
+	unchanged := kindsUnchangedInState(ctx, settings, priorBlock, diags)
+	if diags.HasError() {
+		return types.ObjectNull(agentWorkAttrTypes)
+	}
+	if !ok || unchanged {
 		current, err := c.GetAgentWork(ctx, projectID)
 		if err != nil {
-			addAgentWorkWriteError(ctx, c, projectID, 0, err, diags)
+			addAgentWorkWriteError(ctx, c, projectID, lockVersion, settings, err, diags)
 			return types.ObjectNull(agentWorkAttrTypes)
 		}
-		lockVersion = current.LockVersion
+		if !ok {
+			lockVersion = current.LockVersion
+		}
+		if unchanged && serverHoldsKinds(current, lockVersion, settings) {
+			delete(settings, "kinds")
+			if len(settings) == 0 {
+				warnAgentWorkBlockers(current, identifier, diags)
+				return agentWorkToObject(ctx, current, diags)
+			}
+		}
 	}
 
 	aw, err := c.UpdateAgentWork(ctx, projectID, settings, lockVersion)
@@ -641,14 +770,15 @@ func writeAgentWork(ctx context.Context, c *client.Client, projectID int64, iden
 	if apply == agentWorkOnCreate && !client.IsNotFound(err) && !client.IsForbidden(err) {
 		var fresh diag.Diagnostics
 		if block, current := readAgentWork(ctx, c, projectID, &fresh); current != nil && !fresh.HasError() {
-			diags.AddAttributeWarning(path.Root("agent_work"), "Agent work settings were not saved",
+			at, _ := agentWorkRefusedAt(settings, err)
+			diags.AddAttributeWarning(at, "Agent work settings were not saved",
 				"The project was created, but Flightdeck refused this block's settings and saved none of them. The next "+
 					"plan shows them again, and the next apply tries again, so fix the configuration before then.\n\n"+
 					"The API said: "+apiMessage(err))
 			return agentWorkKeepPlan(planned, block, diags)
 		}
 	}
-	addAgentWorkWriteError(ctx, c, projectID, lockVersion, err, diags)
+	addAgentWorkWriteError(ctx, c, projectID, lockVersion, settings, err, diags)
 	return types.ObjectNull(agentWorkAttrTypes)
 }
 
@@ -688,8 +818,61 @@ func agentWorkKeepPlan(planned, fresh types.Object, diags *diag.Diagnostics) typ
 	return obj
 }
 
+// agentWorkRefusedAt picks where a refused write is reported: against the
+// attribute when the refusal is about the research label, otherwise against
+// the block. Flightdeck names the research label in its refusals ("Research
+// label must be a label in this project", "Research label must be different
+// from the agent label", or research_label_id by its key), and it names a
+// clash between the two labels as the research label's problem whichever of
+// them the write changed. So such a refusal points at research_label_id when
+// the write sent it, and at label_id when it sent only that (a new agent
+// label that is the stored research label). A refusal that also names the
+// agent label ("Agent label must be a label in this project and Research
+// label must be ...") is about both, so it stays on the block. ok reports
+// whether it picked an attribute.
+func agentWorkRefusedAt(sent client.Fields, err error) (at path.Path, ok bool) {
+	block := path.Root("agent_work")
+	if !client.IsValidation(err) {
+		return block, false
+	}
+	msg := apiMessage(err)
+	if !strings.Contains(msg, "Research label") && !strings.Contains(msg, "research_label_id") {
+		return block, false
+	}
+	if namesAgentLabel.MatchString(msg) {
+		return block, false
+	}
+	for _, key := range []string{"research_label_id", "label_id"} {
+		if _, named := sent[key]; named {
+			return block.AtName(key), true
+		}
+	}
+	return block, false
+}
+
+// namesAgentLabel finds the agent label in a validation refusal, which names
+// each setting by the settings page's name for it. The research label's own
+// "different from the agent label" says it in lower case, so it does not
+// match. The key label_id is not looked for: an older Flightdeck's refusal of
+// research_label_id as an unknown key lists label_id among the settable keys.
+var namesAgentLabel = regexp.MustCompile(`Agent label`)
+
+// agentWorkResearchLabelRule is what a refused research label must be.
+const agentWorkResearchLabelRule = "research_label_id must be a label in this project, and a different label from " +
+	"label_id. Flightdeck names a clash between the two as the research label's problem, whichever of them this " +
+	"apply changed."
+
+// agentWorkResearchLabelUnknownNote closes a research label refusal that the
+// API gave as an invalid attribute, which is how a Flightdeck older than the
+// research label refuses the key.
+const agentWorkResearchLabelUnknownNote = "\n\nIf the API calls research_label_id an unknown key, this Flightdeck is " +
+	"older than the release that added the agent work research label: upgrade Flightdeck first, or leave " +
+	"research_label_id out of the configuration."
+
 // addAgentWorkWriteError explains a refused read or write of the settings.
-func addAgentWorkWriteError(ctx context.Context, c *client.Client, projectID, lockVersion int64, err error, diags *diag.Diagnostics) {
+// sent is what the write sent, which says which attribute a refusal of the
+// research label is about.
+func addAgentWorkWriteError(ctx context.Context, c *client.Client, projectID, lockVersion int64, sent client.Fields, err error, diags *diag.Diagnostics) {
 	if addIfProjectGone(ctx, c, projectID, "", err, diags) {
 		return
 	}
@@ -710,6 +893,14 @@ func addAgentWorkWriteError(ctx context.Context, c *client.Client, projectID, lo
 		}
 		addStaleError(diags, "Project agent work settings", lockVersion, current, err)
 	case client.IsValidation(err):
+		if label, ok := agentWorkRefusedAt(sent, err); ok {
+			detail := "Nothing was saved. " + agentWorkResearchLabelRule + "\n\nThe API said: " + apiMessage(err)
+			if client.HasCode(err, client.CodeInvalidAttribute) {
+				detail += agentWorkResearchLabelUnknownNote
+			}
+			diags.AddAttributeError(label, "Flightdeck refused the research label", detail)
+			return
+		}
 		diags.AddAttributeError(at, "Flightdeck refused the agent work settings",
 			"Nothing was saved. "+apiMessage(err))
 	default:

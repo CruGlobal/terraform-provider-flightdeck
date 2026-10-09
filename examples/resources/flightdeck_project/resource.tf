@@ -80,6 +80,14 @@ resource "flightdeck_label" "agent_ready" {
   name       = "agent-ready"
 }
 
+# A second label sends an item to an agent for research first, rather than to
+# be built. It must be a different label from the agent label, and it only
+# sends work while research is one of the project's kinds.
+resource "flightdeck_label" "research_first" {
+  project_id = data.flightdeck_project.billing.id
+  name       = "research-first"
+}
+
 # The service account agents work as. It needs a project role that can edit
 # work items, because a claimed item is assigned to it.
 data "flightdeck_workspace_member" "agent" {
@@ -97,12 +105,14 @@ resource "flightdeck_project" "billing" {
   identifier = "BILL"
 
   agent_work = {
-    enabled          = true
-    kinds            = ["implement-work-item"]
-    label_id         = flightdeck_label.agent_ready.id
-    agent_account_id = data.flightdeck_workspace_member.agent.id
-    max_in_progress  = 1
-    daily_budget_usd = 10
-    task_max_usd     = 2.5 # whole cents: more decimal places fail the plan
+    enabled = true
+    # Add a kind only once AutoPilot allows it for the project.
+    kinds             = ["implement-work-item", "research"]
+    label_id          = flightdeck_label.agent_ready.id
+    research_label_id = flightdeck_label.research_first.id
+    agent_account_id  = data.flightdeck_workspace_member.agent.id
+    max_in_progress   = 1
+    daily_budget_usd  = 10
+    task_max_usd      = 2.5 # whole cents: more decimal places fail the plan
   }
 }

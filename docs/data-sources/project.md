@@ -63,7 +63,7 @@ output "app_terraform_managed" {
 
 Read-Only:
 
-- `accept_machine_labels` (Boolean) Whether the agent label counts when a machine added it.
+- `accept_machine_labels` (Boolean) Whether the agent label and the research label count when a machine added them.
 - `agent_account_id` (Number) User id of the service account agents work as, if one is chosen.
 - `base_ref` (String) The branch agents start from.
 - `daily_budget_usd` (Number) The most agent work may cost the project in one UTC day, in US dollars.
@@ -74,7 +74,9 @@ Read-Only:
 - `lock_version` (Number) Optimistic-locking version of these settings, separate from the project's.
 - `max_in_progress` (Number) How many items agents may work on at once.
 - `queue_minutes` (Number) How many minutes a task may wait to start.
-- `runbook` (String) The steps the agent follows.
+- `research_label_chosen_at` (String) When `research_label_id` was last set to a label (RFC 3339).
+- `research_label_id` (Number) Id of the label that sends an item for research first, if one is chosen.
+- `runbook` (String) The steps the agent follows for `implement-work-item`.
 - `task_max_minutes` (Number) The most minutes one task may run.
 - `task_max_usd` (Number) The most one task may cost, in US dollars.
 

@@ -11,20 +11,24 @@ import (
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/flightdecktest"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 // Every test here that turns agent work on turns it off again before the
-// project is destroyed, so nothing is ever left enabled. None of them links a
-// GitHub repository, so even while agent work is on, Flightdeck has nothing
-// it could send (no_github_repo is always a blocker).
+// project is destroyed, so nothing is ever left enabled. None of them that
+// runs live chooses an agent label while agent work is on, or ticks research,
+// so even then Flightdeck has nothing it could send (no_label is always a
+// blocker).
 
 func TestProjectAgentWork_settingsRoundTrip(t *testing.T) {
 	env := newTestEnv(t, "agent_work")
@@ -339,7 +343,11 @@ func TestProjectAgentWork_moneyIsValidatedAtPlanTime(t *testing.T) {
 			},
 			{Config: cfg(`    max_in_progress = 11`), PlanOnly: true, ExpectError: regexMust(`between\s+1\s+and\s+10`)},
 			{Config: cfg(`    base_ref = ""`), PlanOnly: true, ExpectError: regexMust(`Invalid Attribute Value`)},
-			{Config: cfg(`    kinds = ["fix-everything"]`), PlanOnly: true, ExpectError: regexMust(`implement-work-item`)},
+			{
+				Config:      cfg(`    kinds = ["fix-ci"]`),
+				PlanOnly:    true,
+				ExpectError: regexMust(`(?s)"implement-work-item"\s+"fix-error"\s+"research"`),
+			},
 		},
 	})
 }
@@ -604,6 +612,780 @@ data "flightdeck_project" "lookup" {
 	})
 }
 
+// researchLabelConfig is the project with three labels of its own, the way a
+// configuration gives a project labels without a dependency cycle (see
+// TestProjectAgentWork_labelAndAccountAreNeverClearedByOmission): each label
+// takes its project_id from a data source looked up by identifier, which only
+// works once the project exists. A second project with a label of its own
+// stands in for a label that is not this project's.
+func researchLabelConfig(env *testEnv, identifier, other, body string) string {
+	return env.providerConfig() + fmt.Sprintf(`
+data "flightdeck_project" "self" {
+  identifier = %q
+}
+
+resource "flightdeck_label" "agent" {
+  project_id = data.flightdeck_project.self.id
+  name       = "agent-ready"
+}
+
+resource "flightdeck_label" "research" {
+  project_id = data.flightdeck_project.self.id
+  name       = "research-first"
+}
+
+resource "flightdeck_label" "research_next" {
+  project_id = data.flightdeck_project.self.id
+  name       = "look-into-it"
+}
+%s
+resource "flightdeck_project" "test" {
+  identifier = %q
+  name       = "Research label"
+%s
+}
+`, identifier, otherProjectConfig(other), identifier, body)
+}
+
+// otherProjectConfig is a second project and a label in it, or nothing when
+// other is empty.
+func otherProjectConfig(other string) string {
+	if other == "" {
+		return ""
+	}
+	return fmt.Sprintf(`
+resource "flightdeck_project" "other" {
+  identifier = %q
+  name       = "Another project"
+}
+
+resource "flightdeck_label" "foreign" {
+  project_id = flightdeck_project.other.id
+  name       = "research-elsewhere"
+}
+`, other)
+}
+
+// The research label is set, changed and imported like the agent label, and,
+// like it, removing it from the configuration leaves the stored label alone:
+// the API reads a null as "clear it", so the provider must never send one.
+func TestProjectAgentWork_researchLabelSetChangeImportAndKeep(t *testing.T) {
+	env := newTestEnv(t, "agent_work")
+	identifier := randIdentifier()
+	cfg := func(body string) string { return researchLabelConfig(env, identifier, "", body) }
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// The project first, so the data source can find it.
+				Config: projectConfig(env, identifier, `  name = "Research label"`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckNoResourceAttr(projectRes, "agent_work.research_label_id"),
+					resource.TestCheckNoResourceAttr(projectRes, "agent_work.research_label_chosen_at"),
+				),
+			},
+			{
+				Config: cfg(`  agent_work = {
+    label_id          = flightdeck_label.agent.id
+    research_label_id = flightdeck_label.research.id
+  }`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPair(projectRes, "agent_work.label_id", "flightdeck_label.agent", "id"),
+					resource.TestCheckResourceAttrPair(projectRes, "agent_work.research_label_id", "flightdeck_label.research", "id"),
+					resource.TestCheckResourceAttrSet(projectRes, "agent_work.research_label_chosen_at"),
+					resource.TestCheckResourceAttrSet(projectRes, "agent_work.label_chosen_at"),
+					resource.TestCheckResourceAttr(projectRes, "agent_work.lock_version", "1"),
+				),
+			},
+			{
+				ResourceName:            projectRes,
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"features"},
+			},
+			{
+				// Another research label; the agent label stays as it is.
+				Config: cfg(`  agent_work = {
+    label_id          = flightdeck_label.agent.id
+    research_label_id = flightdeck_label.research_next.id
+  }`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(projectRes, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPair(projectRes, "agent_work.research_label_id", "flightdeck_label.research_next", "id"),
+					resource.TestCheckResourceAttrPair(projectRes, "agent_work.label_id", "flightdeck_label.agent", "id"),
+					resource.TestCheckResourceAttrSet(projectRes, "agent_work.research_label_chosen_at"),
+					resource.TestCheckResourceAttr(projectRes, "agent_work.lock_version", "2"),
+				),
+			},
+			{
+				// Both labels leave the configuration; another setting changes.
+				Config: cfg(`  agent_work = {
+    max_in_progress = 2
+  }`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "agent_work.max_in_progress", "2"),
+					resource.TestCheckResourceAttrPair(projectRes, "agent_work.research_label_id", "flightdeck_label.research_next", "id"),
+					resource.TestCheckResourceAttrSet(projectRes, "agent_work.research_label_chosen_at"),
+					resource.TestCheckResourceAttrPair(projectRes, "agent_work.label_id", "flightdeck_label.agent", "id"),
+					// The data source was read during this step's plan, after the
+					// previous step chose research_next.
+					resource.TestCheckResourceAttrPair("data.flightdeck_project.self", "agent_work.research_label_id",
+						"flightdeck_label.research_next", "id"),
+					resource.TestCheckResourceAttrSet("data.flightdeck_project.self", "agent_work.research_label_chosen_at"),
+				),
+			},
+			{
+				// Every kind Flightdeck knows. Agent work stays off, so nothing
+				// is sent to AutoPilot.
+				Config: cfg(`  agent_work = {
+    kinds = ["implement-work-item", "fix-error", "research"]
+  }`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "agent_work.enabled", "false"),
+					resource.TestCheckResourceAttr(projectRes, "agent_work.kinds.#", "3"),
+					resource.TestCheckTypeSetElemAttr(projectRes, "agent_work.kinds.*", "implement-work-item"),
+					resource.TestCheckTypeSetElemAttr(projectRes, "agent_work.kinds.*", "fix-error"),
+					resource.TestCheckTypeSetElemAttr(projectRes, "agent_work.kinds.*", "research"),
+					resource.TestCheckResourceAttrPair(projectRes, "agent_work.research_label_id", "flightdeck_label.research_next", "id"),
+				),
+			},
+			{
+				// Dropping the block leaves both labels alone and plans nothing.
+				Config: cfg(""),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+				Check: resource.TestCheckResourceAttrPair(projectRes, "agent_work.research_label_id", "flightdeck_label.research_next", "id"),
+			},
+		},
+	})
+	if env.live() {
+		return
+	}
+	writes := agentWorkRequests(env.fake.RequestsMatching("PATCH", "/api/v1/projects/"))
+	if len(writes) != 4 {
+		t.Fatalf("expected four agent-work PATCHes, got %d", len(writes))
+	}
+	for i, want := range []bool{true, true, false, false} {
+		if _, sent := agentWorkBody(t, writes[i])["research_label_id"]; sent != want {
+			t.Errorf("write %d: research_label_id sent = %t, want %t: %v", i+1, sent, want, agentWorkBody(t, writes[i]))
+		}
+	}
+	if last := agentWorkBody(t, writes[2]); len(last) != 1 || last["max_in_progress"] != float64(2) {
+		t.Errorf("the last write must send max_in_progress only, got %v", last)
+	}
+}
+
+// Flightdeck's refusals of a research label land on the attribute: a label
+// that isn't the project's, and one that is the agent label. A clash the
+// configuration can see fails the plan; one with a stored label is refused
+// by the apply, against whichever label the configuration changed. On create
+// a refusal is a warning, so the project isn't tainted.
+func TestProjectAgentWork_researchLabelRefusalsLandOnTheAttribute(t *testing.T) {
+	env := newTestEnv(t, "agent_work")
+	identifier, other := randIdentifier(), randIdentifier()
+	foreign := func() string {
+		return env.providerConfig() + otherProjectConfig(other) + fmt.Sprintf(`
+resource "flightdeck_project" "test" {
+  identifier = %q
+  name       = "Research label"
+  agent_work = {
+    research_label_id = flightdeck_label.foreign.id
+  }
+}
+`, identifier)
+	}
+	cfg := func(body string) string { return researchLabelConfig(env, identifier, other, body) }
+	notThisProjects := regexMust(`(?s)Flightdeck refused the research label.*Research\s+label\s+must\s+be\s+a\s+label\s+in\s+this\s+project`)
+	sameAsAgent := regexMust(`(?s)Flightdeck refused the research label.*Research\s+label\s+must\s+be\s+different\s+from\s+the\s+agent\s+label`)
+	recorded := runTestRecordingApplyDiagnostics(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// Created with another project's label: a warning, not an error.
+				Config:             foreign(),
+				ExpectNonEmptyPlan: true,
+			},
+			{
+				// The same, as an update: an error.
+				Config:      foreign(),
+				ExpectError: notThisProjects,
+			},
+			{Config: cfg(`  agent_work = {
+    label_id = flightdeck_label.agent.id
+  }`)},
+			{
+				// The stored agent label as the research label.
+				Config: cfg(`  agent_work = {
+    research_label_id = flightdeck_label.agent.id
+  }`),
+				ExpectError: sameAsAgent,
+			},
+			{
+				Config: cfg(`  agent_work = {
+    research_label_id = flightdeck_label.research.id
+  }`),
+				Check: resource.TestCheckResourceAttrPair(projectRes, "agent_work.research_label_id", "flightdeck_label.research", "id"),
+			},
+			{
+				// The stored research label as the agent label.
+				Config: cfg(`  agent_work = {
+    label_id = flightdeck_label.research.id
+  }`),
+				ExpectError: sameAsAgent,
+			},
+			{
+				// Both in the configuration: the plan sees it.
+				Config: cfg(`  agent_work = {
+    label_id          = flightdeck_label.agent.id
+    research_label_id = flightdeck_label.agent.id
+  }`),
+				PlanOnly:    true,
+				ExpectError: regexMust(`The research label must be a different label`),
+			},
+		},
+	})
+	at := func(name string) *tftypes.AttributePath {
+		return tftypes.NewAttributePath().WithAttributeName("agent_work").WithAttributeName(name)
+	}
+	cases := []struct {
+		what     string
+		severity tfprotov6.DiagnosticSeverity
+		summary  string
+		path     *tftypes.AttributePath
+		detail   string
+	}{
+		{"create, another project's label", tfprotov6.DiagnosticSeverityWarning, "Agent work settings were not saved",
+			at("research_label_id"), "Research label must be a label in this project"},
+		{"update, another project's label", tfprotov6.DiagnosticSeverityError, "Flightdeck refused the research label",
+			at("research_label_id"), "Research label must be a label in this project"},
+		{"the stored agent label as the research label", tfprotov6.DiagnosticSeverityError, "Flightdeck refused the research label",
+			at("research_label_id"), "Research label must be different from the agent label"},
+		{"the stored research label as the agent label", tfprotov6.DiagnosticSeverityError, "Flightdeck refused the research label",
+			at("label_id"), "Research label must be different from the agent label"},
+	}
+	for _, tc := range cases {
+		if !diagnosticAt(recorded.bySeverity(tc.severity), tc.summary, tc.path, tc.detail) {
+			t.Errorf("%s: no %q at %s saying %q; recorded: %s", tc.what, tc.summary, tc.path, tc.detail,
+				describeWithPaths(recorded.bySeverity(tc.severity)))
+		}
+	}
+}
+
+// A research label changed or cleared on the settings page shows in the next
+// plan when the configuration sets one, and is set back. One chosen there
+// while the configuration sets none is adopted, and plans nothing.
+func TestProjectAgentWork_researchLabelDrift(t *testing.T) {
+	env := newTestEnv(t, "agent_work")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	var id, research, next string
+	pid := func() int64 { return mustInt64(t, id) }
+	label := func(s *string) *int64 { v := mustInt64(t, *s); return &v }
+	configured := researchLabelConfig(env, identifier, "", `  agent_work = {
+    research_label_id = flightdeck_label.research.id
+  }`)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{Config: projectConfig(env, identifier, `  name = "Research label"`), Check: captureAttr(projectRes, "id", &id)},
+			{
+				Config: configured,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					captureAttr("flightdeck_label.research", "id", &research),
+					captureAttr("flightdeck_label.research_next", "id", &next),
+				),
+			},
+			{
+				// Changed on the settings page.
+				PreConfig: func() {
+					env.fake.SetAgentWorkOutOfBand(pid(), func(row *flightdecktest.AgentWorkSetting) { row.ResearchLabelID = label(&next) })
+				},
+				Config: configured,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(projectRes, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.TestCheckResourceAttrPair(projectRes, "agent_work.research_label_id", "flightdeck_label.research", "id"),
+			},
+			{
+				// Cleared on the settings page.
+				PreConfig: func() {
+					env.fake.SetAgentWorkOutOfBand(pid(), func(row *flightdecktest.AgentWorkSetting) { row.ResearchLabelID = nil })
+				},
+				Config: configured,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(projectRes, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPair(projectRes, "agent_work.research_label_id", "flightdeck_label.research", "id"),
+					resource.TestCheckResourceAttrSet(projectRes, "agent_work.research_label_chosen_at"),
+				),
+			},
+			{
+				// Chosen on the settings page while the configuration sets none.
+				PreConfig: func() {
+					env.fake.SetAgentWorkOutOfBand(pid(), func(row *flightdecktest.AgentWorkSetting) { row.ResearchLabelID = label(&next) })
+				},
+				Config: researchLabelConfig(env, identifier, "", ""),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPair(projectRes, "agent_work.research_label_id", "flightdeck_label.research_next", "id"),
+					// Checked here, before the test's destroy deletes the labels
+					// (and with them, as the foreign key does, the reference).
+					func(*terraform.State) error {
+						got := env.fake.AgentWorkOf(pid())
+						if got == nil || got.ResearchLabelID == nil || strconv.FormatInt(*got.ResearchLabelID, 10) != next {
+							return fmt.Errorf("the label chosen on the settings page was not kept: %+v", got)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+// no_research_label is reported like any other blocker while agent work is
+// on, and goes once a research label is chosen. With research the only kind
+// ticked, neither the agent label nor a repository is needed, so neither
+// no_label nor no_github_repo is listed.
+func TestProjectAgentWork_noResearchLabelBlockerIsWarned(t *testing.T) {
+	env := newTestEnv(t, "agent_work")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	var id string
+	recorded := runTestRecordingApplyDiagnostics(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{Config: projectConfig(env, identifier, `  name = "Research label"`), Check: captureAttr(projectRes, "id", &id)},
+			{
+				// Turned on for research on the settings page; the refresh reports
+				// it. Nothing about the project changes, so nothing applies to it.
+				PreConfig: func() {
+					env.fake.SetAgentWorkOutOfBand(mustInt64(t, id), func(row *flightdecktest.AgentWorkSetting) {
+						row.Enabled = true
+						row.Kinds = []string{"research"}
+					})
+				},
+				Config: researchLabelConfig(env, identifier, "", ""),
+			},
+			{
+				// Choosing the research label clears it.
+				Config: researchLabelConfig(env, identifier, "", `  agent_work = {
+    research_label_id = flightdeck_label.research.id
+  }`),
+				Check: resource.TestCheckResourceAttrPair(projectRes, "agent_work.research_label_id", "flightdeck_label.research", "id"),
+			},
+		},
+	})
+	summary := "Agent work cannot start on project " + identifier + " right now: "
+	if !anyDiagnostic(recorded.readWarnings(), summary+"no_research_label", "No research label is chosen.") {
+		t.Fatalf("no no_research_label blocker warning on refresh; refresh warnings: %s", describe(recorded.readWarnings()))
+	}
+	for _, code := range []string{"no_label", "no_github_repo"} {
+		if anyDiagnostic(recorded.readWarnings(), summary+code) {
+			t.Errorf("%s listed although research is the only kind ticked: %s", code, describe(recorded.readWarnings()))
+		}
+	}
+	// The only apply to the project is the one that chose the label. It still
+	// reports what blocks agent work (the fake is never connected to the
+	// pool), so the missing no_research_label means it went.
+	applied := recorded.bySeverity(tfprotov6.DiagnosticSeverityWarning)
+	if !anyDiagnostic(applied, summary+"pool_not_connected") {
+		t.Fatalf("the apply reported no blockers at all, so it proves nothing: %s", describe(applied))
+	}
+	if anyDiagnostic(applied, summary+"no_research_label") {
+		t.Fatalf("no_research_label still reported after the apply that chose the label: %s", describe(applied))
+	}
+}
+
+// A label deleted outside Terraform takes the agent work reference with it:
+// Flightdeck's foreign keys set label_id and research_label_id to null, and
+// the read reports the chosen times as null too. The refresh sees that, and
+// the plan makes the labels again and points both references at them.
+func TestProjectAgentWork_deletedLabelIsReadAsNullAndSetBack(t *testing.T) {
+	env := newTestEnv(t, "agent_work")
+	identifier := randIdentifier()
+	var id, agentID, researchID string
+	config := researchLabelConfig(env, identifier, "", `  agent_work = {
+    label_id          = flightdeck_label.agent.id
+    research_label_id = flightdeck_label.research.id
+  }`)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{Config: projectConfig(env, identifier, `  name = "Research label"`), Check: captureAttr(projectRes, "id", &id)},
+			{
+				Config: config,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					captureAttr("flightdeck_label.agent", "id", &agentID),
+					captureAttr("flightdeck_label.research", "id", &researchID),
+					resource.TestCheckResourceAttr(projectRes, "agent_work.lock_version", "1"),
+				),
+			},
+			{
+				// Both labels are deleted outside Terraform.
+				PreConfig: func() {
+					c, err := client.New(env.endpoint, env.token)
+					if err != nil {
+						t.Fatal(err)
+					}
+					ctx := context.Background()
+					for _, labelID := range []string{agentID, researchID} {
+						l, err := c.GetLabel(ctx, mustInt64(t, labelID))
+						if err != nil {
+							t.Fatalf("reading label %s: %v", labelID, err)
+						}
+						if err := c.DeleteLabel(ctx, l.ID, l.LockVersion); err != nil {
+							t.Fatalf("deleting label %s: %v", labelID, err)
+						}
+					}
+					if env.live() {
+						return
+					}
+					// Like the foreign key: the ids go, and nothing else moves.
+					row := env.fake.AgentWorkOf(mustInt64(t, id))
+					if row == nil || row.LabelID != nil || row.ResearchLabelID != nil || row.LockVersion != 1 {
+						t.Fatalf("after the deletes the settings are %+v, want both ids null at lock_version 1", row)
+					}
+				},
+				Config: config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("flightdeck_label.agent", plancheck.ResourceActionCreate),
+						plancheck.ExpectResourceAction("flightdeck_label.research", plancheck.ResourceActionCreate),
+						plancheck.ExpectResourceAction(projectRes, plancheck.ResourceActionUpdate),
+						expectPriorAgentWork{key: "label_id", want: nil},
+						expectPriorAgentWork{key: "research_label_id", want: nil},
+						expectPriorAgentWork{key: "label_chosen_at", want: nil},
+						expectPriorAgentWork{key: "research_label_chosen_at", want: nil},
+					},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPair(projectRes, "agent_work.label_id", "flightdeck_label.agent", "id"),
+					resource.TestCheckResourceAttrPair(projectRes, "agent_work.research_label_id", "flightdeck_label.research", "id"),
+					resource.TestCheckResourceAttrSet(projectRes, "agent_work.label_chosen_at"),
+					resource.TestCheckResourceAttrSet(projectRes, "agent_work.research_label_chosen_at"),
+				),
+			},
+		},
+	})
+}
+
+// expectPriorAgentWork checks the value an agent_work attribute of the project
+// has before the planned change, which is what the refresh read.
+type expectPriorAgentWork struct {
+	key  string
+	want any
+}
+
+func (e expectPriorAgentWork) CheckPlan(_ context.Context, req plancheck.CheckPlanRequest, resp *plancheck.CheckPlanResponse) {
+	for _, rc := range req.Plan.ResourceChanges {
+		if rc.Address != projectRes {
+			continue
+		}
+		before, _ := rc.Change.Before.(map[string]any)
+		block, ok := before["agent_work"].(map[string]any)
+		if !ok {
+			resp.Error = fmt.Errorf("%s: the planned change starts from no agent_work block", projectRes)
+			return
+		}
+		got, present := block[e.key]
+		if !present || got != e.want {
+			resp.Error = fmt.Errorf("%s: planned change starts from agent_work.%s = %v (present: %t), want %v",
+				projectRes, e.key, got, present, e.want)
+		}
+		return
+	}
+	resp.Error = fmt.Errorf("%s is not in the plan", projectRes)
+}
+
+// Flightdeck stores kinds as sent and counts a reordered list as a change, as
+// the fake does. So the provider sends kinds in the API's order (the order the
+// settings page saves them in), and leaves them out of a write that doesn't
+// change the set. Otherwise an update to anything else would rewrite the
+// stored list in another order, move the settings' lock_version the plan said
+// would stay, and fail with "Provider produced inconsistent result".
+func TestProjectAgentWork_kindsOrderNeverCountsAsAChange(t *testing.T) {
+	env := newTestEnv(t, "agent_work")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	var id string
+	pid := func() int64 { return mustInt64(t, id) }
+	config := func(name string) string {
+		return projectConfig(env, identifier, fmt.Sprintf(`
+  name = %q
+  agent_work = {
+    kinds = ["fix-error", "implement-work-item"]
+  }`, name))
+	}
+	storedKinds := func(want ...string) resource.TestCheckFunc {
+		return func(*terraform.State) error {
+			got := env.fake.AgentWorkOf(pid())
+			if got == nil || strings.Join(got.Kinds, ",") != strings.Join(want, ",") {
+				return fmt.Errorf("stored kinds = %+v, want %v", got, want)
+			}
+			return nil
+		}
+	}
+	// outOfBand saves the settings the way another client would: kinds in the
+	// given order, and a budget change, which moves lock_version.
+	outOfBand := func(budget float64, kinds ...string) func() {
+		return func() {
+			env.fake.SetAgentWorkOutOfBand(pid(), func(row *flightdecktest.AgentWorkSetting) {
+				row.Kinds = kinds
+				row.DailyBudgetUSD = budget
+			})
+		}
+	}
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				// Sent in the API's order, whatever order the configuration
+				// lists them in, so a later save of the page changes nothing.
+				Config: config("Kinds"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					captureAttr(projectRes, "id", &id),
+					storedKinds("implement-work-item", "fix-error"),
+				),
+			},
+			{
+				// Another client stored the same kinds in name order. Renaming
+				// the project must not resend them.
+				PreConfig: outOfBand(20, "fix-error", "implement-work-item"),
+				Config:    config("Kinds renamed"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "agent_work.lock_version", "2"),
+					resource.TestCheckResourceAttr(projectRes, "agent_work.daily_budget_usd", "20"),
+					storedKinds("fix-error", "implement-work-item"),
+				),
+			},
+			{
+				// The settings page saved them in its own order.
+				PreConfig: outOfBand(30, "implement-work-item", "fix-error"),
+				Config:    config("Kinds renamed again"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "agent_work.lock_version", "3"),
+					resource.TestCheckResourceAttr(projectRes, "agent_work.daily_budget_usd", "30"),
+					storedKinds("implement-work-item", "fix-error"),
+				),
+			},
+		},
+	})
+}
+
+// State is not always what Flightdeck holds. When a create's settings are
+// refused, state keeps the planned kinds while Flightdeck holds none, and a
+// plan made with -refresh=false never looks. The next apply must still send
+// kinds, because the server doesn't hold them, or it saves the other settings
+// and fails with "Provider produced inconsistent result" on kinds.
+func TestProjectAgentWork_kindsRefusedOnCreateAreSentWithoutARefresh(t *testing.T) {
+	env := newTestEnv(t, "agent_work")
+	identifier := randIdentifier()
+	var id string
+	config := func(budget string) string {
+		return projectConfig(env, identifier, `
+  name = "Refused kinds"
+  agent_work = {
+    kinds        = ["research"]
+    task_max_usd = 20
+`+budget+`
+  }`)
+	}
+	recorded := runTestRecordingApplyDiagnostics(t, resource.TestCase{
+		// Every plan is made with -refresh=false, as the reviewer's apply was.
+		AdditionalCLIOptions: &resource.AdditionalCLIOptions{Plan: resource.PlanOptions{NoRefresh: true}},
+		Steps: []resource.TestStep{
+			{
+				// A task may not cost more than the stored daily budget (10), so
+				// Flightdeck refuses every setting here, kinds included.
+				Config: config(""),
+				Check:  captureAttr(projectRes, "id", &id),
+			},
+			{
+				Config: config("    daily_budget_usd = 50"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(projectRes, "agent_work.kinds.#", "1"),
+					resource.TestCheckTypeSetElemAttr(projectRes, "agent_work.kinds.*", "research"),
+					resource.TestCheckResourceAttr(projectRes, "agent_work.enabled", "false"),
+					func(*terraform.State) error {
+						c, err := client.New(env.endpoint, env.token)
+						if err != nil {
+							return err
+						}
+						aw, err := c.GetAgentWork(context.Background(), mustInt64(t, id))
+						if err != nil {
+							return err
+						}
+						if strings.Join(aw.Kinds, ",") != "research" || aw.TaskMaxUSD != 20 || aw.DailyBudgetUSD != 50 {
+							return fmt.Errorf("Flightdeck holds kinds %v, task_max_usd %v, daily_budget_usd %v; want [research], 20, 50",
+								aw.Kinds, aw.TaskMaxUSD, aw.DailyBudgetUSD)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+	// The case only means something if the create was refused.
+	if !anyDiagnostic(recorded.bySeverity(tfprotov6.DiagnosticSeverityWarning), "Agent work settings were not saved") {
+		t.Fatalf("the create's settings were not refused; apply warnings: %s", describe(recorded.bySeverity(tfprotov6.DiagnosticSeverityWarning)))
+	}
+}
+
+// The read that decides whether kinds can be left out never replaces the
+// version the write pins. When the settings moved on between the plan and the
+// apply, the write still meets the usual stale-settings error rather than
+// handing back settings the plan didn't promise.
+func TestProjectAgentWork_unchangedKindsStillMeetAStaleVersion(t *testing.T) {
+	env := newTestEnv(t, "agent_work")
+	env.requireFake(t)
+	identifier := randIdentifier()
+	var id string
+	config := func(name string) string {
+		return projectConfig(env, identifier, fmt.Sprintf(`
+  name = %q
+  agent_work = {
+    kinds = ["implement-work-item"]
+  }`, name))
+	}
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{Config: config("Stale kinds"), Check: captureAttr(projectRes, "id", &id)},
+			{
+				// Someone saves the settings page after the plan, while the
+				// project itself is being written.
+				PreConfig: func() {
+					pid := mustInt64(t, id)
+					env.fake.OnNextRequest("PATCH", fmt.Sprintf("/api/v1/projects/%d", pid), func() {
+						env.fake.SetAgentWorkOutOfBand(pid, func(row *flightdecktest.AgentWorkSetting) { row.QueueMinutes = 120 })
+					})
+				},
+				Config:      config("Stale kinds renamed"),
+				ExpectError: regexMust(`(?s)agent work settings modified outside of Terraform.*lock_version 1, the server now has 2`),
+			},
+		},
+	})
+}
+
+// The kinds validator is the schema's own: each kind Flightdeck knows passes,
+// together or alone, and anything else fails naming the valid ones.
+func TestAgentWorkKinds_validation(t *testing.T) {
+	ctx := context.Background()
+	block, ok := agentWorkSchema().(schema.SingleNestedAttribute)
+	if !ok {
+		t.Fatal("agent_work is not a single nested attribute")
+	}
+	kindsAttr, ok := block.Attributes["kinds"].(schema.SetAttribute)
+	if !ok {
+		t.Fatal("agent_work.kinds is not a set attribute")
+	}
+	validate := func(kinds ...string) diag.Diagnostics {
+		t.Helper()
+		set, d := types.SetValueFrom(ctx, types.StringType, kinds)
+		if d.HasError() {
+			t.Fatalf("building the set: %v", d)
+		}
+		resp := &validator.SetResponse{}
+		for _, v := range kindsAttr.Validators {
+			v.ValidateSet(ctx, validator.SetRequest{Path: path.Root("agent_work").AtName("kinds"), ConfigValue: set}, resp)
+		}
+		return resp.Diagnostics
+	}
+	for _, kinds := range [][]string{
+		{"implement-work-item"}, {"fix-error"}, {"research"},
+		{"implement-work-item", "fix-error", "research"}, {},
+	} {
+		if diags := validate(kinds...); diags.HasError() {
+			t.Errorf("%v refused: %v", kinds, diags.Errors())
+		}
+	}
+	diags := validate("research", "fix-ci")
+	if !diags.HasError() {
+		t.Fatal("fix-ci passed validation")
+	}
+	for _, kind := range []string{"implement-work-item", "fix-error", "research"} {
+		if !strings.Contains(diags.Errors()[0].Detail(), `"`+kind+`"`) {
+			t.Errorf("the refusal of fix-ci does not name %s: %s", kind, diags.Errors()[0].Detail())
+		}
+	}
+}
+
+// agentWorkRefusedAt points a refusal about the research label at the
+// attribute the write sent, and leaves every other refusal on the block.
+func TestAgentWorkRefusedAt(t *testing.T) {
+	block := path.Root("agent_work")
+	refusal := func(code, msg string) error {
+		return &client.Error{Method: "PATCH", Path: "/projects/4/agent-work", Status: 422, Code: code, Message: msg}
+	}
+	notThisProjects := refusal(client.CodeValidationFailed, "Research label must be a label in this project")
+	clash := refusal(client.CodeValidationFailed, "Research label must be different from the agent label")
+	cases := []struct {
+		name string
+		sent client.Fields
+		err  error
+		want path.Path
+		ok   bool
+	}{
+		{"not this project's, sent", client.Fields{"research_label_id": int64(9)}, notThisProjects, block.AtName("research_label_id"), true},
+		{"a clash, research label sent", client.Fields{"research_label_id": int64(9), "label_id": int64(9)}, clash, block.AtName("research_label_id"), true},
+		{"a clash, only the agent label sent", client.Fields{"label_id": int64(9), "max_in_progress": int64(2)}, clash, block.AtName("label_id"), true},
+		{"a clash, neither sent", client.Fields{"max_in_progress": int64(2)}, clash, block, false},
+		// An older Flightdeck lists the agent label's key among the settable
+		// ones; that is not a refusal of the agent label.
+		{"the key refused by an older Flightdeck", client.Fields{"research_label_id": int64(9), "label_id": int64(8)},
+			refusal(client.CodeInvalidAttribute, "unknown key: research_label_id (settable: enabled, kinds, label_id, "+
+				"accept_machine_labels, agent_account_id, base_ref, max_in_progress, daily_budget_usd, task_max_usd, "+
+				"task_max_minutes, queue_minutes, runbook)"), block.AtName("research_label_id"), true},
+		{"another setting refused", client.Fields{"research_label_id": int64(9), "task_max_usd": 20.0},
+			refusal(client.CodeValidationFailed, "Most a task may cost can't be more than the daily budget"), block, false},
+		{"the agent label refused", client.Fields{"label_id": int64(9)},
+			refusal(client.CodeValidationFailed, "Agent label must be a label in this project"), block, false},
+		{"both labels refused", client.Fields{"label_id": int64(9), "research_label_id": int64(10)},
+			refusal(client.CodeValidationFailed, "Agent label must be a label in this project and Research label must be a label in this project"),
+			block, false},
+		{"a clash named in the research label's words", client.Fields{"label_id": int64(9), "research_label_id": int64(9)},
+			refusal(client.CodeValidationFailed, "Agent label must be a label in this project and Research label must be different from the agent label"),
+			block, false},
+		{"not a 422", client.Fields{"research_label_id": int64(9)},
+			&client.Error{Status: 409, Code: client.CodeStaleObject, Message: "Research label changed"}, block, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := agentWorkRefusedAt(tc.sent, tc.err)
+			if ok != tc.ok || !got.Equal(tc.want) {
+				t.Fatalf("got %s (%t), want %s (%t)", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// diagnosticAt reports whether diags holds one with this summary, reported
+// against the attribute at, whose detail contains every one of details.
+func diagnosticAt(diags []*tfprotov6.Diagnostic, summary string, at *tftypes.AttributePath, details ...string) bool {
+	for _, d := range diags {
+		if d.Summary != summary || d.Attribute == nil || !d.Attribute.Equal(at) {
+			continue
+		}
+		all := true
+		for _, s := range details {
+			all = all && strings.Contains(d.Detail, s)
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
+// describeWithPaths is describe with each diagnostic's attribute path.
+func describeWithPaths(diags []*tfprotov6.Diagnostic) string {
+	parts := make([]string, 0, len(diags))
+	for _, d := range diags {
+		parts = append(parts, fmt.Sprintf("[%s at %v] %s", d.Summary, d.Attribute, d.Detail))
+	}
+	return strings.Join(parts, "\n")
+}
+
 // AgentWorkSettingKeys documents the endpoint's writable set, and
 // agentWorkFields writes its own list by hand; this holds them together.
 func TestAgentWorkFields_writePathMatchesSettingKeys(t *testing.T) {
@@ -612,6 +1394,7 @@ func TestAgentWorkFields_writePathMatchesSettingKeys(t *testing.T) {
 	fields := mustAgentWorkFields(t, agentWorkModel{
 		Enabled: types.BoolValue(true), Kinds: kinds, LabelID: types.Int64Value(7),
 		LabelChosenAt: types.StringValue("2026-10-01T00:00:00Z"), AcceptMachineLabels: types.BoolValue(false),
+		ResearchLabelID: types.Int64Value(9), ResearchLabelChosenAt: types.StringValue("2026-10-02T00:00:00Z"),
 		AgentAccountID: types.Int64Value(8), BaseRef: types.StringValue("main"), MaxInProgress: types.Int64Value(1),
 		DailyBudgetUSD: types.Float64Value(10), TaskMaxUSD: types.Float64Value(5), TaskMaxMinutes: types.Int64Value(30),
 		QueueMinutes: types.Int64Value(60), Runbook: types.StringValue("implement-work-item@1"), LockVersion: types.Int64Value(3),
@@ -627,16 +1410,16 @@ func TestAgentWorkFields_writePathMatchesSettingKeys(t *testing.T) {
 		t.Fatalf("the write path and AgentWorkSettingKeys have drifted:\n  sends: %v\n   list: %v", got, want)
 	}
 	// Read-only keys are a 422 on the API, so they must never be sent.
-	for _, k := range []string{"label_chosen_at", "lock_version", "blockers", "project_id"} {
+	for _, k := range []string{"label_chosen_at", "research_label_chosen_at", "lock_version", "blockers", "project_id"} {
 		if _, sent := fields[k]; sent {
 			t.Errorf("agentWorkFields sent the read-only %q", k)
 		}
 	}
 }
 
-// The rule the item exists for: only configured settings are sent, and an
-// unset label_id or agent_account_id is left out, never sent as null, because
-// the API reads a null for either as "clear it".
+// The rule the block exists for: only configured settings are sent, and an
+// unset label_id, research_label_id or agent_account_id is left out, never
+// sent as null, because the API reads a null for any of them as "clear it".
 func TestAgentWorkFields_sendsOnlyConfiguredSettings(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
@@ -650,19 +1433,36 @@ func TestAgentWorkFields_sendsOnlyConfiguredSettings(t *testing.T) {
 			want:  map[string]any{"enabled": true, "max_in_progress": int64(2)},
 		},
 		{
-			name:  "references not known until apply are left out too",
-			model: agentWorkModel{LabelID: types.Int64Unknown(), AgentAccountID: types.Int64Unknown(), BaseRef: types.StringValue("develop")},
-			want:  map[string]any{"base_ref": "develop"},
+			name: "references not known until apply are left out too",
+			model: agentWorkModel{LabelID: types.Int64Unknown(), ResearchLabelID: types.Int64Unknown(),
+				AgentAccountID: types.Int64Unknown(), BaseRef: types.StringValue("develop")},
+			want: map[string]any{"base_ref": "develop"},
 		},
 		{
 			name:  "configured references are sent",
-			model: agentWorkModel{LabelID: types.Int64Value(11), AgentAccountID: types.Int64Value(12)},
-			want:  map[string]any{"label_id": int64(11), "agent_account_id": int64(12)},
+			model: agentWorkModel{LabelID: types.Int64Value(11), ResearchLabelID: types.Int64Value(13), AgentAccountID: types.Int64Value(12)},
+			want:  map[string]any{"label_id": int64(11), "research_label_id": int64(13), "agent_account_id": int64(12)},
+		},
+		{
+			name:  "a research label alone is sent alone",
+			model: agentWorkModel{ResearchLabelID: types.Int64Value(13)},
+			want:  map[string]any{"research_label_id": int64(13)},
+		},
+		{
+			name: "the research label's chosen time is never sent",
+			model: agentWorkModel{ResearchLabelChosenAt: types.StringValue("2026-10-02T00:00:00Z"),
+				LabelChosenAt: types.StringValue("2026-10-01T00:00:00Z"), MaxInProgress: types.Int64Value(1)},
+			want: map[string]any{"max_in_progress": int64(1)},
 		},
 		{
 			name:  "false and an empty kinds list are values",
 			model: agentWorkModel{Enabled: types.BoolValue(false), AcceptMachineLabels: types.BoolValue(false), Kinds: types.SetValueMust(types.StringType, nil)},
 			want:  map[string]any{"enabled": false, "accept_machine_labels": false, "kinds": []string{}},
+		},
+		{
+			name:  "kinds are sent in the API's order",
+			model: agentWorkModel{Kinds: types.SetValueMust(types.StringType, []attr.Value{types.StringValue("research"), types.StringValue("fix-error"), types.StringValue("implement-work-item")})},
+			want:  map[string]any{"kinds": []string{"implement-work-item", "fix-error", "research"}},
 		},
 		{
 			name:  "money is sent as a number",
@@ -681,7 +1481,7 @@ func TestAgentWorkFields_sendsOnlyConfiguredSettings(t *testing.T) {
 			if fmt.Sprint(map[string]any(fields)) != fmt.Sprint(tc.want) {
 				t.Fatalf("fields = %v, want %v", fields, tc.want)
 			}
-			for _, key := range []string{"label_id", "agent_account_id"} {
+			for _, key := range []string{"label_id", "research_label_id", "agent_account_id"} {
 				if v, sent := fields[key]; sent && v == nil {
 					t.Fatalf("%s was sent as null, which the API reads as clearing it", key)
 				}
@@ -788,6 +1588,7 @@ func TestWarnAgentWorkBlockers(t *testing.T) {
 	blockers := []client.AgentWorkBlocker{
 		{Code: "no_label", Message: "No agent label is chosen."},
 		{Code: "no_github_repo", Message: "The project has no linked GitHub repository."},
+		{Code: "no_research_label", Message: "No research label is chosen."},
 		{Code: "no_label", Message: "A second one with the same code."},
 	}
 	var off diag.Diagnostics
@@ -810,6 +1611,7 @@ func TestWarnAgentWorkBlockers(t *testing.T) {
 	want := []string{
 		"Agent work cannot start on project APP right now: no_label",
 		"Agent work cannot start on project APP right now: no_github_repo",
+		"Agent work cannot start on project APP right now: no_research_label",
 		"Agent work cannot start on project APP right now: no_label (2)",
 	}
 	if strings.Join(summaries, "|") != strings.Join(want, "|") {
@@ -818,24 +1620,30 @@ func TestWarnAgentWorkBlockers(t *testing.T) {
 	if !strings.Contains(on.Warnings()[0].Detail(), "No agent label is chosen.") {
 		t.Fatalf("the warning must carry the API's message: %s", on.Warnings()[0].Detail())
 	}
+	if !strings.Contains(on.Warnings()[2].Detail(), "No research label is chosen.") {
+		t.Fatalf("the no_research_label warning must carry the API's message: %s", on.Warnings()[2].Detail())
+	}
 }
 
 func TestPlanAgentWorkComputed(t *testing.T) {
 	ctx := context.Background()
 	prior := &agentWorkModel{Enabled: types.BoolValue(false), LabelID: types.Int64Value(7), MaxInProgress: types.Int64Value(1),
-		DailyBudgetUSD: types.Float64Value(12.34), LabelChosenAt: types.StringValue("2026-10-01T00:00:00Z"), LockVersion: types.Int64Value(3)}
+		DailyBudgetUSD: types.Float64Value(12.34), LabelChosenAt: types.StringValue("2026-10-01T00:00:00Z"),
+		ResearchLabelID: types.Int64Value(9), ResearchLabelChosenAt: types.StringValue("2026-10-02T00:00:00Z"), LockVersion: types.Int64Value(3)}
 	cases := []struct {
-		name                   string
-		plan                   agentWorkModel
-		wantVersion, wantLabel bool // whether each keeps its prior value
+		name                                 string
+		plan                                 agentWorkModel
+		wantVersion, wantLabel, wantResearch bool // whether each keeps its prior value
 	}{
-		{name: "nothing changes", plan: *prior, wantVersion: true, wantLabel: true},
-		{name: "a setting changes", plan: with(*prior, func(m *agentWorkModel) { m.MaxInProgress = types.Int64Value(2) }), wantLabel: true},
-		{name: "the label changes", plan: with(*prior, func(m *agentWorkModel) { m.LabelID = types.Int64Value(8) })},
-		{name: "the label is not known yet", plan: with(*prior, func(m *agentWorkModel) { m.LabelID = types.Int64Unknown() })},
+		{name: "nothing changes", plan: *prior, wantVersion: true, wantLabel: true, wantResearch: true},
+		{name: "a setting changes", plan: with(*prior, func(m *agentWorkModel) { m.MaxInProgress = types.Int64Value(2) }), wantLabel: true, wantResearch: true},
+		{name: "the label changes", plan: with(*prior, func(m *agentWorkModel) { m.LabelID = types.Int64Value(8) }), wantResearch: true},
+		{name: "the label is not known yet", plan: with(*prior, func(m *agentWorkModel) { m.LabelID = types.Int64Unknown() }), wantResearch: true},
+		{name: "the research label changes", plan: with(*prior, func(m *agentWorkModel) { m.ResearchLabelID = types.Int64Value(10) }), wantLabel: true},
+		{name: "the research label is not known yet", plan: with(*prior, func(m *agentWorkModel) { m.ResearchLabelID = types.Int64Unknown() }), wantLabel: true},
 		// A configured amount carries more precision than the API's answer;
 		// the same float64 is the same setting.
-		{name: "money equal as sent", plan: with(*prior, func(m *agentWorkModel) { m.DailyBudgetUSD = types.Float64Value(12.34) }), wantVersion: true, wantLabel: true},
+		{name: "money equal as sent", plan: with(*prior, func(m *agentWorkModel) { m.DailyBudgetUSD = types.Float64Value(12.34) }), wantVersion: true, wantLabel: true, wantResearch: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -852,15 +1660,18 @@ func TestPlanAgentWorkComputed(t *testing.T) {
 			if tc.wantLabel != !got.LabelChosenAt.IsUnknown() {
 				t.Errorf("label_chosen_at = %v, want kept=%t", got.LabelChosenAt, tc.wantLabel)
 			}
+			if tc.wantResearch != !got.ResearchLabelChosenAt.IsUnknown() {
+				t.Errorf("research_label_chosen_at = %v, want kept=%t", got.ResearchLabelChosenAt, tc.wantResearch)
+			}
 		})
 	}
-	// On create there is no prior: both are unknown.
+	// On create there is no prior: all three are unknown.
 	var diags diag.Diagnostics
 	out := planAgentWorkComputed(ctx, types.ObjectNull(agentWorkAttrTypes), agentWorkObj(t, prior), &diags)
 	var got agentWorkModel
 	diags.Append(out.As(ctx, &got, objectAsOptions)...)
-	if !got.LockVersion.IsUnknown() || !got.LabelChosenAt.IsUnknown() {
-		t.Errorf("on create both must be unknown, got %v and %v", got.LockVersion, got.LabelChosenAt)
+	if !got.LockVersion.IsUnknown() || !got.LabelChosenAt.IsUnknown() || !got.ResearchLabelChosenAt.IsUnknown() {
+		t.Errorf("on create all three must be unknown, got %v, %v and %v", got.LockVersion, got.LabelChosenAt, got.ResearchLabelChosenAt)
 	}
 }
 
@@ -875,6 +1686,30 @@ func TestValidateAgentWorkConfigAndBudgetWarning(t *testing.T) {
 	validateAgentWorkConfig(ctx, agentWorkObj(t, &agentWorkModel{TaskMaxUSD: types.Float64Value(15), DailyBudgetUSD: types.Float64Value(15)}), &diags)
 	if diags.HasError() {
 		t.Fatalf("a task may cost the whole day: %v", diags.Errors())
+	}
+
+	// The same label for both kinds of work fails the plan, on the research
+	// label, which is where Flightdeck puts it too.
+	diags = nil
+	validateAgentWorkConfig(ctx, agentWorkObj(t, &agentWorkModel{LabelID: types.Int64Value(7), ResearchLabelID: types.Int64Value(7)}), &diags)
+	if !diags.HasError() {
+		t.Fatal("the same label as both the agent label and the research label must fail the plan")
+	}
+	if withPath, ok := diags.Errors()[0].(diag.DiagnosticWithPath); !ok ||
+		!withPath.Path().Equal(path.Root("agent_work").AtName("research_label_id")) {
+		t.Errorf("the clash is not reported against research_label_id: %#v", diags.Errors()[0])
+	}
+	for name, m := range map[string]*agentWorkModel{
+		"different labels":           {LabelID: types.Int64Value(7), ResearchLabelID: types.Int64Value(8)},
+		"only the research label":    {ResearchLabelID: types.Int64Value(7)},
+		"a label not known yet":      {LabelID: types.Int64Unknown(), ResearchLabelID: types.Int64Value(7)},
+		"a research label not known": {LabelID: types.Int64Value(7), ResearchLabelID: types.Int64Unknown()},
+	} {
+		diags = nil
+		validateAgentWorkConfig(ctx, agentWorkObj(t, m), &diags)
+		if diags.HasError() {
+			t.Errorf("%s: refused at plan time: %v", name, diags.Errors())
+		}
 	}
 
 	// One side configured: the plan's merged pair decides, as a warning.

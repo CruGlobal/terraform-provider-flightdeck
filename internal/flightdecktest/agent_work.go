@@ -28,16 +28,21 @@ type AgentWorkSetting struct {
 	LabelID             *int64
 	LabelChosenAt       *time.Time
 	AcceptMachineLabels bool
-	AgentAccountID      *int64
-	BaseRef             string
-	MaxInProgress       int64
-	DailyBudgetUSD      float64
-	TaskMaxUSD          float64
-	TaskMaxMinutes      int64
-	QueueMinutes        int64
-	Runbook             string
-	LockVersion         int64
-	UpdatedAt           *time.Time
+	// ResearchLabelID sends an item for research first; it must be a label in
+	// the project and a different one from LabelID. ResearchLabelChosenAt is
+	// stamped whenever it changes, as LabelChosenAt is for LabelID.
+	ResearchLabelID       *int64
+	ResearchLabelChosenAt *time.Time
+	AgentAccountID        *int64
+	BaseRef               string
+	MaxInProgress         int64
+	DailyBudgetUSD        float64
+	TaskMaxUSD            float64
+	TaskMaxMinutes        int64
+	QueueMinutes          int64
+	Runbook               string
+	LockVersion           int64
+	UpdatedAt             *time.Time
 }
 
 // AgentWorkBlocker is one entry of the read's blockers.
@@ -114,10 +119,13 @@ func (s *Server) SetAgentWorkOutOfBand(projectID int64, fn func(*AgentWorkSettin
 		row = &d
 		st.byProject[projectID] = row
 	}
-	before := row.LabelID
+	before, beforeResearch := row.LabelID, row.ResearchLabelID
 	fn(row)
 	if !sameID(before, row.LabelID) {
 		stampLabelChosenAt(row)
+	}
+	if !sameID(beforeResearch, row.ResearchLabelID) {
+		stampResearchLabelChosenAt(row)
 	}
 	row.LockVersion++
 	now := time.Now()
@@ -131,22 +139,36 @@ func defaultAgentWork() AgentWorkSetting {
 	}
 }
 
+// The kinds the API accepts. Implement and fix-error reach an item through
+// the agent label (label_id), research through the research label
+// (research_label_id).
+const (
+	agentWorkImplement = "implement-work-item"
+	agentWorkFixError  = "fix-error"
+	agentWorkResearch  = "research"
+)
+
 var (
-	agentWorkKinds    = []string{"implement-work-item"}
+	agentWorkKinds    = []string{agentWorkImplement, agentWorkFixError, agentWorkResearch}
 	agentWorkRunbooks = []string{"implement-work-item@1"}
 	agentWorkWritable = []string{
-		"enabled", "kinds", "label_id", "accept_machine_labels", "agent_account_id", "base_ref",
+		"enabled", "kinds", "label_id", "accept_machine_labels", "research_label_id", "agent_account_id", "base_ref",
 		"max_in_progress", "daily_budget_usd", "task_max_usd", "task_max_minutes", "queue_minutes", "runbook",
 	}
 	agentWorkReadOnly = map[string]string{
 		"project_id":      "it is the :project_id in the path, and a project's agent work settings belong to that project",
 		"blockers":        "Flightdeck works them out from the settings and the project each time they are read",
 		"label_chosen_at": "Flightdeck sets it when label_id changes: to now when a label is chosen, and to null when it is cleared",
-		"updated_at":      "the database sets it",
+		"research_label_chosen_at": "Flightdeck sets it when research_label_id changes: to now when a label is chosen, " +
+			"and to null when it is cleared",
+		"updated_at": "the database sets it",
 	}
+	// agentWorkNullable are the references a blank CLEARS rather than leaves
+	// alone.
+	agentWorkNullable = []string{"label_id", "research_label_id", "agent_account_id"}
 )
 
-// agentWorkNoOpinion is what a blank means for every key but the two nullable
+// agentWorkNoOpinion is what a blank means for every key but the nullable
 // references: leave the key alone.
 type agentWorkNoOpinion struct{}
 
@@ -194,7 +216,7 @@ func agentWorkDecimals(n json.Number) int {
 // leave the key alone, or a 422 invalid_attribute message.
 func agentWorkValue(key string, v any) (any, string) {
 	if agentWorkBlank(v) {
-		if key == "label_id" || key == "agent_account_id" {
+		if contains(agentWorkNullable, key) {
 			return (*int64)(nil), ""
 		}
 		return agentWorkNoOpinion{}, ""
@@ -210,7 +232,7 @@ func agentWorkValue(key string, v any) (any, string) {
 			return i, ""
 		}
 		return nil, fmt.Sprintf("%s must be a whole number, got %v", key, v)
-	case "label_id", "agent_account_id":
+	case "label_id", "research_label_id", "agent_account_id":
 		if i, ok := agentWorkWhole(v); ok && i >= 1 {
 			return &i, ""
 		}
@@ -308,9 +330,12 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 		case []string:
 			next.Kinds = t
 		case *int64:
-			if key == "label_id" {
+			switch key {
+			case "label_id":
 				next.LabelID = t
-			} else {
+			case "research_label_id":
+				next.ResearchLabelID = t
+			default:
 				next.AgentAccountID = t
 			}
 		case string:
@@ -380,10 +405,17 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 		}
 		seen[k] = true
 	}
-	if !sameID(current.LabelID, next.LabelID) && next.LabelID != nil {
-		if l := s.labels().byID[*next.LabelID]; l == nil || l.ProjectID != p.ID {
-			problems = append(problems, "Agent label must be a label in this project")
-		}
+	labelChanged, researchChanged := !sameID(current.LabelID, next.LabelID), !sameID(current.ResearchLabelID, next.ResearchLabelID)
+	if labelChanged && next.LabelID != nil && !s.projectLabel(p, *next.LabelID) {
+		problems = append(problems, "Agent label must be a label in this project")
+	}
+	if researchChanged && next.ResearchLabelID != nil && !s.projectLabel(p, *next.ResearchLabelID) {
+		problems = append(problems, "Research label must be a label in this project")
+	}
+	// One label cannot mean both "build it" and "research it first". Checked
+	// when either changes, and always named as the research label's problem.
+	if (labelChanged || researchChanged) && next.ResearchLabelID != nil && sameID(next.LabelID, next.ResearchLabelID) {
+		problems = append(problems, "Research label must be different from the agent label")
 	}
 	if !sameID(current.AgentAccountID, next.AgentAccountID) && next.AgentAccountID != nil {
 		if m := s.memberByID(*next.AgentAccountID); m == nil || m.Kind != KindService {
@@ -405,6 +437,32 @@ func agentWorkGitRef(ref string) bool {
 		return false
 	}
 	return !strings.HasPrefix(ref, "-") && !strings.HasPrefix(ref, "/") && !strings.HasSuffix(ref, "/") && !strings.HasSuffix(ref, ".")
+}
+
+// forgetAgentWorkLabel is the database's ON DELETE SET NULL on both label
+// references: a deleted label is no longer any project's agent label or
+// research label. Like the foreign key, it moves no lock_version and leaves
+// the chosen time alone; the read reports that as null while the id is null.
+// The caller holds s.mu.
+func (s *Server) forgetAgentWorkLabel(id int64) {
+	st := s.agentWorkStore()
+	if st == nil {
+		return
+	}
+	for _, row := range st.byProject {
+		if row.LabelID != nil && *row.LabelID == id {
+			row.LabelID = nil
+		}
+		if row.ResearchLabelID != nil && *row.ResearchLabelID == id {
+			row.ResearchLabelID = nil
+		}
+	}
+}
+
+// projectLabel reports whether id is one of p's labels.
+func (s *Server) projectLabel(p *Project, id int64) bool {
+	l := s.labels().byID[id]
+	return l != nil && l.ProjectID == p.ID
 }
 
 func (s *Server) memberByID(id int64) *User {
@@ -433,8 +491,8 @@ func agentWorkEqual(a, b AgentWorkSetting) bool {
 		}
 	}
 	return a.Enabled == b.Enabled && sameID(a.LabelID, b.LabelID) && a.AcceptMachineLabels == b.AcceptMachineLabels &&
-		sameID(a.AgentAccountID, b.AgentAccountID) && a.BaseRef == b.BaseRef && a.MaxInProgress == b.MaxInProgress &&
-		a.DailyBudgetUSD == b.DailyBudgetUSD && a.TaskMaxUSD == b.TaskMaxUSD && a.TaskMaxMinutes == b.TaskMaxMinutes &&
+		sameID(a.ResearchLabelID, b.ResearchLabelID) && sameID(a.AgentAccountID, b.AgentAccountID) &&
+		a.BaseRef == b.BaseRef && a.MaxInProgress == b.MaxInProgress && a.DailyBudgetUSD == b.DailyBudgetUSD && a.TaskMaxUSD == b.TaskMaxUSD && a.TaskMaxMinutes == b.TaskMaxMinutes &&
 		a.QueueMinutes == b.QueueMinutes && a.Runbook == b.Runbook
 }
 
@@ -447,8 +505,25 @@ func stampLabelChosenAt(row *AgentWorkSetting) {
 	row.LabelChosenAt = &now
 }
 
+func stampResearchLabelChosenAt(row *AgentWorkSetting) {
+	if row.ResearchLabelID == nil {
+		row.ResearchLabelChosenAt = nil
+		return
+	}
+	now := time.Now()
+	row.ResearchLabelChosenAt = &now
+}
+
 // agentWorkBlockers is the fake's blockers, in the API's order, for the ones
 // it models; anything added with AddAgentWorkBlockers follows them.
+//
+// The repository and label blockers follow the ticked kinds, because a
+// blocker stops every kind. Implement and fix-error need the agent label and
+// a linked repository; research needs only the research label. So
+// no_github_repo is listed when implement or fix-error could run (or nothing
+// is ticked), no_label when the agent label is needed but unusable and
+// research can't run either, and no_research_label when research is ticked
+// but its label is unusable and no other kind can run.
 func (s *Server) agentWorkBlockers(p *Project, row AgentWorkSetting) []AgentWorkBlocker {
 	out := []AgentWorkBlocker{}
 	add := func(code, message string) { out = append(out, AgentWorkBlocker{Code: code, Message: message}) }
@@ -461,16 +536,22 @@ func (s *Server) agentWorkBlockers(p *Project, row AgentWorkSetting) []AgentWork
 	if !s.agentWorkStore().poolConnected {
 		add("pool_not_connected", "Flightdeck isn't connected to the agent pool yet.")
 	}
+	usable := func(id *int64) bool { return id != nil && s.projectLabel(p, *id) }
+	agentLabelKinds := contains(row.Kinds, agentWorkImplement) || contains(row.Kinds, agentWorkFixError)
+	researchKind := contains(row.Kinds, agentWorkResearch)
+	agentRuns := agentLabelKinds && usable(row.LabelID)
+	researchRuns := researchKind && usable(row.ResearchLabelID)
 	if len(row.Kinds) == 0 {
 		add("no_kinds", "No kinds of work are ticked.")
 	}
-	if !s.githubRepoLinked(p) {
+	if (len(row.Kinds) == 0 || agentRuns) && !s.githubRepoLinked(p) {
 		add("no_github_repo", "The project has no linked GitHub repository.")
 	}
-	if row.LabelID == nil {
+	if (len(row.Kinds) == 0 || agentLabelKinds) && !usable(row.LabelID) && !researchRuns {
 		add("no_label", "No agent label is chosen.")
-	} else if l := s.labels().byID[*row.LabelID]; l == nil || l.ProjectID != p.ID {
-		add("no_label", "No agent label is chosen.")
+	}
+	if researchKind && !researchRuns && !agentRuns {
+		add("no_research_label", "No research label is chosen.")
 	}
 	if row.AgentAccountID == nil {
 		add("no_agent_account", "No service account is chosen for agents to work as.")
@@ -495,32 +576,37 @@ func (s *Server) githubRepoLinked(p *Project) bool {
 }
 
 func (s *Server) serializeAgentWork(p *Project, row AgentWorkSetting) map[string]any {
-	var labelChosenAt, updatedAt any
+	var labelChosenAt, researchLabelChosenAt, updatedAt any
 	if row.LabelID != nil && row.LabelChosenAt != nil {
 		labelChosenAt = iso(*row.LabelChosenAt)
+	}
+	if row.ResearchLabelID != nil && row.ResearchLabelChosenAt != nil {
+		researchLabelChosenAt = iso(*row.ResearchLabelChosenAt)
 	}
 	if row.UpdatedAt != nil {
 		updatedAt = iso(*row.UpdatedAt)
 	}
 	kinds := append([]string{}, row.Kinds...)
 	return map[string]any{
-		"project_id":            p.ID,
-		"enabled":               row.Enabled,
-		"kinds":                 kinds,
-		"label_id":              row.LabelID,
-		"label_chosen_at":       labelChosenAt,
-		"accept_machine_labels": row.AcceptMachineLabels,
-		"agent_account_id":      row.AgentAccountID,
-		"base_ref":              row.BaseRef,
-		"max_in_progress":       row.MaxInProgress,
-		"daily_budget_usd":      row.DailyBudgetUSD,
-		"task_max_usd":          row.TaskMaxUSD,
-		"task_max_minutes":      row.TaskMaxMinutes,
-		"queue_minutes":         row.QueueMinutes,
-		"runbook":               row.Runbook,
-		"blockers":              s.agentWorkBlockers(p, row),
-		"lock_version":          row.LockVersion,
-		"updated_at":            updatedAt,
+		"project_id":               p.ID,
+		"enabled":                  row.Enabled,
+		"kinds":                    kinds,
+		"label_id":                 row.LabelID,
+		"label_chosen_at":          labelChosenAt,
+		"accept_machine_labels":    row.AcceptMachineLabels,
+		"research_label_id":        row.ResearchLabelID,
+		"research_label_chosen_at": researchLabelChosenAt,
+		"agent_account_id":         row.AgentAccountID,
+		"base_ref":                 row.BaseRef,
+		"max_in_progress":          row.MaxInProgress,
+		"daily_budget_usd":         row.DailyBudgetUSD,
+		"task_max_usd":             row.TaskMaxUSD,
+		"task_max_minutes":         row.TaskMaxMinutes,
+		"queue_minutes":            row.QueueMinutes,
+		"runbook":                  row.Runbook,
+		"blockers":                 s.agentWorkBlockers(p, row),
+		"lock_version":             row.LockVersion,
+		"updated_at":               updatedAt,
 	}
 }
 
@@ -594,6 +680,9 @@ func (s *Server) updateAgentWork(w http.ResponseWriter, r *http.Request) {
 	}
 	if !sameID(current.LabelID, next.LabelID) {
 		stampLabelChosenAt(&next)
+	}
+	if !sameID(current.ResearchLabelID, next.ResearchLabelID) {
+		stampResearchLabelChosenAt(&next)
 	}
 	if persisted {
 		next.LockVersion = current.LockVersion + 1

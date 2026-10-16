@@ -57,6 +57,12 @@ resource "flightdeck_project" "support" {
     enabled = true
     name    = "team-support" # omit to use the project-name default
 
+    # "link" uses a channel that already exists and never invites anyone.
+    # For a private channel, invite the Flightdeck app to it in Slack first.
+    # "create" makes a new channel and invites the project's members. Leave
+    # it out to keep whatever the project already has.
+    mode = "link"
+
     # Only the categories listed here are managed; the API merges them, so
     # removing one leaves it as it is rather than restoring its default.
     event_filter = {

@@ -115,6 +115,7 @@ Read-Only:
 - `event_filter` (Map of Boolean) Every activity category, resolved against its default.
 - `invites_skipped` (Number) Members the latest invite cycle could not invite.
 - `linked` (Boolean) Whether a Slack channel is linked.
+- `mode` (String) How Flightdeck gets the channel: `create` (it makes the channel and invites the project's members) or `link` (it uses a channel that already exists and never invites anyone). Null when nobody has chosen, which links a channel with that name if there is one, creates it if not, and invites the members either way. Also null on a Flightdeck older than the Slack channel mode.
 - `name` (String) Channel-name override; empty when there is none.
 - `notifications_enabled` (Boolean) Master switch for the project's Slack posts.
 - `provision_note` (String) Short note from the provision job.

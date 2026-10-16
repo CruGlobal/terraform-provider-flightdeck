@@ -61,7 +61,9 @@ type Project struct {
 	// Slack channel configuration, all on the project row (see
 	// slack_channel.go). SlackEventFilter holds the stored overrides only, and
 	// the notifications master switch is the "slack" key of Features.
+	// SlackChannelMode is "create", "link", or empty when nobody has chosen.
 	SlackChannelEnabled  bool
+	SlackChannelMode     string
 	SlackChannelName     string
 	SlackChannelID       string
 	SlackProvisionStatus string

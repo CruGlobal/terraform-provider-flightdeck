@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
@@ -58,6 +59,16 @@ import (
 //     type only to absorb that trim, so surrounding whitespace in a
 //     configuration is not a perpetual diff.
 //
+// The channel mode (`mode`, the API's slack_channel_mode) says how Flightdeck
+// gets the channel: create it and invite the members, or link one that exists
+// and invite nobody. Null means nobody has chosen, and the API has no way back
+// to null once a mode is set: a null or blank on a write leaves the mode
+// alone. So the mode is sent only when configured, and the two refusals it
+// adds (create naming a taken channel, link naming a missing one) arrive as
+// the same 422 slack_channel_unusable as the bot check. A Flightdeck older
+// than the mode has no such key on a read, so the block reads null for it
+// there and the provider never sends it unless the configuration sets it.
+//
 // Every attribute here is Optional+Computed or Computed, never Optional
 // alone: dropping the block from a configuration nulls an Optional-only
 // member, and that difference cascades into "known after apply" on every
@@ -68,6 +79,7 @@ import (
 // slackChannelModel is the Terraform shape of the block.
 type slackChannelModel struct {
 	Enabled              types.Bool            `tfsdk:"enabled"`
+	Mode                 types.String          `tfsdk:"mode"`
 	NotificationsEnabled types.Bool            `tfsdk:"notifications_enabled"`
 	Name                 slackChannelNameValue `tfsdk:"name"`
 	EventFilter          types.Map             `tfsdk:"event_filter"`
@@ -83,6 +95,7 @@ type slackChannelModel struct {
 
 var slackChannelAttrTypes = map[string]attr.Type{
 	"enabled":               types.BoolType,
+	"mode":                  types.StringType,
 	"notifications_enabled": types.BoolType,
 	"name":                  slackChannelNameType{},
 	"event_filter":          types.MapType{ElemType: types.BoolType},
@@ -108,6 +121,33 @@ const (
 	slackEventsAll
 )
 
+// slackChannelModeDescription is the resource's `mode` documentation.
+const slackChannelModeDescription = "How Flightdeck gets the channel: `create` or `link`. With `create`, Flightdeck " +
+	"creates the channel and invites the project's members, when it sets the channel up and again whenever someone " +
+	"joins the project; if another channel already has the name, the write is refused. With `link`, Flightdeck uses " +
+	"a channel that already exists, joining it if it is public, and **never invites anyone**: not when it links the " +
+	"channel, not on a later save, and not when someone joins the project. If no channel has the name, the write is " +
+	"refused. A private channel counts as missing until the Flightdeck app is a member, so **for a private channel, " +
+	"invite the Flightdeck app to it in Slack first**.\n\n" +
+	"Either refusal is the HTTP 422 `slack_channel_unusable` described above: nothing is saved, and the apply fails " +
+	"with Flightdeck's message on this attribute (a warning instead on the apply that creates the project). Applying " +
+	"the same configuration again gets the same answer, so change `mode` or `name` first. On a channel that is " +
+	"enabled but not linked yet, changing the mode runs the check again under the new mode.\n\n" +
+	"Switching a linked channel to `create` makes Flightdeck check whether it made that channel. While the channel " +
+	"is enabled and Slack answers, that check happens during the write, and the write is refused if Flightdeck did " +
+	"not make it. When the channel is turned off, or Slack cannot be reached, Flightdeck saves the switch, keeps " +
+	"the link and invites nobody into it. Its background job checks the channel later (for a channel that is off, " +
+	"once it is turned on again), and if Flightdeck did not make the channel, `provision_status` then reads " +
+	"`failed` and `provision_note` says why. Switching never undoes anything: members already invited stay in the " +
+	"channel, and a linked channel stays linked.\n\n" +
+	"A project where nobody has chosen reads null, and Flightdeck keeps the behavior from before the mode existed: " +
+	"it links a channel with that name if there is one, creates it if not, and invites the members either way. When " +
+	"unset, the project's current mode is kept and nothing is sent, so removing the attribute plans no change. " +
+	"Flightdeck has no way to go back to null once a mode is set.\n\n" +
+	"Needs the Flightdeck release that added the Slack channel mode. On an older Flightdeck it reads as null; leave " +
+	"it unset there, because Flightdeck refuses it and the provider asks you to upgrade Flightdeck (an error, or a " +
+	"warning on the apply that creates the project)."
+
 // slackChannelSchema is the resource attribute.
 func slackChannelSchema() schema.Attribute {
 	return schema.SingleNestedAttribute{
@@ -123,10 +163,12 @@ func slackChannelSchema() schema.Attribute {
 			"change: invite the bot, or choose a different `name`, and apply again. On the apply that creates the " +
 			"project, the provider gives the same message as a warning instead, so the new project is kept as " +
 			"created; the next plan shows the Slack change again, and the next apply retries the channel. A channel " +
-			"that does not exist yet passes the check, since Flightdeck can create it. If Slack is rate limiting or " +
+			"that does not exist yet passes the check, since Flightdeck can create it, unless `mode` is `link`. The " +
+			"same 422 refuses a channel that `mode` rules out, as described there. If Slack is rate limiting or " +
 			"unavailable, the check is skipped and the write goes ahead.\n\n" +
 			"Once the check passes, Flightdeck saves the configuration and enqueues a job that creates the channel " +
-			"if needed, links it and invites the project's members. The write may come back already `linked`, but " +
+			"if needed, links it and invites the project's members (in `link` mode it invites nobody). The write " +
+			"may come back already `linked`, but " +
 			"usually `channel_id`, `linked`, `provision_status` and `provision_note` are filled in afterwards and a " +
 			"later refresh picks them up. An apply that ends with `provision_status` at `queued` has succeeded: it " +
 			"does not wait for Slack, and the pending values never produce a diff. If the write comes back with " +
@@ -138,8 +180,9 @@ func slackChannelSchema() schema.Attribute {
 			"Slack under Settings → Integrations, which the API cannot do; the provider warns rather than failing, since " +
 			"the configuration is still stored.\n\n" +
 			"A write here bumps the project's `lock_version`. Attributes map onto the API's keys by dropping the " +
-			"`slack_` prefix (`enabled` is `slack_channel_enabled`, `notifications_enabled` is " +
-			"`slack_notifications_enabled`, `name` is `slack_channel_name`, `event_filter` is `slack_event_filter`).",
+			"`slack_` prefix (`enabled` is `slack_channel_enabled`, `mode` is `slack_channel_mode`, " +
+			"`notifications_enabled` is `slack_notifications_enabled`, `name` is `slack_channel_name`, " +
+			"`event_filter` is `slack_event_filter`).",
 		Optional: true,
 		Computed: true,
 		PlanModifiers: []planmodifier.Object{
@@ -153,6 +196,13 @@ func slackChannelSchema() schema.Attribute {
 				Optional:      true,
 				Computed:      true,
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"mode": schema.StringAttribute{
+				MarkdownDescription: slackChannelModeDescription,
+				Optional:            true,
+				Computed:            true,
+				Validators:          []validator.String{stringvalidator.OneOf(client.SlackChannelModes...)},
+				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"notifications_enabled": schema.BoolAttribute{
 				MarkdownDescription: "Master switch for this project's Slack posts (the `slack` key of the project's " +
@@ -242,7 +292,14 @@ func slackChannelDataSourceSchema() datasourceschema.Attribute {
 			"endpoint. `event_filter` reports every category resolved against its default.",
 		Computed: true,
 		Attributes: map[string]datasourceschema.Attribute{
-			"enabled":               datasourceschema.BoolAttribute{MarkdownDescription: "Whether the project gets its own Slack channel.", Computed: true},
+			"enabled": datasourceschema.BoolAttribute{MarkdownDescription: "Whether the project gets its own Slack channel.", Computed: true},
+			"mode": datasourceschema.StringAttribute{
+				MarkdownDescription: "How Flightdeck gets the channel: `create` (it makes the channel and invites the project's " +
+					"members) or `link` (it uses a channel that already exists and never invites anyone). Null when nobody " +
+					"has chosen, which links a channel with that name if there is one, creates it if not, and invites the " +
+					"members either way. Also null on a Flightdeck older than the Slack channel mode.",
+				Computed: true,
+			},
 			"notifications_enabled": datasourceschema.BoolAttribute{MarkdownDescription: "Master switch for the project's Slack posts.", Computed: true},
 			"name":                  datasourceschema.StringAttribute{MarkdownDescription: "Channel-name override; empty when there is none.", Computed: true},
 			"event_filter":          datasourceschema.MapAttribute{MarkdownDescription: "Every activity category, resolved against its default.", ElementType: types.BoolType, Computed: true},
@@ -283,6 +340,11 @@ func slackChannelWriteNeeded(ctx context.Context, config, state types.Object, di
 	if !cfg.Enabled.IsNull() && !cfg.Enabled.IsUnknown() && !cfg.Enabled.Equal(st.Enabled) {
 		return true
 	}
+	// A configured mode against a project that has none (null: nobody chose,
+	// or a Flightdeck older than the mode) is a change too.
+	if known(cfg.Mode) && !cfg.Mode.Equal(st.Mode) {
+		return true
+	}
 	if !cfg.NotificationsEnabled.IsNull() && !cfg.NotificationsEnabled.IsUnknown() && !cfg.NotificationsEnabled.Equal(st.NotificationsEnabled) {
 		return true
 	}
@@ -317,6 +379,7 @@ func slackChannelToObject(ctx context.Context, sc *client.SlackChannel, prior ty
 	}
 	obj, d := types.ObjectValue(slackChannelAttrTypes, map[string]attr.Value{
 		"enabled":               types.BoolValue(sc.ChannelEnabled),
+		"mode":                  stringPointerValue(sc.Mode),
 		"notifications_enabled": types.BoolValue(sc.NotificationsEnabled),
 		"name":                  slackChannelNameValue{StringValue: types.StringValue(slackChannelNameOf(sc))},
 		"event_filter":          slackEventFilterValue(ctx, sc.EventFilter, prior, scope, diags),
@@ -386,7 +449,8 @@ func slackEventFilterOf(ctx context.Context, block types.Object, diags *diag.Dia
 // or nil when the configuration has no block. Only configured keys are sent:
 // the API changes nothing it is not given, which is how "unset keeps the
 // project's value" is honoured. A configured "" is sent as it is, and resets
-// the name override.
+// the name override. An unset mode is never sent, not even as null: a
+// Flightdeck older than the mode refuses the key whatever its value.
 func slackChannelFields(ctx context.Context, block types.Object, diags *diag.Diagnostics) client.Fields {
 	if block.IsNull() || block.IsUnknown() {
 		return nil
@@ -399,6 +463,9 @@ func slackChannelFields(ctx context.Context, block types.Object, diags *diag.Dia
 	fields := client.Fields{}
 	if !m.Enabled.IsNull() && !m.Enabled.IsUnknown() {
 		fields["slack_channel_enabled"] = m.Enabled.ValueBool()
+	}
+	if known(m.Mode) {
+		fields["slack_channel_mode"] = m.Mode.ValueString()
 	}
 	if !m.NotificationsEnabled.IsNull() && !m.NotificationsEnabled.IsUnknown() {
 		fields["slack_notifications_enabled"] = m.NotificationsEnabled.ValueBool()
@@ -431,7 +498,8 @@ func readSlackChannel(ctx context.Context, c *client.Client, projectID int64, pr
 }
 
 // slackChannelApply says which kind of project apply a Slack channel write
-// belongs to. The two answer a slack_channel_unusable refusal differently.
+// belongs to. The two answer a slack_channel_unusable refusal differently, and
+// an older Flightdeck's refusal of the mode as an unknown key the same way.
 type slackChannelApply int
 
 const (
@@ -460,8 +528,16 @@ func writeSlackChannel(ctx context.Context, c *client.Client, projectID int64, c
 			return types.ObjectNull(slackChannelAttrTypes), lockVersion
 		}
 		sc, err := c.UpdateSlackChannel(ctx, projectID, settings, lockVersion)
-		if err != nil && apply == slackChannelOnCreate && client.HasCode(err, client.CodeSlackChannelUnusable) {
-			addSlackChannelUnusable(ctx, config, err, apply, diags)
+		// A Flightdeck older than the mode refuses the key as unknown, and the
+		// whole write with it.
+		modeUnsupported, modeNote := slackChannelModeUnsupported(ctx, c, projectID, settings, err)
+		if err != nil && apply == slackChannelOnCreate &&
+			(client.HasCode(err, client.CodeSlackChannelUnusable) || modeUnsupported) {
+			if modeUnsupported {
+				addSlackChannelModeUnsupported(err, apply, diags)
+			} else {
+				addSlackChannelUnusable(ctx, config, err, apply, diags)
+			}
 			// A create that returns no error must hand back what it planned, so
 			// the configured values are kept even though Flightdeck saved none
 			// of them, and only the unknowns are filled from a fresh read. The
@@ -486,10 +562,12 @@ func writeSlackChannel(ctx context.Context, c *client.Client, projectID int64, c
 				// Always an error here: the create's warning is handled above,
 				// because a warning needs the planned block, not the null below.
 				addSlackChannelUnusable(ctx, config, err, slackChannelOnUpdate, diags)
+			case modeUnsupported:
+				addSlackChannelModeUnsupported(err, slackChannelOnUpdate, diags)
 			case client.IsStale(err):
 				addStaleError(diags, "Project Slack channel configuration", lockVersion, nil, err)
 			default:
-				addAPIError(diags, "Error updating Flightdeck Slack channel configuration", err)
+				addAPIErrorNote(diags, "Error updating Flightdeck Slack channel configuration", err, modeNote)
 			}
 			// Null, like every failed sub-block write: the refresh before the
 			// next plan reads the block back, and after a slack_channel_unusable
@@ -597,34 +675,120 @@ func slackChannelKeepPlan(ctx context.Context, planned, fresh types.Object, diag
 	return obj
 }
 
-// addSlackChannelUnusable reports the API's refusal of a channel that exists
-// but that Flightdeck cannot post to: an error on an update, a warning on the
-// apply that creates the project (see slackChannelApply). The API's own
-// message leads the detail, because it names the channel and the bot to
-// invite, and neither is known here. The diagnostic points at `name` when the
-// configuration sets one, since that is the channel the check looked up;
-// otherwise the channel comes from the project name, and it points at the
-// block.
+// addSlackChannelUnusable reports the API's refusal of a channel: one that
+// exists but that Flightdeck cannot post to, or one the channel mode rules out
+// (create naming a taken channel, link naming a missing one). It is an error
+// on an update and a warning on the apply that creates the project (see
+// slackChannelApply). The API's own message leads the detail, because it names
+// the channel, and the bot to invite or the mode to change, and none of that is
+// known here.
+//
+// The diagnostic points at `mode` for a mode refusal when the configuration
+// sets the mode. Otherwise it points at `name` when the configuration sets
+// one, since that is the channel the check looked up, and at the block when
+// the channel comes from the project name.
 func addSlackChannelUnusable(ctx context.Context, config types.Object, err error, apply slackChannelApply, diags *diag.Diagnostics) {
 	at := path.Root("slack_channel")
 	var cfg slackChannelModel
-	if !config.IsNull() && !config.IsUnknown() && !config.As(ctx, &cfg, objectAsOptions).HasError() &&
-		!cfg.Name.IsNull() && !cfg.Name.IsUnknown() && strings.TrimSpace(cfg.Name.ValueString()) != "" {
+	readable := !config.IsNull() && !config.IsUnknown() && !config.As(ctx, &cfg, objectAsOptions).HasError()
+	byMode := isSlackChannelModeRefusal(apiMessage(err))
+	switch {
+	case readable && byMode && known(cfg.Mode):
+		at = at.AtName("mode")
+	case readable && known(cfg.Name) && strings.TrimSpace(cfg.Name.ValueString()) != "":
 		at = at.AtName("name")
 	}
 	const summary = "Slack channel cannot be used"
-	if apply == slackChannelOnCreate {
+	switch {
+	case apply == slackChannelOnCreate && byMode:
+		diags.AddAttributeWarning(at, summary,
+			apiMessage(err)+"\n\n"+
+				"The project was created, but Flightdeck checked the channel against the channel mode before saving "+
+				"and saved none of this block's changes. The next plan shows them again, and the next apply is refused "+
+				"the same way, so change `mode` or choose a different `name` before then.")
+	case apply == slackChannelOnCreate:
 		diags.AddAttributeWarning(at, summary,
 			apiMessage(err)+"\n\n"+
 				"The project was created, but Flightdeck checked the channel before saving and saved none of this "+
 				"block's changes. The next plan shows them again, and the next apply tries the channel again, so fix "+
 				"the channel in Slack, or choose a different `name`, before then.")
+	case byMode:
+		diags.AddAttributeError(at, summary,
+			apiMessage(err)+"\n\n"+
+				"Flightdeck checked the channel against the channel mode before saving and saved none of this block's "+
+				"changes, so the next plan still shows them. Applying them again is refused the same way: change "+
+				"`mode`, or choose a different `name`, then apply again.")
+	default:
+		diags.AddAttributeError(at, summary,
+			apiMessage(err)+"\n\n"+
+				"Flightdeck checked the channel before saving and saved none of this block's changes, so the next plan "+
+				"still shows them. Fix the channel in Slack, or choose a different `name`, then apply again.")
+	}
+}
+
+// slackChannelModeRefusal matches the two refusals the channel mode adds, as
+// Flightdeck words them: "A Slack channel named #x already exists. ..." in
+// create mode and "No Slack channel named #x. ..." in link mode. They share
+// the slack_channel_unusable code with the bot check, so only the prose tells
+// them apart; Flightdeck's documentation quotes both word for word. The match
+// decides only where the diagnostic points and which advice follows
+// Flightdeck's message, which always leads, so a reworded refusal still reads
+// correctly.
+var slackChannelModeRefusal = regexp.MustCompile(`^(A Slack channel named #\S+ already exists\.|No Slack channel named #\S+\.)`)
+
+func isSlackChannelModeRefusal(message string) bool {
+	return slackChannelModeRefusal.MatchString(strings.TrimSpace(message))
+}
+
+// slackChannelModeUnknownNote closes the generic error for a refused write
+// that sent the mode when a read could not tell whether this Flightdeck knows
+// it.
+const slackChannelModeUnknownNote = "If the API calls slack_channel_mode an unknown key, this Flightdeck is older " +
+	"than the release that added the Slack channel mode: upgrade Flightdeck first, or leave `mode` out of the " +
+	"slack_channel block."
+
+// slackChannelModeUnsupported says whether a refused write failed because it
+// sent the mode to a Flightdeck too old to know it. Such a Flightdeck refuses
+// the key as unknown, in prose, so rather than match the wording a read is
+// asked whether it reports the mode, the way terraform_managed is checked: a
+// Flightdeck that knows the mode always has the key, null included. When the
+// read fails and cannot tell, it returns a note for the caller's generic error
+// instead, since the API's own words may still say what happened.
+func slackChannelModeUnsupported(ctx context.Context, c *client.Client, projectID int64, sent client.Fields, err error) (unsupported bool, note string) {
+	if err == nil || !client.IsValidation(err) || client.HasCode(err, client.CodeSlackChannelUnusable) {
+		return false, ""
+	}
+	if _, named := sent["slack_channel_mode"]; !named {
+		return false, ""
+	}
+	sc, rerr := c.GetSlackChannel(ctx, projectID)
+	if rerr != nil {
+		return false, slackChannelModeUnknownNote
+	}
+	return !sc.ReportsMode(), ""
+}
+
+// addSlackChannelModeUnsupported reports a write that sent the mode to a
+// Flightdeck older than it, on the attribute: an error on an update, a warning
+// on the apply that creates the project, for the reason slackChannelApply
+// gives. Flightdeck refused the whole write, so nothing in the block was saved.
+func addSlackChannelModeUnsupported(err error, apply slackChannelApply, diags *diag.Diagnostics) {
+	at := path.Root("slack_channel").AtName("mode")
+	const summary = "This Flightdeck does not support slack_channel.mode yet"
+	if apply == slackChannelOnCreate {
+		diags.AddAttributeWarning(at, summary,
+			"The project was created, but this Flightdeck refused slack_channel_mode as an unknown setting: it is "+
+				"older than the release that added the Slack channel mode. None of this block's changes were saved. "+
+				"The next plan shows them again, and the next apply fails on this until Flightdeck is upgraded or "+
+				"`mode` is left out of the slack_channel block.\n\nThe API said: "+apiMessage(err))
 		return
 	}
 	diags.AddAttributeError(at, summary,
-		apiMessage(err)+"\n\n"+
-			"Flightdeck checked the channel before saving and saved none of this block's changes, so the next plan "+
-			"still shows them. Fix the channel in Slack, or choose a different `name`, then apply again.")
+		"This Flightdeck refused slack_channel_mode as an unknown setting: it is older than the release that added "+
+			"the Slack channel mode. Nothing was saved, including this block's other changes, so the next plan still "+
+			"shows them.\n\nUpgrade Flightdeck first, then apply again. Until then, leave `mode` out of the "+
+			"slack_channel block: on this Flightdeck it reads as null, and the provider never sends it while it is "+
+			"unset.\n\nThe API said: "+apiMessage(err))
 }
 
 // slackChannelProvisioningWarnings flags the two states that look like success

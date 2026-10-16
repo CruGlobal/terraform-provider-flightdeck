@@ -54,7 +54,10 @@ const (
 	// Slack channel: the write would leave the channel enabled and unlinked,
 	// and the channel exists but Flightdeck cannot post to it (a private
 	// channel its bot is not in, or an archived one). 422, and nothing is
-	// saved. The message names the channel and the bot to invite.
+	// saved. The message names the channel and the bot to invite. The same
+	// code refuses a channel the Slack channel mode rules out (create and the
+	// name is taken, link and no channel has it), and that message says to
+	// change the mode or the name.
 	CodeSlackChannelUnusable = "slack_channel_unusable"
 )
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.9.0...v0.10.0) (2026-10-16)
+
+
+### Added
+
+* choose whether a project's Slack channel is created or linked (slack_channel.mode) ([#46](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/46)) ([2acf53b](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/2acf53b39cade97a444948164709584d6bf9673e))
+
 ## [0.9.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.8.0...v0.9.0) (2026-10-09)
 
 

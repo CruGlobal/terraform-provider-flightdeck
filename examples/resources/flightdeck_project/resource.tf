@@ -120,5 +120,9 @@ resource "flightdeck_project" "billing" {
     max_in_progress   = 1
     daily_budget_usd  = 10
     task_max_usd      = 2.5 # whole cents: more decimal places fail the plan
+    # Ask AutoPilot to turn on GitHub auto-merge for the agents' pull
+    # requests. AutoPilot's app and the repository must allow it too, and
+    # GitHub merges only once the required checks and reviews pass.
+    auto_merge = true
   }
 }

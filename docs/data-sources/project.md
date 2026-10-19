@@ -65,6 +65,7 @@ Read-Only:
 
 - `accept_machine_labels` (Boolean) Whether the agent label and the research label count when a machine added them.
 - `agent_account_id` (Number) User id of the service account agents work as, if one is chosen.
+- `auto_merge` (Boolean) Whether AutoPilot is asked to turn on GitHub auto-merge for the pull requests agents open for the project. Null on a Flightdeck older than the setting.
 - `base_ref` (String) The branch agents start from.
 - `daily_budget_usd` (Number) The most agent work may cost the project in one UTC day, in US dollars.
 - `enabled` (Boolean) Whether agents may take the project's work items.

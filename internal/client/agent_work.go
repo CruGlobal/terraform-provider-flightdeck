@@ -17,12 +17,18 @@ import (
 // and the first write that changes something creates the row at version 1.
 // A write that changes nothing creates nothing.
 type AgentWork struct {
-	ProjectID           int64    `json:"project_id"`
-	Enabled             bool     `json:"enabled"`
-	Kinds               []string `json:"kinds"`
-	LabelID             *int64   `json:"label_id"`
-	LabelChosenAt       *string  `json:"label_chosen_at"`
-	AcceptMachineLabels bool     `json:"accept_machine_labels"`
+	ProjectID int64    `json:"project_id"`
+	Enabled   bool     `json:"enabled"`
+	Kinds     []string `json:"kinds"`
+	// AutoMerge asks AutoPilot to turn on GitHub auto-merge for each pull
+	// request an agent opens for the project. A Flightdeck that knows the
+	// setting always reports true or false. Nil on one older than the
+	// setting: its reads have no such key, and it refuses any write naming it
+	// as an unknown key.
+	AutoMerge           *bool   `json:"auto_merge"`
+	LabelID             *int64  `json:"label_id"`
+	LabelChosenAt       *string `json:"label_chosen_at"`
+	AcceptMachineLabels bool    `json:"accept_machine_labels"`
 	// ResearchLabelID is the label that sends an item to an agent for research
 	// first, and ResearchLabelChosenAt when it was last set to a label. Both
 	// read null on a Flightdeck that predates the research label.
@@ -44,6 +50,10 @@ type AgentWork struct {
 	LockVersion int64              `json:"lock_version"`
 	UpdatedAt   *string            `json:"updated_at"`
 }
+
+// ReportsAutoMerge reports whether the Flightdeck that answered knows the
+// auto_merge setting: a read from one that does always has the key.
+func (aw *AgentWork) ReportsAutoMerge() bool { return aw.AutoMerge != nil }
 
 // AgentWorkBlocker is one reason Flightdeck would not send a project's work
 // right now. Code is a stable slug; Message says what is in the way.
@@ -71,9 +81,13 @@ var AgentWorkRunbooks = []string{"implement-work-item@1"}
 // value alone, EXCEPT label_id, research_label_id and agent_account_id, where
 // a blank clears the choice. So a client must leave an unmanaged key out of
 // the write rather than send it empty.
+//
+// auto_merge is newer than the rest: a Flightdeck older than it refuses any
+// write naming it as an unknown key, so it must never be sent unless asked
+// for.
 var AgentWorkSettingKeys = []string{
-	"enabled", "kinds", "label_id", "accept_machine_labels", "research_label_id", "agent_account_id", "base_ref",
-	"max_in_progress", "daily_budget_usd", "task_max_usd", "task_max_minutes", "queue_minutes", "runbook",
+	"enabled", "kinds", "auto_merge", "label_id", "accept_machine_labels", "research_label_id", "agent_account_id",
+	"base_ref", "max_in_progress", "daily_budget_usd", "task_max_usd", "task_max_minutes", "queue_minutes", "runbook",
 }
 
 const agentWorkRoot = "agent_work"

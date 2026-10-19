@@ -203,3 +203,170 @@ func TestAgentWork_researchBlockers(t *testing.T) {
 	got = codes(Fields{"label_id": nil})
 	check("fix-error and research, no labels", got, []string{"no_label", "no_research_label"}, []string{"no_github_repo"})
 }
+
+// The fake's auto_merge follows the API's contract: false until set, true and
+// false are values, a null or a blank is no opinion, leaving the key out
+// leaves it alone, and any other value is a 422 invalid_attribute naming the
+// key. A Flightdeck older than the setting reads without the key and refuses
+// any write naming it, whatever its value, as an unknown key. The provider's
+// tests lean on this, so it is checked here directly.
+func TestAgentWork_autoMergeContract(t *testing.T) {
+	ctx := context.Background()
+	fake := flightdecktest.New(t)
+	c, err := New(fake.URL, fake.Token())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := fake.AddProject("Auto-merge", "AUTO").ID
+
+	aw, err := c.GetAgentWork(ctx, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !aw.ReportsAutoMerge() || *aw.AutoMerge {
+		t.Fatalf("an unsaved project reads auto_merge false, got %s (reported: %t)", show(aw.AutoMerge), aw.ReportsAutoMerge())
+	}
+	version := aw.LockVersion
+	write := func(fields Fields) (*AgentWork, error) {
+		t.Helper()
+		got, err := c.UpdateAgentWork(ctx, project, fields, version)
+		if err == nil {
+			version = got.LockVersion
+		}
+		return got, err
+	}
+	mustWrite := func(fields Fields) *AgentWork {
+		t.Helper()
+		got, err := write(fields)
+		if err != nil {
+			t.Fatalf("writing %v: %v", fields, err)
+		}
+		return got
+	}
+	wantAutoMerge := func(got *AgentWork, want bool, what string) {
+		t.Helper()
+		if got.AutoMerge == nil || *got.AutoMerge != want {
+			t.Fatalf("%s: auto_merge reads %s, want %t", what, show(got.AutoMerge), want)
+		}
+	}
+
+	got := mustWrite(Fields{"auto_merge": true})
+	wantAutoMerge(got, true, "set true")
+	if got.LockVersion != 1 {
+		t.Fatalf("the first write that changes something creates the row at 1, got %d", got.LockVersion)
+	}
+
+	// A null or a blank is no opinion: nothing changes, and no version moves.
+	// A blank is what Ruby's String#strip leaves empty: ASCII whitespace and
+	// NUL.
+	for _, blank := range []any{nil, "", "  ", "\t\n\v\f\r ", "\x00", " \x00\t"} {
+		got = mustWrite(Fields{"auto_merge": blank})
+		wantAutoMerge(got, true, fmt.Sprintf("a blank %#v", blank))
+		if got.LockVersion != 1 {
+			t.Fatalf("a blank %#v moved lock_version to %d", blank, got.LockVersion)
+		}
+	}
+
+	// Leaving the key out leaves it alone.
+	got = mustWrite(Fields{"max_in_progress": 2})
+	wantAutoMerge(got, true, "a write without the key")
+
+	got = mustWrite(Fields{"auto_merge": false})
+	wantAutoMerge(got, false, "set false")
+
+	// Only a real JSON boolean is a value. The refusal repeats the value the
+	// way the API does (Ruby's inspect): a string quoted, an object in braces.
+	for _, tc := range []struct {
+		bad  any
+		echo string
+	}{
+		{"true", `"true"`}, {"false", `"false"`}, {1, "1"}, {0, "0"}, {[]any{true}, "[true]"},
+		{map[string]any{}, "{}"}, {map[string]any{"on": true}, `{"on" => true}`},
+		// Ruby's strip leaves these, so they are values, not blanks.
+		{"\u00a0", "\"\u00a0\""}, {"\u3000", "\"\u3000\""},
+	} {
+		_, err := write(Fields{"auto_merge": tc.bad})
+		apiErr, ok := AsError(err)
+		want := "auto_merge must be true or false, got " + tc.echo
+		if !ok || apiErr.Status != 422 || apiErr.Code != CodeInvalidAttribute || apiErr.Message != want {
+			t.Fatalf("writing auto_merge %#v: want a 422 invalid_attribute saying %q, got %v", tc.bad, want, err)
+		}
+	}
+	if aw, err = c.GetAgentWork(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	wantAutoMerge(aw, false, "after the refused writes")
+
+	// A Flightdeck older than the setting.
+	fake.SetAgentWorkAutoMergeSupported(false)
+	if aw, err = c.GetAgentWork(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if aw.ReportsAutoMerge() {
+		t.Fatalf("an older Flightdeck must read without auto_merge, got %s", show(aw.AutoMerge))
+	}
+	version = aw.LockVersion
+	for _, value := range []any{true, false, nil} {
+		_, err := write(Fields{"auto_merge": value, "max_in_progress": 3})
+		apiErr, ok := AsError(err)
+		if !ok || apiErr.Status != 422 || apiErr.Code != CodeInvalidAttribute ||
+			!strings.HasPrefix(apiErr.Message, "unknown key: auto_merge (settable: ") {
+			t.Fatalf("an older Flightdeck must refuse auto_merge %#v as an unknown key, got %v", value, err)
+		}
+		if strings.Contains(strings.TrimPrefix(apiErr.Message, "unknown key: auto_merge"), "auto_merge") {
+			t.Fatalf("an older Flightdeck must not list auto_merge as settable: %s", apiErr.Message)
+		}
+	}
+	got = mustWrite(Fields{"max_in_progress": 3})
+	if got.MaxInProgress != 3 || got.ReportsAutoMerge() {
+		t.Fatalf("an older Flightdeck takes a write without auto_merge: max_in_progress %d, auto_merge %s",
+			got.MaxInProgress, show(got.AutoMerge))
+	}
+}
+
+// The fake repeats a refused value the way the API does, value.inspect cut to
+// 100 characters, after Rails' params parsing has dropped any null inside a
+// list (only kinds is checked for one first, from the raw body), and reads a
+// blank as Ruby's String#strip does. A no-break
+// space is not a blank, so it does not clear a label: it is refused as not
+// an id.
+func TestAgentWork_refusalsEchoTheValueAsTheAPIDoes(t *testing.T) {
+	ctx := context.Background()
+	fake := flightdecktest.New(t)
+	c, err := New(fake.URL, fake.Token())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := fake.AddProject("Echo", "ECHO").ID
+	long := strings.Repeat("x", 200)
+	for _, tc := range []struct {
+		fields Fields
+		want   string
+	}{
+		{Fields{"max_in_progress": "2"}, `max_in_progress must be a whole number, got "2"`},
+		{Fields{"daily_budget_usd": map[string]any{}}, "daily_budget_usd must be a number, got {}"},
+		{Fields{"research_label_id": "\u00a0"}, "research_label_id must be an id (a positive whole number) or null, got \"\u00a0\""},
+		// Rails' params parsing drops a null inside a list, at any depth, before
+		// the applier echoes it.
+		{Fields{"base_ref": []any{"main", nil}}, `base_ref must be a string, got ["main"]`},
+		{Fields{"base_ref": []any{nil}}, "base_ref must be a string, got []"},
+		{Fields{"auto_merge": []any{true, nil}}, "auto_merge must be true or false, got [true]"},
+		{Fields{"auto_merge": map[string]any{"on": []any{nil, []any{true, nil}}}}, `auto_merge must be true or false, got {"on" => [[true]]}`},
+		{Fields{"runbook": false}, "runbook must be a string, got false"},
+		{Fields{"kinds": "research"}, `kinds must be a list of kind names, got "research"`},
+		{Fields{"kinds": []any{"research", nil}}, `kinds must be a list of kind names, got ["research",null]`},
+		{Fields{"kinds": []any{"fix-ci"}}, `kinds has an unknown kind: "fix-ci" (valid: implement-work-item, fix-error, research)`},
+		{Fields{"kinds": []any{"fix-ci", "fix-ci"}}, `kinds has unknown kinds: "fix-ci" (valid: implement-work-item, fix-error, research)`},
+		{Fields{"enabled": "say \"hi\" #{x}\x01"}, `enabled must be true or false, got "say \"hi\" \#{x}\u0001"`},
+		{Fields{"enabled": long}, "enabled must be true or false, got \"" + strings.Repeat("x", 96) + "..."},
+	} {
+		_, err := c.UpdateAgentWork(ctx, project, tc.fields, 0)
+		apiErr, ok := AsError(err)
+		if !ok || apiErr.Status != 422 || apiErr.Code != CodeInvalidAttribute || apiErr.Message != tc.want {
+			t.Errorf("writing %v:\n want a 422 invalid_attribute saying %s\n  got %v", tc.fields, tc.want, err)
+		}
+	}
+	if row := fake.AgentWorkOf(project); row != nil {
+		t.Fatalf("a refused write must save nothing, got %+v", row)
+	}
+}

@@ -125,6 +125,7 @@ func TestProjectAgentWork_unconfiguredReadsTheDefaults(t *testing.T) {
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(projectRes, "agent_work.enabled", "false"),
 					resource.TestCheckResourceAttr(projectRes, "agent_work.kinds.#", "0"),
+					resource.TestCheckResourceAttr(projectRes, "agent_work.auto_merge", "false"),
 					resource.TestCheckResourceAttr(projectRes, "agent_work.base_ref", "main"),
 					resource.TestCheckResourceAttr(projectRes, "agent_work.max_in_progress", "1"),
 					resource.TestCheckResourceAttr(projectRes, "agent_work.daily_budget_usd", "10"),
@@ -1336,6 +1337,12 @@ func TestAgentWorkRefusedAt(t *testing.T) {
 			refusal(client.CodeInvalidAttribute, "unknown key: research_label_id (settable: enabled, kinds, label_id, "+
 				"accept_machine_labels, agent_account_id, base_ref, max_in_progress, daily_budget_usd, task_max_usd, "+
 				"task_max_minutes, queue_minutes, runbook)"), block.AtName("research_label_id"), true},
+		// An older Flightdeck's refusal of auto_merge lists research_label_id
+		// among the settable keys; that is not a refusal of the research label.
+		{"auto_merge refused by an older Flightdeck", client.Fields{"research_label_id": int64(9), "auto_merge": true},
+			refusal(client.CodeInvalidAttribute, "unknown key: auto_merge (settable: enabled, kinds, label_id, "+
+				"accept_machine_labels, research_label_id, agent_account_id, base_ref, max_in_progress, daily_budget_usd, "+
+				"task_max_usd, task_max_minutes, queue_minutes, runbook)"), block, false},
 		{"another setting refused", client.Fields{"research_label_id": int64(9), "task_max_usd": 20.0},
 			refusal(client.CodeValidationFailed, "Most a task may cost can't be more than the daily budget"), block, false},
 		{"the agent label refused", client.Fields{"label_id": int64(9)},
@@ -1392,7 +1399,7 @@ func TestAgentWorkFields_writePathMatchesSettingKeys(t *testing.T) {
 	ctx := context.Background()
 	kinds, _ := types.SetValueFrom(ctx, types.StringType, []string{"implement-work-item"})
 	fields := mustAgentWorkFields(t, agentWorkModel{
-		Enabled: types.BoolValue(true), Kinds: kinds, LabelID: types.Int64Value(7),
+		Enabled: types.BoolValue(true), Kinds: kinds, AutoMerge: types.BoolValue(false), LabelID: types.Int64Value(7),
 		LabelChosenAt: types.StringValue("2026-10-01T00:00:00Z"), AcceptMachineLabels: types.BoolValue(false),
 		ResearchLabelID: types.Int64Value(9), ResearchLabelChosenAt: types.StringValue("2026-10-02T00:00:00Z"),
 		AgentAccountID: types.Int64Value(8), BaseRef: types.StringValue("main"), MaxInProgress: types.Int64Value(1),
@@ -1463,6 +1470,28 @@ func TestAgentWorkFields_sendsOnlyConfiguredSettings(t *testing.T) {
 			name:  "kinds are sent in the API's order",
 			model: agentWorkModel{Kinds: types.SetValueMust(types.StringType, []attr.Value{types.StringValue("research"), types.StringValue("fix-error"), types.StringValue("implement-work-item")})},
 			want:  map[string]any{"kinds": []string{"implement-work-item", "fix-error", "research"}},
+		},
+		{
+			name:  "auto_merge true is sent",
+			model: agentWorkModel{AutoMerge: types.BoolValue(true)},
+			want:  map[string]any{"auto_merge": true},
+		},
+		{
+			name:  "auto_merge false is a value, and sent",
+			model: agentWorkModel{AutoMerge: types.BoolValue(false), MaxInProgress: types.Int64Value(2)},
+			want:  map[string]any{"auto_merge": false, "max_in_progress": int64(2)},
+		},
+		{
+			// An older Flightdeck refuses the key whatever its value, so an
+			// unset auto_merge must never reach the write, not even as null.
+			name:  "an unset auto_merge is left out",
+			model: agentWorkModel{AutoMerge: types.BoolNull(), Enabled: types.BoolValue(false)},
+			want:  map[string]any{"enabled": false},
+		},
+		{
+			name:  "an auto_merge not known until apply is left out",
+			model: agentWorkModel{AutoMerge: types.BoolUnknown(), Enabled: types.BoolValue(false)},
+			want:  map[string]any{"enabled": false},
 		},
 		{
 			name:  "money is sent as a number",
@@ -1627,7 +1656,7 @@ func TestWarnAgentWorkBlockers(t *testing.T) {
 
 func TestPlanAgentWorkComputed(t *testing.T) {
 	ctx := context.Background()
-	prior := &agentWorkModel{Enabled: types.BoolValue(false), LabelID: types.Int64Value(7), MaxInProgress: types.Int64Value(1),
+	prior := &agentWorkModel{Enabled: types.BoolValue(false), AutoMerge: types.BoolValue(false), LabelID: types.Int64Value(7), MaxInProgress: types.Int64Value(1),
 		DailyBudgetUSD: types.Float64Value(12.34), LabelChosenAt: types.StringValue("2026-10-01T00:00:00Z"),
 		ResearchLabelID: types.Int64Value(9), ResearchLabelChosenAt: types.StringValue("2026-10-02T00:00:00Z"), LockVersion: types.Int64Value(3)}
 	cases := []struct {
@@ -1637,6 +1666,8 @@ func TestPlanAgentWorkComputed(t *testing.T) {
 	}{
 		{name: "nothing changes", plan: *prior, wantVersion: true, wantLabel: true, wantResearch: true},
 		{name: "a setting changes", plan: with(*prior, func(m *agentWorkModel) { m.MaxInProgress = types.Int64Value(2) }), wantLabel: true, wantResearch: true},
+		{name: "auto_merge changes", plan: with(*prior, func(m *agentWorkModel) { m.AutoMerge = types.BoolValue(true) }), wantLabel: true, wantResearch: true},
+		{name: "auto_merge is not known yet", plan: with(*prior, func(m *agentWorkModel) { m.AutoMerge = types.BoolUnknown() }), wantLabel: true, wantResearch: true},
 		{name: "the label changes", plan: with(*prior, func(m *agentWorkModel) { m.LabelID = types.Int64Value(8) }), wantResearch: true},
 		{name: "the label is not known yet", plan: with(*prior, func(m *agentWorkModel) { m.LabelID = types.Int64Unknown() }), wantResearch: true},
 		{name: "the research label changes", plan: with(*prior, func(m *agentWorkModel) { m.ResearchLabelID = types.Int64Value(10) }), wantLabel: true},

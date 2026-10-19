@@ -13,7 +13,10 @@ import (
 
 func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
-		s.stores["agent_work"] = &agentWorkStore{enabled: true, byProject: map[int64]*AgentWorkSetting{}, extraBlockers: map[int64][]AgentWorkBlocker{}}
+		s.stores["agent_work"] = &agentWorkStore{
+			enabled: true, autoMergeSupported: true,
+			byProject: map[int64]*AgentWorkSetting{}, extraBlockers: map[int64][]AgentWorkBlocker{},
+		}
 		mux.HandleFunc("GET /api/v1/projects/{project_id}/agent-work", s.showAgentWork)
 		mux.HandleFunc("PATCH /api/v1/projects/{project_id}/agent-work", s.updateAgentWork)
 	})
@@ -23,8 +26,11 @@ func init() {
 // without one reads the defaults at lock_version 0, and reading never
 // creates one, as in the API.
 type AgentWorkSetting struct {
-	Enabled             bool
-	Kinds               []string
+	Enabled bool
+	Kinds   []string
+	// AutoMerge asks AutoPilot to turn on GitHub auto-merge for each pull
+	// request an agent opens for the project. Off by default.
+	AutoMerge           bool
 	LabelID             *int64
 	LabelChosenAt       *time.Time
 	AcceptMachineLabels bool
@@ -53,8 +59,12 @@ type AgentWorkBlocker struct {
 
 type agentWorkStore struct {
 	// enabled=false simulates a Flightdeck without the endpoint: both routes 404.
-	enabled   bool
-	byProject map[int64]*AgentWorkSetting
+	enabled bool
+	// autoMergeSupported=false simulates a Flightdeck older than auto_merge:
+	// reads leave the key out, and a write naming it is refused as an unknown
+	// key, whatever its value.
+	autoMergeSupported bool
+	byProject          map[int64]*AgentWorkSetting
 	// poolConnected clears the pool_not_connected blocker.
 	poolConnected bool
 	// extraBlockers are appended to a project's computed blockers, for the
@@ -73,6 +83,14 @@ func (s *Server) SetAgentWorkEndpoint(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.agentWorkStore().enabled = on
+}
+
+// SetAgentWorkAutoMergeSupported turns auto_merge on or off, to simulate a
+// Flightdeck version that predates it.
+func (s *Server) SetAgentWorkAutoMergeSupported(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.agentWorkStore().autoMergeSupported = on
 }
 
 // SetAgentWorkPoolConnected controls the pool_not_connected blocker. The fake
@@ -151,9 +169,11 @@ const (
 var (
 	agentWorkKinds    = []string{agentWorkImplement, agentWorkFixError, agentWorkResearch}
 	agentWorkRunbooks = []string{"implement-work-item@1"}
+	// agentWorkWritable are the settable keys in the API's order (the settings
+	// page's). writableKeys leaves auto_merge out on a Flightdeck older than it.
 	agentWorkWritable = []string{
-		"enabled", "kinds", "label_id", "accept_machine_labels", "research_label_id", "agent_account_id", "base_ref",
-		"max_in_progress", "daily_budget_usd", "task_max_usd", "task_max_minutes", "queue_minutes", "runbook",
+		"enabled", "kinds", "auto_merge", "label_id", "accept_machine_labels", "research_label_id", "agent_account_id",
+		"base_ref", "max_in_progress", "daily_budget_usd", "task_max_usd", "task_max_minutes", "queue_minutes", "runbook",
 	}
 	agentWorkReadOnly = map[string]string{
 		"project_id":      "it is the :project_id in the path, and a project's agent work settings belong to that project",
@@ -168,16 +188,134 @@ var (
 	agentWorkNullable = []string{"label_id", "research_label_id", "agent_account_id"}
 )
 
+// writableKeys is agentWorkWritable as this Flightdeck has it.
+func (st *agentWorkStore) writableKeys() []string {
+	if st.autoMergeSupported {
+		return agentWorkWritable
+	}
+	out := make([]string, 0, len(agentWorkWritable))
+	for _, key := range agentWorkWritable {
+		if key != "auto_merge" {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
 // agentWorkNoOpinion is what a blank means for every key but the nullable
 // references: leave the key alone.
 type agentWorkNoOpinion struct{}
 
+// agentWorkBlank is the API's Api::BlankValue.no_opinion?: a null, or a
+// string that Ruby's String#strip leaves empty. Ruby strips only ASCII
+// whitespace and NUL, so a no-break space (U+00A0) or an ideographic space
+// (U+3000) is a value, where Go's strings.TrimSpace would strip it.
 func agentWorkBlank(v any) bool {
 	if v == nil {
 		return true
 	}
 	str, ok := v.(string)
-	return ok && strings.TrimSpace(str) == ""
+	return ok && strings.Trim(str, rubyStripped) == ""
+}
+
+// rubyStripped is what Ruby's String#strip removes from either end.
+const rubyStripped = "\x00\t\n\v\f\r "
+
+// agentWorkEcho repeats a refused value back the way the API does
+// (value.inspect.truncate(100)): Ruby's inspect of the parsed JSON, so a
+// string is quoted ("true"), an empty object is {}, and null is nil, cut to
+// 100 characters with "...".
+func agentWorkEcho(v any) string {
+	out := []rune(rubyInspect(v))
+	if len(out) <= 100 {
+		return string(out)
+	}
+	return string(out[:97]) + "..."
+}
+
+// railsDeepMunge is what Rails' params parsing does to a JSON value before an
+// applier sees it: every null inside a list is dropped, at any depth, and a
+// null anywhere else is kept.
+func railsDeepMunge(v any) any {
+	switch t := v.(type) {
+	case []any:
+		out := make([]any, 0, len(t))
+		for _, e := range t {
+			if e != nil {
+				out = append(out, railsDeepMunge(e))
+			}
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[k] = railsDeepMunge(e)
+		}
+		return out
+	}
+	return v
+}
+
+// rubyInspect is Ruby's inspect of a value json.Decoder produced (with
+// UseNumber). It differs from the API's in two places: object keys come out
+// sorted, where Ruby keeps the order they were sent in, and a number is
+// written as sent, where Ruby prints 1.50 as 1.5 and 1e2 as 100.0. Neither
+// matters: the provider only ever sends these settings as their own JSON
+// types, so it never meets a refusal that echoes an object or such a number.
+func rubyInspect(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return "nil"
+	case bool:
+		return strconv.FormatBool(t)
+	case json.Number:
+		return t.String()
+	case string:
+		return rubyInspectString(t)
+	case []any:
+		parts := make([]string, 0, len(t))
+		for _, e := range t {
+			parts = append(parts, rubyInspect(e))
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	case map[string]any:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, rubyInspectString(k)+" => "+rubyInspect(t[k]))
+		}
+		return "{" + strings.Join(parts, ", ") + "}"
+	}
+	return fmt.Sprint(v)
+}
+
+// rubyInspectString is Ruby's String#inspect for the characters JSON can
+// carry: the named escapes, an escaped # before {, $ or @, other control
+// characters as \uXXXX, and everything else as it is.
+func rubyInspectString(str string) string {
+	named := map[rune]string{'"': `\"`, '\\': `\\`, '\n': `\n`, '\t': `\t`, '\r': `\r`, '\f': `\f`, '\v': `\v`,
+		'\b': `\b`, '\a': `\a`, 0x1b: `\e`}
+	runes := []rune(str)
+	var b strings.Builder
+	b.WriteByte('"')
+	for i, r := range runes {
+		switch {
+		case named[r] != "":
+			b.WriteString(named[r])
+		case r == '#' && i+1 < len(runes) && strings.ContainsRune("{$@", runes[i+1]):
+			b.WriteString(`\#`)
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&b, `\u%04X`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // agentWorkWhole reads a JSON number as a whole number; 3.0 is 3, 3.5 is not.
@@ -222,52 +360,69 @@ func agentWorkValue(key string, v any) (any, string) {
 		return agentWorkNoOpinion{}, ""
 	}
 	switch key {
-	case "enabled", "accept_machine_labels":
+	case "enabled", "accept_machine_labels", "auto_merge":
 		if b, ok := v.(bool); ok {
 			return b, ""
 		}
-		return nil, fmt.Sprintf("%s must be true or false, got %v", key, v)
+		return nil, fmt.Sprintf("%s must be true or false, got %s", key, agentWorkEcho(v))
 	case "max_in_progress", "task_max_minutes", "queue_minutes":
 		if i, ok := agentWorkWhole(v); ok {
 			return i, ""
 		}
-		return nil, fmt.Sprintf("%s must be a whole number, got %v", key, v)
+		return nil, fmt.Sprintf("%s must be a whole number, got %s", key, agentWorkEcho(v))
 	case "label_id", "research_label_id", "agent_account_id":
 		if i, ok := agentWorkWhole(v); ok && i >= 1 {
 			return &i, ""
 		}
-		return nil, fmt.Sprintf("%s must be an id (a positive whole number) or null, got %v", key, v)
+		return nil, fmt.Sprintf("%s must be an id (a positive whole number) or null, got %s", key, agentWorkEcho(v))
 	case "daily_budget_usd", "task_max_usd":
 		n, ok := v.(json.Number)
 		if !ok {
-			return nil, fmt.Sprintf("%s must be a number, got %v", key, v)
+			return nil, fmt.Sprintf("%s must be a number, got %s", key, agentWorkEcho(v))
 		}
 		return n, ""
 	case "kinds":
 		list, ok := v.([]any)
 		if !ok {
-			return nil, fmt.Sprintf("kinds must be a list of kind names, got %v", v)
+			return nil, fmt.Sprintf("kinds must be a list of kind names, got %s", agentWorkEcho(v))
 		}
 		kinds := make([]string, 0, len(list))
+		// The API counts every unknown entry for "kind" or "kinds", and names
+		// at most five, each once.
 		var unknown []string
+		unknownCount := 0
 		for _, e := range list {
 			str, isStr := e.(string)
 			if !isStr {
-				return nil, fmt.Sprintf("kinds must be a list of kind names, got %v", v)
+				return nil, fmt.Sprintf("kinds must be a list of kind names, got %s", agentWorkEcho(v))
 			}
 			if !contains(agentWorkKinds, str) {
-				unknown = append(unknown, fmt.Sprintf("%q", str))
+				unknownCount++
+				if !contains(unknown, str) {
+					unknown = append(unknown, str)
+				}
 			}
 			kinds = append(kinds, str)
 		}
 		if len(unknown) > 0 {
-			return nil, fmt.Sprintf("kinds has an unknown kind: %s (valid: %s)", strings.Join(unknown, ", "), strings.Join(agentWorkKinds, ", "))
+			what := "an unknown kind"
+			if unknownCount > 1 {
+				what = "unknown kinds"
+			}
+			if len(unknown) > 5 {
+				unknown = unknown[:5]
+			}
+			echoes := make([]string, 0, len(unknown))
+			for _, kind := range unknown {
+				echoes = append(echoes, agentWorkEcho(kind))
+			}
+			return nil, fmt.Sprintf("kinds has %s: %s (valid: %s)", what, strings.Join(echoes, ", "), strings.Join(agentWorkKinds, ", "))
 		}
 		return kinds, ""
 	case "runbook":
 		str, ok := v.(string)
 		if !ok {
-			return nil, fmt.Sprintf("runbook must be a string, got %v", v)
+			return nil, fmt.Sprintf("runbook must be a string, got %s", agentWorkEcho(v))
 		}
 		if !contains(agentWorkRunbooks, str) {
 			return nil, fmt.Sprintf("runbook is not a runbook the pool knows, got %q (valid: %s)", str, strings.Join(agentWorkRunbooks, ", "))
@@ -277,7 +432,7 @@ func agentWorkValue(key string, v any) (any, string) {
 		if str, ok := v.(string); ok {
 			return str, ""
 		}
-		return nil, fmt.Sprintf("base_ref must be a string, got %v", v)
+		return nil, fmt.Sprintf("base_ref must be a string, got %s", agentWorkEcho(v))
 	}
 	return nil, "unknown key: " + key
 }
@@ -298,15 +453,44 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 		sort.Strings(readOnly)
 		return current, false, http.StatusUnprocessableEntity, "invalid_attribute", strings.Join(readOnly, "; ")
 	}
+	// An older Flightdeck's unknown-key check comes before any value check, so
+	// it refuses auto_merge whatever its value, a blank included.
+	writable := s.agentWorkStore().writableKeys()
+	var unknown []string
 	for key := range submitted {
-		if !contains(agentWorkWritable, key) {
-			return current, false, http.StatusUnprocessableEntity, "invalid_attribute",
-				"unknown key: " + key + " (settable: " + strings.Join(agentWorkWritable, ", ") + ")"
+		if !contains(writable, key) {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		plural := ""
+		if len(unknown) > 1 {
+			plural = "s"
+		}
+		return current, false, http.StatusUnprocessableEntity, "invalid_attribute",
+			"unknown key" + plural + ": " + strings.Join(unknown, ", ") + " (settable: " + strings.Join(writable, ", ") + ")"
+	}
+	// Rails' params parsing drops every null inside a list before the API's
+	// applier sees the values, so ["main", null] is read, and echoed, as
+	// ["main"]. The API reads a null inside kinds from the raw body first and
+	// refuses it, echoing the list as JSON.
+	if list, ok := submitted["kinds"].([]any); ok {
+		for _, e := range list {
+			if e == nil {
+				raw, _ := json.Marshal(list)
+				echo := []rune(string(raw))
+				if len(echo) > 100 {
+					echo = append(echo[:97], []rune("...")...)
+				}
+				return current, false, http.StatusUnprocessableEntity, "invalid_attribute",
+					"kinds must be a list of kind names, got " + string(echo)
+			}
 		}
 	}
 	values := map[string]any{}
 	for key, raw := range submitted {
-		v, msg := agentWorkValue(key, raw)
+		v, msg := agentWorkValue(key, railsDeepMunge(raw))
 		if msg != "" {
 			return current, false, http.StatusUnprocessableEntity, "invalid_attribute", msg
 		}
@@ -322,9 +506,12 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 	for key, v := range values {
 		switch t := v.(type) {
 		case bool:
-			if key == "enabled" {
+			switch key {
+			case "enabled":
 				next.Enabled = t
-			} else {
+			case "auto_merge":
+				next.AutoMerge = t
+			default:
 				next.AcceptMachineLabels = t
 			}
 		case []string:
@@ -490,7 +677,7 @@ func agentWorkEqual(a, b AgentWorkSetting) bool {
 			return false
 		}
 	}
-	return a.Enabled == b.Enabled && sameID(a.LabelID, b.LabelID) && a.AcceptMachineLabels == b.AcceptMachineLabels &&
+	return a.Enabled == b.Enabled && a.AutoMerge == b.AutoMerge && sameID(a.LabelID, b.LabelID) && a.AcceptMachineLabels == b.AcceptMachineLabels &&
 		sameID(a.ResearchLabelID, b.ResearchLabelID) && sameID(a.AgentAccountID, b.AgentAccountID) &&
 		a.BaseRef == b.BaseRef && a.MaxInProgress == b.MaxInProgress && a.DailyBudgetUSD == b.DailyBudgetUSD && a.TaskMaxUSD == b.TaskMaxUSD && a.TaskMaxMinutes == b.TaskMaxMinutes &&
 		a.QueueMinutes == b.QueueMinutes && a.Runbook == b.Runbook
@@ -587,7 +774,7 @@ func (s *Server) serializeAgentWork(p *Project, row AgentWorkSetting) map[string
 		updatedAt = iso(*row.UpdatedAt)
 	}
 	kinds := append([]string{}, row.Kinds...)
-	return map[string]any{
+	out := map[string]any{
 		"project_id":               p.ID,
 		"enabled":                  row.Enabled,
 		"kinds":                    kinds,
@@ -608,6 +795,12 @@ func (s *Server) serializeAgentWork(p *Project, row AgentWorkSetting) map[string
 		"lock_version":             row.LockVersion,
 		"updated_at":               updatedAt,
 	}
+	// Always present on a Flightdeck that has the setting; absent on one that
+	// predates it.
+	if s.agentWorkStore().autoMergeSupported {
+		out["auto_merge"] = row.AutoMerge
+	}
+	return out
 }
 
 // agentWorkRow returns the stored row or the unsaved defaults.

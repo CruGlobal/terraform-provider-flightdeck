@@ -147,6 +147,10 @@ resource "flightdeck_project" "billing" {
     max_in_progress   = 1
     daily_budget_usd  = 10
     task_max_usd      = 2.5 # whole cents: more decimal places fail the plan
+    # Ask AutoPilot to turn on GitHub auto-merge for the agents' pull
+    # requests. AutoPilot's app and the repository must allow it too, and
+    # GitHub merges only once the required checks and reviews pass.
+    auto_merge = true
   }
 }
 ```
@@ -161,7 +165,7 @@ resource "flightdeck_project" "billing" {
 
 ### Optional
 
-- `agent_work` (Attributes) Agent work settings, managed through the project's `agent-work` API resource: whether AutoPilot, the AI agents Flightdeck sends work to, may take this project's work items, which labels mark an item for them, the service account they work as, and how much they may spend and run. An agent works on a copy of the project's GitHub repository and opens a pull request for a person to review. Reading and writing these settings requires the token's user to be a **workspace owner or admin**; for other tokens, and on a Flightdeck version without the endpoint, the block is null.
+- `agent_work` (Attributes) Agent work settings, managed through the project's `agent-work` API resource: whether AutoPilot, the AI agents Flightdeck sends work to, may take this project's work items, which labels mark an item for them, the service account they work as, and how much they may spend and run. An agent works on a copy of the project's GitHub repository and opens a pull request, which a person reviews and merges unless `auto_merge` is on. Reading and writing these settings requires the token's user to be a **workspace owner or admin**; for other tokens, and on a Flightdeck version without the endpoint, the block is null.
 
 Agent work is off until `enabled` turns it on. A plan that turns it on carries a warning saying so, and while it is on, each thing that stops Flightdeck sending work right now (the API's `blockers`: no agent label or research label chosen, no linked GitHub repository, the day's budget spent, and so on) is shown as a warning on refresh and after apply rather than stored, because it changes as the project does.
 
@@ -212,6 +216,9 @@ Optional:
 
 - `accept_machine_labels` (Boolean) Whether the agent label and the research label count even when a machine added them (an automation rule, an import, a service account). Off by default, so only a label a person adds sends an item to an agent. When unset, the project's current value is kept.
 - `agent_account_id` (Number) User id of the workspace **service account** agents work as: a claimed item is assigned to it while an agent works on it, so it also needs a project role that can edit work items (a `flightdeck_project_member`). A `flightdeck_workspace_member` data source resolves one from its email address (service accounts are visible to workspace admins, and its `kind` is `service`); the id is also on the workspace's **Service accounts** settings page. When unset, the stored account is kept; it is never sent empty, because the API would read that as clearing it.
+- `auto_merge` (Boolean) Whether to ask AutoPilot to turn on GitHub auto-merge for each pull request an agent opens for this project. Off by default. AutoPilot's app for the repository, and the repository's own settings and ruleset, must allow auto-merge too; if any of them doesn't, the pull request waits for a person. GitHub merges only once the required checks and reviews pass. Flightdeck never merges anything itself. When unset, the project's current value is kept; set it explicitly, even to `false`, for Terraform to own it.
+
+Needs a Flightdeck that supports `auto_merge`. On an older one it reads as null and is never sent while it is unset. Setting it there fails an update with an error that asks you to upgrade Flightdeck. On the apply that creates the project it is a warning instead, so the new project isn't marked tainted, and the next plan shows what is still to apply.
 - `base_ref` (String) The branch agents start from. Default `main`. Must be a branch name Git allows. When unset, the project's current value is kept.
 - `daily_budget_usd` (Number) The most agent work may cost this project in one UTC day, in US dollars (default 10). More than 0 and at most 1000, with **at most two decimal places**: Flightdeck refuses more rather than rounding, so the plan does too. When unset, the project's current value is kept.
 - `enabled` (Boolean) Whether AutoPilot agents may take this project's work items. Off by default. Once it is on and nothing in `blockers` stands in the way, agents take each work item a person marks with the agent label and open pull requests for it, and, while `research` is one of the kinds, research each item marked with the research label and post a report on it. A plan that turns it on warns. Flightdeck posts the change to the project's Slack updates. When unset, the project's current value is kept; set it explicitly, even to `false`, for Terraform to own it.

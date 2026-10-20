@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.11.0...v0.12.0) (2026-10-20)
+
+
+### Added
+
+* manage agent_work.send_ci_failures on flightdeck_project ([#50](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/50)) ([0b2bd4e](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/0b2bd4eb2d0e01c92b6d305d60e077ff2183d0e2))
+* manage ci_workflows on flightdeck_github_integration ([#51](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/51)) ([1358729](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/13587297dde7b8e1e65845da50e05a37a01d452a))
+
 ## [0.11.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.10.0...v0.11.0) (2026-10-19)
 
 

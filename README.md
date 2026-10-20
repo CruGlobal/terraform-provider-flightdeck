@@ -38,7 +38,7 @@ project, not to infrastructure code.
 | `flightdeck_routing_key` | An Events API routing key: the credential an external monitor presents to open a Flightdeck incident. Independent of paging. |
 | `flightdeck_pagerduty_integration` | A project's link to a PagerDuty service, forwarding signals to PagerDuty's Events API v2. One per project; the credential is a write-only argument. |
 | `flightdeck_webhook` | An outbound webhook, workspace-wide or scoped to one project. |
-| `flightdeck_github_integration` | A project's link to a GitHub repository, with Flightdeck registering the repository webhook or the caller supplying the shared secret, and what a failed workflow run files. |
+| `flightdeck_github_integration` | A project's link to a GitHub repository, with Flightdeck registering the repository webhook or the caller supplying the shared secret, which workflows count as CI, and what a failed workflow run files. |
 | `flightdeck_teamspace` | A teamspace: a team in the workspace (name, description, lead). Names are not unique. |
 | `flightdeck_teamspace_member` | A workspace member's place on a teamspace. |
 | `flightdeck_teamspace_project` | A teamspace's ownership of a project. A project can belong to several teams. |

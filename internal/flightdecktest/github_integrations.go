@@ -32,11 +32,14 @@ func ciFailureActionRefusal(v any) string {
 // records whether the caller supplied the secret (caller-managed webhook) or
 // Flightdeck generated it and registered the webhook itself.
 type GithubIntegration struct {
-	ID                int64
-	ProjectID         int64
-	RepoFullName      string
-	Enabled           bool
-	CIFailureAction   string
+	ID              int64
+	ProjectID       int64
+	RepoFullName    string
+	Enabled         bool
+	CIFailureAction string
+	// CIWorkflows are the workflows Flightdeck treats as CI, as stored:
+	// trimmed, with no repeat ignoring case. Never nil.
+	CIWorkflows       []string
 	WebhookRegistered bool
 	SecretSet         bool
 	LockVersion       int64
@@ -50,6 +53,8 @@ type githubIntegrationStore struct {
 	// hookPresent repositories already have a webhook targeting the receiver;
 	// Flightdeck leaves it alone and does not claim it (webhook_registered false).
 	hookPresent map[string]bool
+	// ciWorkflows simulates a Flightdeck with or without ci_workflows.
+	ciWorkflows CIWorkflowsSupport
 }
 
 func init() {
@@ -94,6 +99,7 @@ func (s *Server) GithubIntegration(id int64) *GithubIntegration {
 		return nil
 	}
 	cp := *g
+	cp.CIWorkflows = append([]string{}, g.CIWorkflows...)
 	return &cp
 }
 
@@ -126,13 +132,19 @@ func (s *Server) liveGithubIntegration(id int64) *GithubIntegration {
 	return g
 }
 
-func serializeGithubIntegration(g *GithubIntegration) map[string]any {
-	return map[string]any{
+// serializeGithubIntegration is the API's read. ci_workflows is there, [] when
+// none are listed, only on a Flightdeck that has it.
+func (s *Server) serializeGithubIntegration(g *GithubIntegration) map[string]any {
+	out := map[string]any{
 		"id": g.ID, "project_id": g.ProjectID, "repo_full_name": g.RepoFullName,
 		"enabled": g.Enabled, "ci_failure_action": g.CIFailureAction,
 		"webhook_registered": g.WebhookRegistered,
 		"lock_version":       g.LockVersion, "created_at": iso(g.CreatedAt), "updated_at": iso(g.CreatedAt),
 	}
+	if s.githubIntegrations().readsCIWorkflows() {
+		out["ci_workflows"] = append([]string{}, g.CIWorkflows...)
+	}
+	return out
 }
 
 // repoLinked mirrors the controller's guard_already_linked!: ANY row for the
@@ -182,7 +194,7 @@ func (s *Server) listGithubIntegrations(w http.ResponseWriter, r *http.Request) 
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	items := make([]any, 0, len(rows))
 	for _, g := range rows {
-		items = append(items, serializeGithubIntegration(g))
+		items = append(items, s.serializeGithubIntegration(g))
 	}
 	s.mu.Unlock()
 	writeCollection(w, r, items)
@@ -203,7 +215,7 @@ func (s *Server) showGithubIntegration(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWorkspaceAdmin(w) {
 		return
 	}
-	writeJSON(w, http.StatusOK, serializeGithubIntegration(g))
+	writeJSON(w, http.StatusOK, s.serializeGithubIntegration(g))
 }
 
 func (s *Server) createGithubIntegration(w http.ResponseWriter, r *http.Request) {
@@ -224,6 +236,10 @@ func (s *Server) createGithubIntegration(w http.ResponseWriter, r *http.Request)
 		}
 		if !s.workspaceAdmin {
 			return http.StatusForbidden, errorBody("This action requires workspace owner or admin rights.", "forbidden")
+		}
+		// An older Flightdeck's strict root runs before any field is read.
+		if refusal := s.githubIntegrations().refusesCIWorkflowsAsUnknown(attrs); refusal != "" {
+			return http.StatusUnprocessableEntity, errorBody(refusal, "invalid_attribute")
 		}
 		repo := strings.TrimSpace(asString(attrs["repo_full_name"]))
 		// Counted after the strip, before anything else is asked of it.
@@ -257,6 +273,19 @@ func (s *Server) createGithubIntegration(w http.ResponseWriter, r *http.Request)
 			// Caller-managed: the secret is stored, GitHub is never called.
 			g.SecretSet = true
 		}
+		// ci_workflows is checked last of the fields, and still before
+		// anything is linked: a refused list links nothing. Omitted, or no
+		// opinion, it starts empty.
+		g.CIWorkflows = []string{}
+		if v, has := attrs["ci_workflows"]; has && s.githubIntegrations().readsCIWorkflows() {
+			list, set, refusal := ciWorkflowsValue(v)
+			if refusal != "" {
+				return http.StatusUnprocessableEntity, errorBody(refusal, "invalid_attribute")
+			}
+			if set {
+				g.CIWorkflows = list
+			}
+		}
 		if s.repoLinked(repo) {
 			return http.StatusUnprocessableEntity, map[string]any{
 				"error": repo + " is already linked to a Flightdeck project. Delete that integration first, or link a different repository.",
@@ -289,7 +318,7 @@ func (s *Server) createGithubIntegration(w http.ResponseWriter, r *http.Request)
 		linked := g.RepoFullName
 		project.GithubRepoFullName = &linked
 		project.LockVersion++
-		return http.StatusCreated, serializeGithubIntegration(g)
+		return http.StatusCreated, s.serializeGithubIntegration(g)
 	})
 }
 
@@ -315,8 +344,13 @@ func (s *Server) updateGithubIntegration(w http.ResponseWriter, r *http.Request)
 	if !checkIfMatch(w, r, g.LockVersion) {
 		return
 	}
-	// PATCH accepts `enabled` and `ci_failure_action`; repo_full_name may be
-	// re-sent unchanged.
+	// An older Flightdeck's strict root runs before any field is read.
+	if refusal := s.githubIntegrations().refusesCIWorkflowsAsUnknown(attrs); refusal != "" {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_attribute", refusal)
+		return
+	}
+	// PATCH accepts `enabled`, `ci_failure_action` and `ci_workflows`;
+	// repo_full_name may be re-sent unchanged.
 	if v, has := attrs["repo_full_name"]; has && !strings.EqualFold(strings.TrimSpace(asString(v)), g.RepoFullName) {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_attribute",
 			"repo_full_name cannot be changed on an existing integration — DELETE it and POST a new one")
@@ -338,6 +372,19 @@ func (s *Server) updateGithubIntegration(w http.ResponseWriter, r *http.Request)
 		}
 		action = resolved
 	}
+	// Likewise ci_workflows: a refusal leaves the row untouched, and an
+	// omitted key, or one with no opinion, keeps the current list.
+	workflows := g.CIWorkflows
+	if v, has := attrs["ci_workflows"]; has && s.githubIntegrations().readsCIWorkflows() {
+		list, set, refusal := ciWorkflowsValue(v)
+		if refusal != "" {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_attribute", refusal)
+			return
+		}
+		if set {
+			workflows = list
+		}
+	}
 	wasEnabled := g.Enabled
 	if v, has := attrs["enabled"]; has && v != nil {
 		enabled := truthy(v)
@@ -349,6 +396,7 @@ func (s *Server) updateGithubIntegration(w http.ResponseWriter, r *http.Request)
 		g.Enabled = enabled
 	}
 	g.CIFailureAction = action
+	g.CIWorkflows = workflows
 	g.LockVersion++
 	if g.Enabled && !wasEnabled {
 		// Re-enabling mirrors the column again.
@@ -358,7 +406,7 @@ func (s *Server) updateGithubIntegration(w http.ResponseWriter, r *http.Request)
 			p.LockVersion++
 		}
 	}
-	writeJSON(w, http.StatusOK, serializeGithubIntegration(g))
+	writeJSON(w, http.StatusOK, s.serializeGithubIntegration(g))
 }
 
 func (s *Server) destroyGithubIntegration(w http.ResponseWriter, r *http.Request) {

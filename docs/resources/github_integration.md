@@ -7,7 +7,7 @@ description: |-
   Two modes follow from secret:
   Flightdeck-managed (secret omitted): Flightdeck generates the signing secret and registers the repository webhook through its GitHub App. The App must be installed on the repository, or the create fails with repo_unreachable. webhook_registered is true when Flightdeck registered the hook itself; if a webhook targeting Flightdeck already exists on the repository it is left in place and not claimed.Caller-managed (secret supplied): Flightdeck stores the secret and touches nothing on GitHub; you declare the matching repository webhook yourself (for example a github_repository_webhook pointing at Flightdeck's GitHub webhook endpoint with the same secret). webhook_registered is false.
   A repository can be linked to one project across the whole Flightdeck install, enabled or not, in any letter case (repo_already_linked), and a project can have one enabled integration at a time. The secret is write-only: sent on create only, never read back, and state holds only the value you configured; it must be at least 16 characters (a blank value counts as omitted). Changing repo_full_name or secret replaces the integration (unlink, then link again), since a webhook has to be torn down and another registered.
-  A failed workflow run can also be turned into work — see ci_failure_action, which is off on a new integration, so workflow_run deliveries are accepted and dropped until it is set.
+  A failed workflow run can also be turned into work: see ci_failure_action, which is off on a new integration, so workflow_run deliveries are accepted and dropped until it is set. ci_workflows names the workflows that are CI, which Flightdeck re-runs once after a failure before it files anything.
   Reading and writing this resource requires the token's user to be a workspace admin — stricter than the other project-scoped resources, because linking spends the workspace's GitHub App credential and aims the self-healing rollback loop. Import by numeric id: terraform import flightdeck_github_integration.app 17.
 ---
 
@@ -22,7 +22,7 @@ Two modes follow from `secret`:
 
 A repository can be linked to one project across the whole Flightdeck install, enabled or not, in any letter case (`repo_already_linked`), and a project can have one enabled integration at a time. The secret is write-only: sent on create only, never read back, and state holds only the value you configured; it must be at least 16 characters (a blank value counts as omitted). Changing `repo_full_name` or `secret` replaces the integration (unlink, then link again), since a webhook has to be torn down and another registered.
 
-A failed workflow run can also be turned into work — see `ci_failure_action`, which is `off` on a new integration, so `workflow_run` deliveries are accepted and dropped until it is set.
+A failed workflow run can also be turned into work: see `ci_failure_action`, which is `off` on a new integration, so `workflow_run` deliveries are accepted and dropped until it is set. `ci_workflows` names the workflows that are CI, which Flightdeck re-runs once after a failure before it files anything.
 
 Reading and writing this resource requires the token's user to be a **workspace admin** — stricter than the other project-scoped resources, because linking spends the workspace's GitHub App credential and aims the self-healing rollback loop. Import by numeric id: `terraform import flightdeck_github_integration.app 17`.
 
@@ -42,10 +42,17 @@ resource "flightdeck_project" "app" {
 # accepted and dropped. Set it explicitly — the API keeps whatever is already
 # there when the key is absent, so an unset attribute lets a choice made in the
 # Flightdeck settings page stand with no diff to show for it.
+#
+# `ci_workflows` names the workflows that are CI, as GitHub names them. When a
+# listed workflow's first attempt fails on the default branch, Flightdeck
+# re-runs the failed jobs once before it files anything. Write each name the
+# way Flightdeck stores it: no spaces at either end, and no two the same
+# ignoring case. `[]` clears the list; leaving it out keeps the current one.
 resource "flightdeck_github_integration" "app" {
   project_id        = flightdeck_project.app.id
   repo_full_name    = "example-org/mobile-app"
   ci_failure_action = "file_intake"
+  ci_workflows      = ["CI"]
 }
 
 # Caller-managed: you hold the secret and declare the repository webhook
@@ -85,6 +92,11 @@ resource "github_repository_webhook" "flightdeck" {
 ### Optional
 
 - `ci_failure_action` (String) What a failed workflow run on the repository turns into: `off` (deliveries are accepted and dropped), `create_work_item` (one work item per repository, workflow and branch while the branch stays red) or `file_intake` (the same, parked as a pending intake request someone accepts first). A passing run resolves the open item whichever is set. New integrations are created `off`. When unset, the current value is kept — including one chosen on the Flightdeck settings page — so set it explicitly, even to `off`, for Terraform to own it; removing the line leaves the current value in place, and `off` is how you switch it back off.
+- `ci_workflows` (List of String) The names of the repository's GitHub Actions workflows that Flightdeck treats as CI, such as `["CI"]`. Each is a workflow's name as GitHub shows it (the `name:` in the workflow file), and Flightdeck matches it without regard to letter case. When a listed workflow's first attempt fails on the default branch and `ci_failure_action` isn't `off`, Flightdeck asks GitHub to re-run the failed jobs once before it files anything, and files a flaky-test item if the re-run passes. Flightdeck also uses the list to decide which CI failures it may send to agents without a label, when the project's agent work settings allow that. Don't list a deploy workflow: it fails because CI failed, so a re-run fails too.
+
+At most 20 names, each up to 100 characters, with no space, tab or line break at either end, no control character inside, and no two the same ignoring case. Flightdeck would trim such a name or drop the repeat, so the plan refuses it rather than let Flightdeck store something other than what you wrote. `[]` clears the list. When unset, the current list is kept, including one saved on the Flightdeck settings page; set it, even to `[]`, for Terraform to own it.
+
+Needs a Flightdeck that supports CI workflows. On an older one it reads as null and is never sent while it is unset. Setting it there fails with an error that asks you to upgrade Flightdeck, and nothing is saved. The oldest versions ignore the setting instead of refusing it. There, an update saves its other changes and then fails, and the apply that creates the integration links the repository with a warning, so it isn't marked tainted, and the next plan shows the list still to apply.
 - `enabled` (Boolean) Whether deliveries from the repository are processed. The API always creates an integration enabled; `enabled = false` on a new resource is applied by an immediate follow-up update. When unset, the current value is kept.
 - `secret` (String, Sensitive) Webhook signing secret for the caller-managed mode; at least 16 characters. Omit it (or pass an empty string) to let Flightdeck generate one and register the webhook itself. Write-only: sent on create, never read back. Changing it replaces the integration.
 

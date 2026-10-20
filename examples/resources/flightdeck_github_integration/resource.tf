@@ -11,10 +11,17 @@ resource "flightdeck_project" "app" {
 # accepted and dropped. Set it explicitly — the API keeps whatever is already
 # there when the key is absent, so an unset attribute lets a choice made in the
 # Flightdeck settings page stand with no diff to show for it.
+#
+# `ci_workflows` names the workflows that are CI, as GitHub names them. When a
+# listed workflow's first attempt fails on the default branch, Flightdeck
+# re-runs the failed jobs once before it files anything. Write each name the
+# way Flightdeck stores it: no spaces at either end, and no two the same
+# ignoring case. `[]` clears the list; leaving it out keeps the current one.
 resource "flightdeck_github_integration" "app" {
   project_id        = flightdeck_project.app.id
   repo_full_name    = "example-org/mobile-app"
   ci_failure_action = "file_intake"
+  ci_workflows      = ["CI"]
 }
 
 # Caller-managed: you hold the secret and declare the repository webhook

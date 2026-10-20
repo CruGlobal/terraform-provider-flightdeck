@@ -8,10 +8,12 @@ import (
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
@@ -37,6 +39,7 @@ type githubIntegrationModel struct {
 	RepoFullName      types.String `tfsdk:"repo_full_name"`
 	Enabled           types.Bool   `tfsdk:"enabled"`
 	CIFailureAction   types.String `tfsdk:"ci_failure_action"`
+	CIWorkflows       types.List   `tfsdk:"ci_workflows"`
 	Secret            types.String `tfsdk:"secret"`
 	WebhookRegistered types.Bool   `tfsdk:"webhook_registered"`
 	LockVersion       types.Int64  `tfsdk:"lock_version"`
@@ -51,6 +54,7 @@ func githubIntegrationToModel(g *client.GithubIntegration, configuredSecret type
 		RepoFullName:      types.StringValue(g.RepoFullName),
 		Enabled:           types.BoolValue(g.Enabled),
 		CIFailureAction:   types.StringValue(g.CIFailureAction),
+		CIWorkflows:       ciWorkflowsList(g.CIWorkflows),
 		Secret:            configuredSecret,
 		WebhookRegistered: types.BoolValue(g.WebhookRegistered),
 		LockVersion:       types.Int64Value(g.LockVersion),
@@ -84,8 +88,10 @@ func (r *githubIntegrationResource) Schema(_ context.Context, _ resource.SchemaR
 			"never read back, and state holds only the value you configured; it must be at least 16 characters " +
 			"(a blank value counts as omitted). Changing `repo_full_name` or `secret` replaces the integration " +
 			"(unlink, then link again), since a webhook has to be torn down and another registered.\n\n" +
-			"A failed workflow run can also be turned into work — see `ci_failure_action`, which is `off` on a " +
-			"new integration, so `workflow_run` deliveries are accepted and dropped until it is set.\n\n" +
+			"A failed workflow run can also be turned into work: see `ci_failure_action`, which is `off` on a " +
+			"new integration, so `workflow_run` deliveries are accepted and dropped until it is set. `ci_workflows` " +
+			"names the workflows that are CI, which Flightdeck re-runs once after a failure before it files " +
+			"anything.\n\n" +
 			"Reading and writing this resource requires the token's user to be a **workspace admin** — stricter " +
 			"than the other project-scoped resources, because linking spends the workspace's GitHub App credential " +
 			"and aims the self-healing rollback loop. Import by numeric id: " +
@@ -132,6 +138,14 @@ func (r *githubIntegrationResource) Schema(_ context.Context, _ resource.SchemaR
 				Validators:    []validator.String{stringvalidator.OneOf(client.GithubCIFailureActions...)},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
+			"ci_workflows": schema.ListAttribute{
+				MarkdownDescription: ciWorkflowsDescription,
+				ElementType:         types.StringType,
+				Optional:            true,
+				Computed:            true,
+				Validators:          []validator.List{ciWorkflowsValidator{}},
+				PlanModifiers:       []planmodifier.List{listplanmodifier.UseStateForUnknown()},
+			},
 			"secret": schema.StringAttribute{
 				MarkdownDescription: "Webhook signing secret for the caller-managed mode; at least 16 characters. Omit it " +
 					"(or pass an empty string) to let Flightdeck generate one and register the webhook itself. " +
@@ -158,7 +172,9 @@ func (r *githubIntegrationResource) Schema(_ context.Context, _ resource.SchemaR
 
 func (r *githubIntegrationResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan githubIntegrationModel
+	var configuredWorkflows types.List
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root(ciWorkflowsKey), &configuredWorkflows)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -171,6 +187,12 @@ func (r *githubIntegrationResource) Create(ctx context.Context, req resource.Cre
 	// Omitting it leaves the server default (`off`) in place.
 	if !plan.CIFailureAction.IsNull() && !plan.CIFailureAction.IsUnknown() {
 		fields["ci_failure_action"] = plan.CIFailureAction.ValueString()
+	}
+	// ci_workflows is read on create too, and only sent when configured, so an
+	// older Flightdeck never sees the key unless asked.
+	workflows, sendWorkflows := ciWorkflowsToSend(configuredWorkflows, plan.CIWorkflows)
+	if sendWorkflows {
+		fields[ciWorkflowsKey] = workflows
 	}
 	// A blank secret is "omitted" (managed mode), as the API reads it.
 	if !plan.Secret.IsNull() && !plan.Secret.IsUnknown() && strings.TrimSpace(plan.Secret.ValueString()) != "" {
@@ -197,6 +219,13 @@ func (r *githubIntegrationResource) Create(ctx context.Context, req resource.Cre
 		case client.IsForbidden(err):
 			resp.Diagnostics.AddError("Linking a GitHub repository requires a workspace admin",
 				"Only a workspace owner or admin may manage a project's GitHub integration. "+apiMessage(err))
+		case sendWorkflows && refusesCIWorkflowsAsUnknown(err):
+			// Nothing was linked, so there is no integration to read to ask
+			// whether this Flightdeck knows the key; its refusal says so.
+			addCIWorkflowsRefusedAsUnknown(err, true, &resp.Diagnostics)
+		case refusalIsAbout(err, ciWorkflowsKey):
+			resp.Diagnostics.AddAttributeError(pathRoot(ciWorkflowsKey), "Flightdeck refused the CI workflows",
+				apiMessage(err)+"\n\nNothing was created: the repository is not linked.")
 		default:
 			addAPIError(&resp.Diagnostics, "Error linking GitHub repository", err)
 		}
@@ -215,6 +244,14 @@ func (r *githubIntegrationResource) Create(ctx context.Context, req resource.Cre
 		created = disabled
 	}
 	state := githubIntegrationToModel(created, plan.Secret)
+	if sendWorkflows && !created.ReportsCIWorkflows() {
+		// Linked without the list, by a Flightdeck that ignores the key. The
+		// state keeps the planned list, so this apply stays consistent with its
+		// plan and the integration isn't tainted; the next refresh reads null
+		// and plans the list again.
+		addCIWorkflowsIgnored(true, &resp.Diagnostics)
+		state.CIWorkflows = plan.CIWorkflows
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -240,8 +277,10 @@ func (r *githubIntegrationResource) Read(ctx context.Context, req resource.ReadR
 
 func (r *githubIntegrationResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan, state githubIntegrationModel
+	var configuredWorkflows types.List
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root(ciWorkflowsKey), &configuredWorkflows)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -255,6 +294,13 @@ func (r *githubIntegrationResource) Update(ctx context.Context, req resource.Upd
 	if !plan.CIFailureAction.IsNull() && !plan.CIFailureAction.IsUnknown() {
 		fields["ci_failure_action"] = plan.CIFailureAction.ValueString()
 	}
+	// ci_workflows is re-asserted the same way, but only while configured: the
+	// plan holds the value in state when it is unset, and an older Flightdeck
+	// refuses the key whatever its value.
+	workflows, sendWorkflows := ciWorkflowsToSend(configuredWorkflows, plan.CIWorkflows)
+	if sendWorkflows {
+		fields[ciWorkflowsKey] = workflows
+	}
 	updated, err := r.client.UpdateGithubIntegration(ctx, id, fields, state.LockVersion.ValueInt64())
 	if err != nil {
 		switch {
@@ -264,8 +310,19 @@ func (r *githubIntegrationResource) Update(ctx context.Context, req resource.Upd
 				current = &fresh.LockVersion
 			}
 			addStaleError(&resp.Diagnostics, fmt.Sprintf("GitHub integration for %s", state.RepoFullName.ValueString()), state.LockVersion.ValueInt64(), current, err)
-		case client.IsValidation(err) && strings.Contains(apiMessage(err), "ci_failure_action"):
+		case sendWorkflows && ciWorkflowsRefusalUnsupported(ctx, r.client, id, err):
+			addCIWorkflowsRefusedAsUnknown(err, false, &resp.Diagnostics)
+		case refusalIsAbout(err, ciWorkflowsKey):
+			resp.Diagnostics.AddAttributeError(pathRoot(ciWorkflowsKey), "Flightdeck refused the CI workflows",
+				apiMessage(err)+"\n\nNothing was saved.")
+		// An unknown-key refusal lists every settable key, ci_failure_action
+		// among them, so that list is not read.
+		case refusalIsAbout(err, "ci_failure_action"):
 			resp.Diagnostics.AddAttributeError(pathRoot("ci_failure_action"), "Invalid CI failure action", apiMessage(err))
+		// An unknown-key refusal of any other key is about none of the
+		// attributes here, so it is reported as it came.
+		case len(refusalUnknownKeys(err)) > 0:
+			addAPIError(&resp.Diagnostics, "Error updating Flightdeck GitHub integration", err)
 		case client.IsValidation(err):
 			resp.Diagnostics.AddAttributeError(pathRoot("enabled"), "Cannot enable this integration", apiMessage(err))
 		default:
@@ -274,6 +331,12 @@ func (r *githubIntegrationResource) Update(ctx context.Context, req resource.Upd
 		return
 	}
 	newState := githubIntegrationToModel(updated, state.Secret)
+	if sendWorkflows && !updated.ReportsCIWorkflows() {
+		// Saved without the list, by a Flightdeck that ignores the key: an
+		// error, with the state as Flightdeck now has it.
+		addCIWorkflowsIgnored(false, &resp.Diagnostics)
+	}
+	keepUnsentCIWorkflowsAsPlanned(sendWorkflows, plan.CIWorkflows, &newState)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
 }
 

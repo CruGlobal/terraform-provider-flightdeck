@@ -322,6 +322,13 @@ func TestProjectAgentWork_autoMergeOnAnOlderFlightdeckAtCreateWarns(t *testing.T
 		t.Fatalf("no create-time warning on agent_work.auto_merge; apply warnings: %s",
 			describeWithPaths(recorded.bySeverity(tfprotov6.DiagnosticSeverityWarning)))
 	}
+	// This Flightdeck is older than send_ci_failures too, but the
+	// configuration does not set it, so nothing may warn about it.
+	for _, w := range recorded.bySeverity(tfprotov6.DiagnosticSeverityWarning) {
+		if strings.Contains(w.Summary, "send_ci_failures") {
+			t.Errorf("send_ci_failures was not sent, so nothing may warn about it: %s", w.Summary)
+		}
+	}
 }
 
 // How writeAgentWork reports a refused update that sent auto_merge. The read
@@ -539,8 +546,8 @@ func TestRefusalUnknownKeys(t *testing.T) {
 			if got := strings.Join(refusalUnknownKeys(tc.err), "|"); got != tc.want {
 				t.Errorf("refusalUnknownKeys = %q, want %q", got, tc.want)
 			}
-			if got := refusesAutoMergeAsUnknown(tc.err); got != tc.autoMerge {
-				t.Errorf("refusesAutoMergeAsUnknown = %t, want %t", got, tc.autoMerge)
+			if got := refusesAsUnknown(tc.err, "auto_merge"); got != tc.autoMerge {
+				t.Errorf("refusesAsUnknown(auto_merge) = %t, want %t", got, tc.autoMerge)
 			}
 		})
 	}
@@ -644,8 +651,8 @@ func TestProjectAgentWork_autoMergeConfiguredMeetsARollbackDuringApply(t *testin
 	})
 }
 
-// keepUnsetAutoMergeAsPlanned changes the result only when the configuration
-// leaves auto_merge unset and the plan knew its value.
+// keepUnsetAsPlanned changes auto_merge in the result only when the
+// configuration leaves it unset and the plan knew its value.
 func TestKeepUnsetAutoMergeAsPlanned(t *testing.T) {
 	ctx := t.Context()
 	on, off := types.BoolValue(true), types.BoolValue(false)
@@ -668,7 +675,7 @@ func TestKeepUnsetAutoMergeAsPlanned(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var diags diag.Diagnostics
-			out := keepUnsetAutoMergeAsPlanned(ctx, tc.config, tc.planned, tc.after, &diags)
+			out := keepUnsetAsPlanned("auto_merge", tc.config, tc.planned, tc.after, &diags)
 			if diags.HasError() {
 				t.Fatalf("errors: %v", diags.Errors())
 			}
@@ -684,7 +691,7 @@ func TestKeepUnsetAutoMergeAsPlanned(t *testing.T) {
 	}
 	// A failed write leaves no block, and stays that way.
 	var diags diag.Diagnostics
-	if out := keepUnsetAutoMergeAsPlanned(ctx, obj(types.BoolNull()), obj(off), types.ObjectNull(agentWorkAttrTypes), &diags); !out.IsNull() {
+	if out := keepUnsetAsPlanned("auto_merge", obj(types.BoolNull()), obj(off), types.ObjectNull(agentWorkAttrTypes), &diags); !out.IsNull() {
 		t.Fatalf("a null result must stay null, got %v", out)
 	}
 }
@@ -729,7 +736,7 @@ func TestProjectAgentWork_autoMergeUnsetStaysKnownOnARename(t *testing.T) {
 	}
 }
 
-// agentWorkAutoMergeRefused decides from the read after a refusal, never from
+// agentWorkSettingRefused decides from the read after a refusal, never from
 // the API's wording: only a 422 to a write that sent auto_merge, from a
 // Flightdeck whose read has no auto_merge, is the server being too old.
 func TestAgentWorkAutoMergeRefused(t *testing.T) {
@@ -757,7 +764,7 @@ func TestAgentWorkAutoMergeRefused(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := agentWorkAutoMergeRefused(tc.current, tc.sent, tc.err); got != tc.want {
+			if got := agentWorkSettingRefused(agentWorkAutoMerge, tc.current, tc.sent, tc.err); got != tc.want {
 				t.Fatalf("got %t, want %t", got, tc.want)
 			}
 		})

@@ -151,6 +151,10 @@ resource "flightdeck_project" "billing" {
     # requests. AutoPilot's app and the repository must allow it too, and
     # GitHub merges only once the required checks and reviews pass.
     auto_merge = true
+    # Send items Flightdeck files for failed CI runs to an agent without
+    # waiting for a person to add the agent label. Only workflows on the
+    # GitHub integration's ci_workflows list count.
+    send_ci_failures = true
   }
 }
 ```
@@ -165,7 +169,7 @@ resource "flightdeck_project" "billing" {
 
 ### Optional
 
-- `agent_work` (Attributes) Agent work settings, managed through the project's `agent-work` API resource: whether AutoPilot, the AI agents Flightdeck sends work to, may take this project's work items, which labels mark an item for them, the service account they work as, and how much they may spend and run. An agent works on a copy of the project's GitHub repository and opens a pull request, which a person reviews and merges unless `auto_merge` is on. Reading and writing these settings requires the token's user to be a **workspace owner or admin**; for other tokens, and on a Flightdeck version without the endpoint, the block is null.
+- `agent_work` (Attributes) Agent work settings, managed through the project's `agent-work` API resource: whether AutoPilot, the AI agents Flightdeck sends work to, may take this project's work items, which labels mark an item for them, whether items filed for failed CI runs go to them without a label, the service account they work as, and how much they may spend and run. An agent works on a copy of the project's GitHub repository and opens a pull request, which a person reviews and merges unless `auto_merge` is on. Reading and writing these settings requires the token's user to be a **workspace owner or admin**; for other tokens, and on a Flightdeck version without the endpoint, the block is null.
 
 Agent work is off until `enabled` turns it on. A plan that turns it on carries a warning saying so, and while it is on, each thing that stops Flightdeck sending work right now (the API's `blockers`: no agent label or research label chosen, no linked GitHub repository, the day's budget spent, and so on) is shown as a warning on refresh and after apply rather than stored, because it changes as the project does.
 
@@ -221,7 +225,7 @@ Optional:
 Needs a Flightdeck that supports `auto_merge`. On an older one it reads as null and is never sent while it is unset. Setting it there fails an update with an error that asks you to upgrade Flightdeck. On the apply that creates the project it is a warning instead, so the new project isn't marked tainted, and the next plan shows what is still to apply.
 - `base_ref` (String) The branch agents start from. Default `main`. Must be a branch name Git allows. When unset, the project's current value is kept.
 - `daily_budget_usd` (Number) The most agent work may cost this project in one UTC day, in US dollars (default 10). More than 0 and at most 1000, with **at most two decimal places**: Flightdeck refuses more rather than rounding, so the plan does too. When unset, the project's current value is kept.
-- `enabled` (Boolean) Whether AutoPilot agents may take this project's work items. Off by default. Once it is on and nothing in `blockers` stands in the way, agents take each work item a person marks with the agent label and open pull requests for it, and, while `research` is one of the kinds, research each item marked with the research label and post a report on it. A plan that turns it on warns. Flightdeck posts the change to the project's Slack updates. When unset, the project's current value is kept; set it explicitly, even to `false`, for Terraform to own it.
+- `enabled` (Boolean) Whether AutoPilot agents may take this project's work items. Off by default. Once it is on and nothing in `blockers` stands in the way, agents take each work item a person marks with the agent label (and, while `send_ci_failures` is on, each item Flightdeck files for a failed CI run) and open pull requests for it, and, while `research` is one of the kinds, research each item marked with the research label and post a report on it. A plan that turns it on warns. Flightdeck posts the change to the project's Slack updates. When unset, the project's current value is kept; set it explicitly, even to `false`, for Terraform to own it.
 - `kinds` (Set of String) The kinds of work agents may do. Known kinds: `implement-work-item`, `fix-error`, `research`. None by default, and an empty set clears the list. Add `fix-error` or `research` only once AutoPilot allows that kind for the project: if AutoPilot refuses a kind, it holds all of the project's agent work, other kinds included. When unset, the project's current list is kept.
 - `label_id` (Number) Id of the label in this project that marks a work item for an agent. Only a label a person adds after it is chosen here counts (see `label_chosen_at`), unless `accept_machine_labels` says otherwise. When unset, the stored label is kept; it is never sent empty, because the API would read that as clearing it.
 
@@ -232,6 +236,9 @@ A `flightdeck_label` in this project depends on the project, so referring to it 
 
 Needs the Flightdeck release that added the agent work research label. A label in this project forms the same dependency cycle as `label_id`, and the same data source breaks it.
 - `runbook` (String) The steps the agent follows for `implement-work-item`. Known runbooks: `implement-work-item@1` (the default). `fix-error` and `research` always use their own runbook. When unset, the project's current value is kept.
+- `send_ci_failures` (Boolean) Whether to send each work item Flightdeck files for a failed CI run to an agent without waiting for a person to add the agent label. Off by default, so such an item waits for a person to label it. It applies only to items filed for workflows on the linked repository's CI workflows list (`ci_workflows` on `flightdeck_github_integration`), and only while the integration files CI failures (`ci_failure_action` isn't `off`), an agent label is chosen (`label_id`) and `implement-work-item` is one of the `kinds`; an item that waits in intake goes once someone accepts it. Flightdeck sends each such item once: after an agent has worked on it, it goes again only when a person adds the agent label. At most one item per workflow (per job, for a flaky test) goes this way in 24 hours, and never one a person is assigned to. The usual limits still hold, such as `max_in_progress` and the budget. Turning it on or off is posted to the project's Slack updates. When unset, the project's current value is kept; set it explicitly, even to `false`, for Terraform to own it.
+
+Needs a Flightdeck that supports `send_ci_failures`. On an older one it reads as null and is never sent while it is unset. Setting it there fails an update with an error that asks you to upgrade Flightdeck. On the apply that creates the project it is a warning instead, so the new project isn't marked tainted, and the next plan shows what is still to apply.
 - `task_max_minutes` (Number) The most minutes one task may run (default 30). A whole number from 1 to 240. When unset, the project's current value is kept.
 - `task_max_usd` (Number) The most one task may cost, in US dollars (default 5). It may not exceed `daily_budget_usd`, which Flightdeck checks against the stored budget when only one of the two is set. More than 0 and at most 100, with **at most two decimal places**: Flightdeck refuses more rather than rounding, so the plan does too. When unset, the project's current value is kept.
 

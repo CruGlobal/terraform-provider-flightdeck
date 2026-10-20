@@ -124,5 +124,9 @@ resource "flightdeck_project" "billing" {
     # requests. AutoPilot's app and the repository must allow it too, and
     # GitHub merges only once the required checks and reviews pass.
     auto_merge = true
+    # Send items Flightdeck files for failed CI runs to an agent without
+    # waiting for a person to add the agent label. Only workflows on the
+    # GitHub integration's ci_workflows list count.
+    send_ci_failures = true
   }
 }

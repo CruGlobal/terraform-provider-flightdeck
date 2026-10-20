@@ -51,11 +51,12 @@ import (
 //     with the project and the day, like self-healing's rollback_blockers. It
 //     is reported as warnings on refresh and apply while agent work is on,
 //     never stored.
-//   - `auto_merge` is newer than the rest. A Flightdeck older than it has no
-//     such key on a read and refuses any write naming it, so it reads as
-//     null there and, like every setting, is sent only when configured. A
-//     write that names it to such a Flightdeck is refused, and the provider
-//     says to upgrade (agentWorkAutoMergeRefused).
+//   - `auto_merge` and `send_ci_failures` are newer than the rest
+//     (agentWorkNewerSettings). A Flightdeck older than one has no such key
+//     on a read and refuses any write naming it, so it reads as null there
+//     and, like every setting, is sent only when configured. A write that
+//     names it to such a Flightdeck is refused, and the provider says to
+//     upgrade (agentWorkSettingRefused).
 //
 // Every attribute is Optional+Computed or Computed, for the reason the
 // slack_channel block gives: an Optional-only member nulled by dropping the
@@ -66,6 +67,7 @@ type agentWorkModel struct {
 	Enabled             types.Bool   `tfsdk:"enabled"`
 	Kinds               types.Set    `tfsdk:"kinds"`
 	AutoMerge           types.Bool   `tfsdk:"auto_merge"`
+	SendCIFailures      types.Bool   `tfsdk:"send_ci_failures"`
 	LabelID             types.Int64  `tfsdk:"label_id"`
 	LabelChosenAt       types.String `tfsdk:"label_chosen_at"`
 	AcceptMachineLabels types.Bool   `tfsdk:"accept_machine_labels"`
@@ -88,6 +90,7 @@ var agentWorkAttrTypes = map[string]attr.Type{
 	"enabled":                  types.BoolType,
 	"kinds":                    types.SetType{ElemType: types.StringType},
 	"auto_merge":               types.BoolType,
+	"send_ci_failures":         types.BoolType,
 	"label_id":                 types.Int64Type,
 	"label_chosen_at":          types.StringType,
 	"accept_machine_labels":    types.BoolType,
@@ -153,7 +156,8 @@ func agentWorkSchema() schema.Attribute {
 	return schema.SingleNestedAttribute{
 		MarkdownDescription: "Agent work settings, managed through the project's `agent-work` API resource: whether " +
 			"AutoPilot, the AI agents Flightdeck sends work to, may take this project's work items, which labels mark an " +
-			"item for them, the service account they work as, and how much they may spend and run. An agent works on a " +
+			"item for them, whether items filed for failed CI runs go to them without a label, the service account they " +
+			"work as, and how much they may spend and run. An agent works on a " +
 			"copy of the project's GitHub repository and opens a pull request, which a person reviews and merges unless " +
 			"`auto_merge` is on. Reading and " +
 			"writing these settings requires the token's user to be a **workspace owner or admin**; for other tokens, " +
@@ -178,7 +182,8 @@ func agentWorkSchema() schema.Attribute {
 			"enabled": schema.BoolAttribute{
 				MarkdownDescription: "Whether AutoPilot agents may take this project's work items. Off by default. Once it " +
 					"is on and nothing in `blockers` stands in the way, agents take each work item a person marks with " +
-					"the agent label and open pull requests for it, and, while `research` is one of the kinds, research " +
+					"the agent label (and, while `send_ci_failures` is on, each item Flightdeck files for a failed CI " +
+					"run) and open pull requests for it, and, while `research` is one of the kinds, research " +
 					"each item marked with the research label and post a report on it. A plan that turns it on warns. " +
 					"Flightdeck posts the change to the project's Slack updates. When unset, the project's current " +
 					"value is kept; set it explicitly, even to `false`, for Terraform to own it.",
@@ -199,6 +204,12 @@ func agentWorkSchema() schema.Attribute {
 			},
 			"auto_merge": schema.BoolAttribute{
 				MarkdownDescription: autoMergeDescription,
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"send_ci_failures": schema.BoolAttribute{
+				MarkdownDescription: sendCIFailuresDescription,
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
@@ -296,6 +307,7 @@ func agentWorkDataSourceSchema() datasourceschema.Attribute {
 			"enabled":                  datasourceschema.BoolAttribute{MarkdownDescription: "Whether agents may take the project's work items.", Computed: true},
 			"kinds":                    datasourceschema.SetAttribute{MarkdownDescription: "The kinds of work agents may do.", ElementType: types.StringType, Computed: true},
 			"auto_merge":               datasourceschema.BoolAttribute{MarkdownDescription: autoMergeDataSourceDescription, Computed: true},
+			"send_ci_failures":         datasourceschema.BoolAttribute{MarkdownDescription: sendCIFailuresDataSourceDescription, Computed: true},
 			"label_id":                 datasourceschema.Int64Attribute{MarkdownDescription: "Id of the label that marks an item for an agent, if one is chosen.", Computed: true},
 			"label_chosen_at":          datasourceschema.StringAttribute{MarkdownDescription: "When `label_id` was last set to a label (RFC 3339).", Computed: true},
 			"accept_machine_labels":    datasourceschema.BoolAttribute{MarkdownDescription: "Whether the agent label and the research label count when a machine added them.", Computed: true},
@@ -468,7 +480,8 @@ func sameAgentWorkSettings(a, b agentWorkModel) bool {
 		return x.IsNull() || x.ValueFloat64() == y.ValueFloat64()
 	}
 	same := func(x, y attr.Value) bool { return !x.IsUnknown() && !y.IsUnknown() && x.Equal(y) }
-	return same(a.Enabled, b.Enabled) && same(a.Kinds, b.Kinds) && same(a.AutoMerge, b.AutoMerge) && same(a.LabelID, b.LabelID) &&
+	return same(a.Enabled, b.Enabled) && same(a.Kinds, b.Kinds) && same(a.AutoMerge, b.AutoMerge) &&
+		same(a.SendCIFailures, b.SendCIFailures) && same(a.LabelID, b.LabelID) &&
 		same(a.AcceptMachineLabels, b.AcceptMachineLabels) && same(a.ResearchLabelID, b.ResearchLabelID) &&
 		same(a.AgentAccountID, b.AgentAccountID) &&
 		same(a.BaseRef, b.BaseRef) && same(a.MaxInProgress, b.MaxInProgress) &&
@@ -481,7 +494,8 @@ func known(v attr.Value) bool { return !v.IsNull() && !v.IsUnknown() }
 
 // agentWorkActs is what the plan-time warning says agents will do.
 const agentWorkActs = "AutoPilot agents may then take each of this project's work items that a person marks with the " +
-	"agent label, work on a copy of its GitHub repository as the agent account, and open pull requests, which people " +
+	"agent label (and, while send_ci_failures is on, each item Flightdeck files for a failed CI run), work on a copy " +
+	"of its GitHub repository as the agent account, and open pull requests, which people " +
 	"review and merge unless auto_merge is on. If research is one of the kinds, an item a person marks with the research label is researched " +
 	"instead, and the agent posts its report on the item as a comment. All of this stays within the daily budget " +
 	"and the per-task limits."
@@ -565,6 +579,7 @@ func agentWorkToObject(ctx context.Context, aw *client.AgentWork, diags *diag.Di
 		"enabled":                  types.BoolValue(aw.Enabled),
 		"kinds":                    set,
 		"auto_merge":               types.BoolPointerValue(aw.AutoMerge),
+		"send_ci_failures":         types.BoolPointerValue(aw.SendCIFailures),
 		"label_id":                 types.Int64PointerValue(aw.LabelID),
 		"label_chosen_at":          types.StringPointerValue(aw.LabelChosenAt),
 		"accept_machine_labels":    types.BoolValue(aw.AcceptMachineLabels),
@@ -624,6 +639,7 @@ func agentWorkFields(ctx context.Context, block types.Object, diags *diag.Diagno
 		fields["kinds"] = kindsInAPIOrder(kinds)
 	}
 	putBool("auto_merge", m.AutoMerge)
+	putBool("send_ci_failures", m.SendCIFailures)
 	putInt("label_id", m.LabelID)
 	putBool("accept_machine_labels", m.AcceptMachineLabels)
 	putInt("research_label_id", m.ResearchLabelID)
@@ -740,56 +756,60 @@ const (
 // create), whose lock_version is the If-Match; without one, the current
 // version is read first. planned is the planned block, which a create-time
 // refusal hands back so the apply stays consistent with its plan, and whose
-// auto_merge the block keeps while the configuration leaves it unset
-// (keepUnsetAutoMergeAsPlanned). Either way, blockers are reported as
-// warnings while agent work is on; identifier names the project in them.
+// newer settings (auto_merge, send_ci_failures) the block keeps while the
+// configuration leaves them unset (keepUnsetAsPlanned). Either way, blockers
+// are reported as warnings while agent work is on; identifier names the
+// project in them.
 func writeAgentWork(ctx context.Context, c *client.Client, projectID int64, identifier string, configBlock, priorBlock, planned types.Object, apply agentWorkApply, diags *diag.Diagnostics) types.Object {
 	block := writeAgentWorkSettings(ctx, c, projectID, identifier, configBlock, priorBlock, planned, apply, diags)
-	return keepUnsetAutoMergeAsPlanned(ctx, configBlock, planned, block, diags)
+	for _, setting := range agentWorkNewerSettings {
+		block = keepUnsetAsPlanned(setting.key, configBlock, planned, block, diags)
+	}
+	return block
 }
 
-// keepUnsetAutoMergeAsPlanned puts the planned auto_merge in the block an
-// apply leaves, when the configuration does not set it and the plan knew its
-// value. An unset auto_merge is never sent, so the apply changes nothing about
-// it, but what the server reports can still differ from the plan: a Flightdeck
-// upgraded to the setting between the plan and the apply reports false where
-// the plan, made from a read without the key, holds null, and one rolled back
-// below it reports null where the plan holds a value. A saved plan applied
-// later makes that window real. Terraform refuses a result that differs from a
-// known planned value, so the planned one is kept, and the next refresh adopts
-// the server's, as it does for any unset setting. A configured auto_merge is
-// left as the server reports it, so a server that did not honor it still
-// fails the apply.
-func keepUnsetAutoMergeAsPlanned(ctx context.Context, configBlock, planned, result types.Object, diags *diag.Diagnostics) types.Object {
+// keepUnsetAsPlanned puts the planned value of key, one of the newer settings
+// (agentWorkNewerSettings), in the block an apply leaves, when the
+// configuration does not set it and the plan knew its value. An unset newer
+// setting is never sent, so the apply changes nothing about it, but what the
+// server reports can still differ from the plan: a Flightdeck upgraded to the
+// setting between the plan and the apply reports false where the plan, made
+// from a read without the key, holds null, and one rolled back below it
+// reports null where the plan holds a value. A saved plan applied later makes
+// that window real. Terraform refuses a result that differs from a known
+// planned value, so the planned one is kept, and the next refresh adopts the
+// server's, as it does for any unset setting. A configured value is left as
+// the server reports it, so a server that did not honor it still fails the
+// apply.
+func keepUnsetAsPlanned(key string, configBlock, planned, result types.Object, diags *diag.Diagnostics) types.Object {
 	if result.IsNull() || result.IsUnknown() || planned.IsNull() || planned.IsUnknown() || configBlock.IsUnknown() {
 		return result
 	}
 	if !configBlock.IsNull() {
-		var cfg agentWorkModel
-		diags.Append(configBlock.As(ctx, &cfg, objectAsOptions)...)
-		if diags.HasError() || !cfg.AutoMerge.IsNull() {
+		if configured, ok := configBlock.Attributes()[key]; !ok || !configured.IsNull() {
 			return result
 		}
 	}
-	want, ok := planned.Attributes()["auto_merge"]
+	want, ok := planned.Attributes()[key]
 	if !ok || want.IsUnknown() {
 		return result
 	}
 	attrs := result.Attributes()
-	if got := attrs["auto_merge"]; got != nil && got.Equal(want) {
+	if got := attrs[key]; got != nil && got.Equal(want) {
 		return result
 	}
 	out := make(map[string]attr.Value, len(attrs))
 	for name, v := range attrs {
 		out[name] = v
 	}
-	out["auto_merge"] = want
+	out[key] = want
 	obj, d := types.ObjectValue(agentWorkAttrTypes, out)
 	diags.Append(d...)
 	return obj
 }
 
-// writeAgentWorkSettings is writeAgentWork without the auto_merge correction.
+// writeAgentWorkSettings is writeAgentWork without the newer settings'
+// correction.
 func writeAgentWorkSettings(ctx context.Context, c *client.Client, projectID int64, identifier string, configBlock, priorBlock, planned types.Object, apply agentWorkApply, diags *diag.Diagnostics) types.Object {
 	settings := agentWorkFields(ctx, configBlock, diags)
 	if diags.HasError() {
@@ -835,8 +855,10 @@ func writeAgentWorkSettings(ctx context.Context, c *client.Client, projectID int
 	if apply == agentWorkOnCreate && !client.IsNotFound(err) && !client.IsForbidden(err) {
 		var fresh diag.Diagnostics
 		if block, current := readAgentWork(ctx, c, projectID, &fresh); current != nil && !fresh.HasError() {
-			if agentWorkAutoMergeRefused(current, settings, err) {
-				addAgentWorkAutoMergeUnsupported(err, agentWorkOnCreate, diags)
+			if refused := agentWorkRefusedSettings(current, settings, err); len(refused) > 0 {
+				for _, setting := range refused {
+					addAgentWorkSettingUnsupported(setting, err, agentWorkOnCreate, diags)
+				}
 				return agentWorkKeepPlan(planned, block, diags)
 			}
 			at, _ := agentWorkRefusedAt(settings, err)
@@ -965,17 +987,16 @@ func addAgentWorkWriteError(ctx context.Context, c *client.Client, projectID, lo
 		addStaleError(diags, "Project agent work settings", lockVersion, current, err)
 	case client.IsValidation(err):
 		// A read after the refusal decides whether this Flightdeck is too old
-		// for auto_merge, not the API's wording.
-		if agentWorkAutoMergeUnsupported(ctx, c, projectID, sent, err) {
-			addAgentWorkAutoMergeUnsupported(err, agentWorkOnUpdate, diags)
+		// for a newer setting the write sent, not the API's wording.
+		if refused := agentWorkUnsupportedSettings(ctx, c, projectID, sent, err); len(refused) > 0 {
+			for _, setting := range refused {
+				addAgentWorkSettingUnsupported(setting, err, agentWorkOnUpdate, diags)
+			}
 			return
 		}
-		// When that read could not tell, the refusal itself may still name
-		// auto_merge as an unknown key; only then is the upgrade note added.
-		note := ""
-		if refusesAutoMergeAsUnknown(err) {
-			note = "\n\n" + agentWorkAutoMergeUnknownNote
-		}
+		// When that read could not tell, the refusal itself may still name a
+		// newer setting as an unknown key; only then is its upgrade note added.
+		note := agentWorkUnknownNotes(err)
 		if label, ok := agentWorkRefusedAt(sent, err); ok {
 			detail := "Nothing was saved. " + agentWorkResearchLabelRule + "\n\nThe API said: " + apiMessage(err)
 			if client.HasCode(err, client.CodeInvalidAttribute) {
@@ -1005,45 +1026,122 @@ const autoMergeDescription = "Whether to ask AutoPilot to turn on GitHub auto-me
 const autoMergeDataSourceDescription = "Whether AutoPilot is asked to turn on GitHub auto-merge for the pull " +
 	"requests agents open for the project. Null on a Flightdeck older than the setting."
 
-// agentWorkAutoMergeUnknownNote closes the error for a refused write whose
-// refusal names auto_merge as an unknown key, when a read could not tell
-// whether this Flightdeck knows it.
+// sendCIFailuresDescription is the resource attribute's documentation.
+const sendCIFailuresDescription = "Whether to send each work item Flightdeck files for a failed CI run to an agent " +
+	"without waiting for a person to add the agent label. Off by default, so such an item waits for a person to " +
+	"label it. It applies only to items filed for workflows on the linked repository's CI workflows list (" +
+	"`ci_workflows` on `flightdeck_github_integration`), and only while the integration files CI failures (" +
+	"`ci_failure_action` isn't `off`), an agent label is chosen (`label_id`) and `implement-work-item` is one " +
+	"of the `kinds`; an item that waits in intake goes once someone accepts it. Flightdeck sends each such item " +
+	"once: after an agent has worked on it, it goes again only when a person adds the agent label. At most one " +
+	"item per workflow (per job, for a flaky test) goes this way in 24 hours, and never one a person is assigned " +
+	"to. The usual limits still hold, such as `max_in_progress` and the budget. Turning it on or off is posted " +
+	"to the project's Slack updates. When unset, the project's current value is kept; set it explicitly, even " +
+	"to `false`, for Terraform to own it.\n\n" +
+	"Needs a Flightdeck that supports `send_ci_failures`. On an older one it reads as null and is never sent while " +
+	"it is unset. Setting it there fails an update with an error that asks you to upgrade Flightdeck. On the apply " +
+	"that creates the project it is a warning instead, so the new project isn't marked tainted, and the next plan " +
+	"shows what is still to apply."
+
+// sendCIFailuresDataSourceDescription is the data source attribute's
+// documentation.
+const sendCIFailuresDataSourceDescription = "Whether items Flightdeck files for failed CI runs go to an agent " +
+	"without a person adding the agent label. Null on a Flightdeck older than the setting."
+
+// agentWorkNewerSetting is a setting newer than the agent-work endpoint
+// itself. A Flightdeck older than it has no such key on a read and refuses
+// any write naming it, whatever its value, as an unknown key. So it reads as
+// null there, is never sent while unset, and a write that names it to such a
+// Flightdeck is reported on the attribute with a note to upgrade.
+type agentWorkNewerSetting struct {
+	// key is the setting's name in the API and in the block.
+	key string
+	// added is what the Flightdeck release that added the setting added, as in
+	// "older than the release that added <added>".
+	added string
+	// unknownNote closes the error for a refused write whose refusal names key
+	// as an unknown key, when a read could not tell whether this Flightdeck
+	// knows it.
+	unknownNote string
+	// reported says whether a read came from a Flightdeck that knows the
+	// setting: one that does always has the key.
+	reported func(*client.AgentWork) bool
+}
+
+var (
+	agentWorkAutoMerge = agentWorkNewerSetting{
+		key: "auto_merge", added: "auto-merge for agent pull requests",
+		unknownNote: agentWorkAutoMergeUnknownNote, reported: (*client.AgentWork).ReportsAutoMerge,
+	}
+	agentWorkSendCIFailures = agentWorkNewerSetting{
+		key: "send_ci_failures", added: "sending CI failures to agents",
+		unknownNote: agentWorkSendCIFailuresUnknownNote, reported: (*client.AgentWork).ReportsSendCIFailures,
+	}
+	// agentWorkNewerSettings are the newer settings, in the API's order.
+	agentWorkNewerSettings = []agentWorkNewerSetting{agentWorkAutoMerge, agentWorkSendCIFailures}
+)
+
+// agentWorkAutoMergeUnknownNote is auto_merge's unknownNote.
 const agentWorkAutoMergeUnknownNote = "If the API calls auto_merge an unknown key, this Flightdeck is older than " +
 	"the release that added auto-merge for agent pull requests: upgrade Flightdeck first, or leave `auto_merge` " +
 	"out of the agent_work block."
 
-// agentWorkAutoMergeRefused reports whether a refused write failed because it
-// sent auto_merge to a Flightdeck too old to know it, judged by current, a
-// read made after the refusal. Such a Flightdeck refuses the key as unknown,
-// in prose, so rather than match the wording the read is asked whether it
+// agentWorkSendCIFailuresUnknownNote is send_ci_failures' unknownNote.
+const agentWorkSendCIFailuresUnknownNote = "If the API calls send_ci_failures an unknown key, this Flightdeck is " +
+	"older than the release that added sending CI failures to agents: upgrade Flightdeck first, or leave " +
+	"`send_ci_failures` out of the agent_work block."
+
+// agentWorkSettingRefused reports whether a refused write failed because it
+// sent setting to a Flightdeck too old to know it, judged by current, a read
+// made after the refusal. Such a Flightdeck refuses the key as unknown, in
+// prose, so rather than match the wording the read is asked whether it
 // reports the setting, the way terraform_managed and slack_channel.mode are
-// checked: a Flightdeck that knows auto_merge always has the key.
-func agentWorkAutoMergeRefused(current *client.AgentWork, sent client.Fields, err error) bool {
+// checked.
+func agentWorkSettingRefused(setting agentWorkNewerSetting, current *client.AgentWork, sent client.Fields, err error) bool {
 	if current == nil || !client.IsValidation(err) {
 		return false
 	}
-	if _, named := sent["auto_merge"]; !named {
+	if _, named := sent[setting.key]; !named {
 		return false
 	}
-	return !current.ReportsAutoMerge()
+	return !setting.reported(current)
 }
 
-// agentWorkAutoMergeUnsupported is agentWorkAutoMergeRefused with a read of
-// its own, for a refused update. A read that fails cannot tell, and answers
-// false: the caller falls back on the refusal's own words
-// (refusesAutoMergeAsUnknown).
-func agentWorkAutoMergeUnsupported(ctx context.Context, c *client.Client, projectID int64, sent client.Fields, err error) bool {
-	if !client.IsValidation(err) {
-		return false
+// agentWorkRefusedSettings is every newer setting agentWorkSettingRefused
+// finds a refused write failed on, in the API's order. A write that sent
+// both to a Flightdeck older than both failed on both.
+func agentWorkRefusedSettings(current *client.AgentWork, sent client.Fields, err error) []agentWorkNewerSetting {
+	var refused []agentWorkNewerSetting
+	for _, setting := range agentWorkNewerSettings {
+		if agentWorkSettingRefused(setting, current, sent, err) {
+			refused = append(refused, setting)
+		}
 	}
-	if _, named := sent["auto_merge"]; !named {
-		return false
+	return refused
+}
+
+// agentWorkUnsupportedSettings is agentWorkRefusedSettings with a read of its
+// own, for a refused update. It reads only when the write sent a newer
+// setting. A read that fails cannot tell, and finds none: the caller falls
+// back on the refusal's own words (agentWorkUnknownNotes).
+func agentWorkUnsupportedSettings(ctx context.Context, c *client.Client, projectID int64, sent client.Fields, err error) []agentWorkNewerSetting {
+	if !client.IsValidation(err) {
+		return nil
+	}
+	sentNewer := false
+	for _, setting := range agentWorkNewerSettings {
+		if _, named := sent[setting.key]; named {
+			sentNewer = true
+		}
+	}
+	if !sentNewer {
+		return nil
 	}
 	current, rerr := c.GetAgentWork(ctx, projectID)
 	if rerr != nil {
-		return false
+		return nil
 	}
-	return agentWorkAutoMergeRefused(current, sent, err)
+	return agentWorkRefusedSettings(current, sent, err)
 }
 
 // settableList is where an unknown-key refusal starts listing the keys the
@@ -1083,37 +1181,48 @@ func refusalUnknownKeys(err error) []string {
 	return strings.Split(listed, ", ")
 }
 
-// refusesAutoMergeAsUnknown reports whether a refusal names auto_merge as an
-// unknown key.
-func refusesAutoMergeAsUnknown(err error) bool {
-	for _, key := range refusalUnknownKeys(err) {
-		if key == "auto_merge" {
+// refusesAsUnknown reports whether a refusal names key as an unknown key.
+func refusesAsUnknown(err error, key string) bool {
+	for _, unknown := range refusalUnknownKeys(err) {
+		if unknown == key {
 			return true
 		}
 	}
 	return false
 }
 
-// addAgentWorkAutoMergeUnsupported reports a write that sent auto_merge to a
-// Flightdeck older than it, on the attribute: an error on an update, a
+// agentWorkUnknownNotes is the upgrade note of each newer setting a refusal
+// names as an unknown key, each after a blank line, or "" when it names none.
+func agentWorkUnknownNotes(err error) string {
+	notes := ""
+	for _, setting := range agentWorkNewerSettings {
+		if refusesAsUnknown(err, setting.key) {
+			notes += "\n\n" + setting.unknownNote
+		}
+	}
+	return notes
+}
+
+// addAgentWorkSettingUnsupported reports a write that sent a newer setting to
+// a Flightdeck older than it, on the attribute: an error on an update, a
 // warning on the apply that creates the project, for the reason
 // agentWorkOnCreate gives. Flightdeck refused the whole write, so nothing in
 // the block was saved.
-func addAgentWorkAutoMergeUnsupported(err error, apply agentWorkApply, diags *diag.Diagnostics) {
-	at := path.Root("agent_work").AtName("auto_merge")
-	const summary = "This Flightdeck does not support agent_work.auto_merge yet"
+func addAgentWorkSettingUnsupported(setting agentWorkNewerSetting, err error, apply agentWorkApply, diags *diag.Diagnostics) {
+	at := path.Root("agent_work").AtName(setting.key)
+	summary := "This Flightdeck does not support agent_work." + setting.key + " yet"
 	if apply == agentWorkOnCreate {
 		diags.AddAttributeWarning(at, summary,
-			"The project was created, but this Flightdeck refused auto_merge as an unknown setting: it is older than "+
-				"the release that added auto-merge for agent pull requests. None of this block's settings were saved. "+
+			"The project was created, but this Flightdeck refused "+setting.key+" as an unknown setting: it is older "+
+				"than the release that added "+setting.added+". None of this block's settings were saved. "+
 				"The next plan shows them again, and the next apply fails on this until Flightdeck is upgraded or "+
-				"`auto_merge` is left out of the agent_work block.\n\nThe API said: "+apiMessage(err))
+				"`"+setting.key+"` is left out of the agent_work block.\n\nThe API said: "+apiMessage(err))
 		return
 	}
 	diags.AddAttributeError(at, summary,
-		"This Flightdeck refused auto_merge as an unknown setting: it is older than the release that added "+
-			"auto-merge for agent pull requests. Nothing was saved, including this block's other changes, so the "+
+		"This Flightdeck refused "+setting.key+" as an unknown setting: it is older than the release that added "+
+			setting.added+". Nothing was saved, including this block's other changes, so the "+
 			"next plan still shows them.\n\nUpgrade Flightdeck first, then apply again. Until then, leave "+
-			"`auto_merge` out of the agent_work block: on this Flightdeck it reads as null, and the provider never "+
-			"sends it while it is unset.\n\nThe API said: "+apiMessage(err))
+			"`"+setting.key+"` out of the agent_work block: on this Flightdeck it reads as null, and the provider "+
+			"never sends it while it is unset.\n\nThe API said: "+apiMessage(err))
 }

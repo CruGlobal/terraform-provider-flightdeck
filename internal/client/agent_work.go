@@ -25,7 +25,13 @@ type AgentWork struct {
 	// setting always reports true or false. Nil on one older than the
 	// setting: its reads have no such key, and it refuses any write naming it
 	// as an unknown key.
-	AutoMerge           *bool   `json:"auto_merge"`
+	AutoMerge *bool `json:"auto_merge"`
+	// SendCIFailures sends each item Flightdeck files for a failed CI run to
+	// an agent without a person adding the agent label, for workflows on the
+	// linked repository's CI workflows list. Like AutoMerge, a Flightdeck that
+	// knows the setting always reports true or false, and one older than it
+	// reads nil and refuses any write naming it as an unknown key.
+	SendCIFailures      *bool   `json:"send_ci_failures"`
 	LabelID             *int64  `json:"label_id"`
 	LabelChosenAt       *string `json:"label_chosen_at"`
 	AcceptMachineLabels bool    `json:"accept_machine_labels"`
@@ -55,6 +61,10 @@ type AgentWork struct {
 // auto_merge setting: a read from one that does always has the key.
 func (aw *AgentWork) ReportsAutoMerge() bool { return aw.AutoMerge != nil }
 
+// ReportsSendCIFailures reports whether the Flightdeck that answered knows
+// the send_ci_failures setting: a read from one that does always has the key.
+func (aw *AgentWork) ReportsSendCIFailures() bool { return aw.SendCIFailures != nil }
+
 // AgentWorkBlocker is one reason Flightdeck would not send a project's work
 // right now. Code is a stable slug; Message says what is in the way.
 type AgentWorkBlocker struct {
@@ -82,12 +92,13 @@ var AgentWorkRunbooks = []string{"implement-work-item@1"}
 // a blank clears the choice. So a client must leave an unmanaged key out of
 // the write rather than send it empty.
 //
-// auto_merge is newer than the rest: a Flightdeck older than it refuses any
-// write naming it as an unknown key, so it must never be sent unless asked
-// for.
+// auto_merge and send_ci_failures are newer than the rest: a Flightdeck
+// older than either refuses any write naming it as an unknown key, so neither
+// must ever be sent unless asked for.
 var AgentWorkSettingKeys = []string{
-	"enabled", "kinds", "auto_merge", "label_id", "accept_machine_labels", "research_label_id", "agent_account_id",
-	"base_ref", "max_in_progress", "daily_budget_usd", "task_max_usd", "task_max_minutes", "queue_minutes", "runbook",
+	"enabled", "kinds", "auto_merge", "send_ci_failures", "label_id", "accept_machine_labels", "research_label_id",
+	"agent_account_id", "base_ref", "max_in_progress", "daily_budget_usd", "task_max_usd", "task_max_minutes",
+	"queue_minutes", "runbook",
 }
 
 const agentWorkRoot = "agent_work"

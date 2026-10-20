@@ -14,7 +14,7 @@ import (
 func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
 		s.stores["agent_work"] = &agentWorkStore{
-			enabled: true, autoMergeSupported: true,
+			enabled: true, release: AgentWorkWithSendCIFailures,
 			byProject: map[int64]*AgentWorkSetting{}, extraBlockers: map[int64][]AgentWorkBlocker{},
 		}
 		mux.HandleFunc("GET /api/v1/projects/{project_id}/agent-work", s.showAgentWork)
@@ -30,7 +30,11 @@ type AgentWorkSetting struct {
 	Kinds   []string
 	// AutoMerge asks AutoPilot to turn on GitHub auto-merge for each pull
 	// request an agent opens for the project. Off by default.
-	AutoMerge           bool
+	AutoMerge bool
+	// SendCIFailures sends each item Flightdeck files for a failed CI run to
+	// an agent without a person adding the agent label. Off by default, and
+	// never a blocker.
+	SendCIFailures      bool
 	LabelID             *int64
 	LabelChosenAt       *time.Time
 	AcceptMachineLabels bool
@@ -60,11 +64,11 @@ type AgentWorkBlocker struct {
 type agentWorkStore struct {
 	// enabled=false simulates a Flightdeck without the endpoint: both routes 404.
 	enabled bool
-	// autoMergeSupported=false simulates a Flightdeck older than auto_merge:
-	// reads leave the key out, and a write naming it is refused as an unknown
-	// key, whatever its value.
-	autoMergeSupported bool
-	byProject          map[int64]*AgentWorkSetting
+	// release is the Flightdeck release the endpoint acts as. A setting newer
+	// than it is unknown: reads leave the key out, and a write naming it is
+	// refused as an unknown key, whatever its value.
+	release   AgentWorkRelease
+	byProject map[int64]*AgentWorkSetting
 	// poolConnected clears the pool_not_connected blocker.
 	poolConnected bool
 	// extraBlockers are appended to a project's computed blockers, for the
@@ -85,12 +89,74 @@ func (s *Server) SetAgentWorkEndpoint(on bool) {
 	s.agentWorkStore().enabled = on
 }
 
-// SetAgentWorkAutoMergeSupported turns auto_merge on or off, to simulate a
-// Flightdeck version that predates it.
+// AgentWorkRelease is a Flightdeck release the agent-work endpoint can act
+// as, oldest first. Flightdeck added auto_merge, then send_ci_failures, and a
+// release knows every setting added up to it, so a Flightdeck older than
+// auto_merge is older than send_ci_failures too. No release knows
+// send_ci_failures without auto_merge, and the fake cannot be made to.
+type AgentWorkRelease int
+
+const (
+	// AgentWorkBeforeAutoMerge knows neither auto_merge nor send_ci_failures.
+	AgentWorkBeforeAutoMerge AgentWorkRelease = iota
+	// AgentWorkWithAutoMerge knows auto_merge but not send_ci_failures.
+	AgentWorkWithAutoMerge
+	// AgentWorkWithSendCIFailures knows both. The fake starts here.
+	AgentWorkWithSendCIFailures
+)
+
+// SetAgentWorkRelease makes the agent-work endpoint act as the given
+// release.
+func (s *Server) SetAgentWorkRelease(release AgentWorkRelease) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.agentWorkStore().release = release
+}
+
+// SetAgentWorkAutoMergeSupported moves the fake across the release that
+// added auto_merge. false makes it older than that release, so it knows
+// neither auto_merge nor send_ci_failures, as a real Flightdeck older than
+// auto_merge does. true makes it at least that release: one older is
+// upgraded to it (auto_merge, still no send_ci_failures), and a newer one is
+// left as it is.
 func (s *Server) SetAgentWorkAutoMergeSupported(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.agentWorkStore().autoMergeSupported = on
+	st := s.agentWorkStore()
+	switch {
+	case !on:
+		st.release = AgentWorkBeforeAutoMerge
+	case st.release < AgentWorkWithAutoMerge:
+		st.release = AgentWorkWithAutoMerge
+	}
+}
+
+// SetAgentWorkSendCIFailuresSupported moves the fake across the release that
+// added send_ci_failures. false makes it older than that release: the newest
+// becomes the release with auto_merge but not send_ci_failures, and one older
+// than auto_merge stays so. true makes it the newest, which knows auto_merge
+// too.
+func (s *Server) SetAgentWorkSendCIFailuresSupported(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.agentWorkStore()
+	switch {
+	case on:
+		st.release = AgentWorkWithSendCIFailures
+	case st.release > AgentWorkWithAutoMerge:
+		st.release = AgentWorkWithAutoMerge
+	}
+}
+
+// knowsAutoMerge reports whether the release the fake acts as has auto_merge.
+func (st *agentWorkStore) knowsAutoMerge() bool {
+	return st.release >= AgentWorkWithAutoMerge
+}
+
+// knowsSendCIFailures reports whether the release the fake acts as has
+// send_ci_failures.
+func (st *agentWorkStore) knowsSendCIFailures() bool {
+	return st.release >= AgentWorkWithSendCIFailures
 }
 
 // SetAgentWorkPoolConnected controls the pool_not_connected blocker. The fake
@@ -170,10 +236,12 @@ var (
 	agentWorkKinds    = []string{agentWorkImplement, agentWorkFixError, agentWorkResearch}
 	agentWorkRunbooks = []string{"implement-work-item@1"}
 	// agentWorkWritable are the settable keys in the API's order (the settings
-	// page's). writableKeys leaves auto_merge out on a Flightdeck older than it.
+	// page's). writableKeys leaves auto_merge and send_ci_failures out on a
+	// Flightdeck older than each.
 	agentWorkWritable = []string{
-		"enabled", "kinds", "auto_merge", "label_id", "accept_machine_labels", "research_label_id", "agent_account_id",
-		"base_ref", "max_in_progress", "daily_budget_usd", "task_max_usd", "task_max_minutes", "queue_minutes", "runbook",
+		"enabled", "kinds", "auto_merge", "send_ci_failures", "label_id", "accept_machine_labels", "research_label_id",
+		"agent_account_id", "base_ref", "max_in_progress", "daily_budget_usd", "task_max_usd", "task_max_minutes",
+		"queue_minutes", "runbook",
 	}
 	agentWorkReadOnly = map[string]string{
 		"project_id":      "it is the :project_id in the path, and a project's agent work settings belong to that project",
@@ -190,14 +258,12 @@ var (
 
 // writableKeys is agentWorkWritable as this Flightdeck has it.
 func (st *agentWorkStore) writableKeys() []string {
-	if st.autoMergeSupported {
-		return agentWorkWritable
-	}
 	out := make([]string, 0, len(agentWorkWritable))
 	for _, key := range agentWorkWritable {
-		if key != "auto_merge" {
-			out = append(out, key)
+		if (key == "auto_merge" && !st.knowsAutoMerge()) || (key == "send_ci_failures" && !st.knowsSendCIFailures()) {
+			continue
 		}
+		out = append(out, key)
 	}
 	return out
 }
@@ -360,7 +426,7 @@ func agentWorkValue(key string, v any) (any, string) {
 		return agentWorkNoOpinion{}, ""
 	}
 	switch key {
-	case "enabled", "accept_machine_labels", "auto_merge":
+	case "enabled", "accept_machine_labels", "auto_merge", "send_ci_failures":
 		if b, ok := v.(bool); ok {
 			return b, ""
 		}
@@ -454,7 +520,8 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 		return current, false, http.StatusUnprocessableEntity, "invalid_attribute", strings.Join(readOnly, "; ")
 	}
 	// An older Flightdeck's unknown-key check comes before any value check, so
-	// it refuses auto_merge whatever its value, a blank included.
+	// it refuses auto_merge or send_ci_failures whatever its value, a blank
+	// included.
 	writable := s.agentWorkStore().writableKeys()
 	var unknown []string
 	for key := range submitted {
@@ -511,6 +578,8 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 				next.Enabled = t
 			case "auto_merge":
 				next.AutoMerge = t
+			case "send_ci_failures":
+				next.SendCIFailures = t
 			default:
 				next.AcceptMachineLabels = t
 			}
@@ -677,7 +746,7 @@ func agentWorkEqual(a, b AgentWorkSetting) bool {
 			return false
 		}
 	}
-	return a.Enabled == b.Enabled && a.AutoMerge == b.AutoMerge && sameID(a.LabelID, b.LabelID) && a.AcceptMachineLabels == b.AcceptMachineLabels &&
+	return a.Enabled == b.Enabled && a.AutoMerge == b.AutoMerge && a.SendCIFailures == b.SendCIFailures && sameID(a.LabelID, b.LabelID) && a.AcceptMachineLabels == b.AcceptMachineLabels &&
 		sameID(a.ResearchLabelID, b.ResearchLabelID) && sameID(a.AgentAccountID, b.AgentAccountID) &&
 		a.BaseRef == b.BaseRef && a.MaxInProgress == b.MaxInProgress && a.DailyBudgetUSD == b.DailyBudgetUSD && a.TaskMaxUSD == b.TaskMaxUSD && a.TaskMaxMinutes == b.TaskMaxMinutes &&
 		a.QueueMinutes == b.QueueMinutes && a.Runbook == b.Runbook
@@ -795,10 +864,13 @@ func (s *Server) serializeAgentWork(p *Project, row AgentWorkSetting) map[string
 		"lock_version":             row.LockVersion,
 		"updated_at":               updatedAt,
 	}
-	// Always present on a Flightdeck that has the setting; absent on one that
-	// predates it.
-	if s.agentWorkStore().autoMergeSupported {
+	// Each always present on a Flightdeck that has the setting; absent on one
+	// that predates it.
+	if s.agentWorkStore().knowsAutoMerge() {
 		out["auto_merge"] = row.AutoMerge
+	}
+	if s.agentWorkStore().knowsSendCIFailures() {
+		out["send_ci_failures"] = row.SendCIFailures
 	}
 	return out
 }

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.12.0...v0.12.1) (2026-10-21)
+
+
+### Fixed
+
+* build with Go 1.26.10 for GO-2026-6809 ([#54](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/54)) ([9ac1282](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/9ac128269ae6af75ce352adcde965f7e721d6e0c))
+
 ## [0.12.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.11.0...v0.12.0) (2026-10-20)
 
 

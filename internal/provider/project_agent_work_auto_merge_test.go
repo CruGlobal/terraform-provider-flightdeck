@@ -322,11 +322,13 @@ func TestProjectAgentWork_autoMergeOnAnOlderFlightdeckAtCreateWarns(t *testing.T
 		t.Fatalf("no create-time warning on agent_work.auto_merge; apply warnings: %s",
 			describeWithPaths(recorded.bySeverity(tfprotov6.DiagnosticSeverityWarning)))
 	}
-	// This Flightdeck is older than send_ci_failures too, but the
-	// configuration does not set it, so nothing may warn about it.
+	// This Flightdeck is older than send_ci_failures and wait_for_checks too,
+	// but the configuration sets neither, so nothing may warn about them.
 	for _, w := range recorded.bySeverity(tfprotov6.DiagnosticSeverityWarning) {
-		if strings.Contains(w.Summary, "send_ci_failures") {
-			t.Errorf("send_ci_failures was not sent, so nothing may warn about it: %s", w.Summary)
+		for _, key := range []string{"send_ci_failures", "wait_for_checks"} {
+			if strings.Contains(w.Summary, key) {
+				t.Errorf("%s was not sent, so nothing may warn about it: %s", key, w.Summary)
+			}
 		}
 	}
 }

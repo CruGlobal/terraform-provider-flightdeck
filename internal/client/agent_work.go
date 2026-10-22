@@ -31,7 +31,15 @@ type AgentWork struct {
 	// linked repository's CI workflows list. Like AutoMerge, a Flightdeck that
 	// knows the setting always reports true or false, and one older than it
 	// reads nil and refuses any write naming it as an unknown key.
-	SendCIFailures      *bool   `json:"send_ci_failures"`
+	SendCIFailures *bool `json:"send_ci_failures"`
+	// WaitForChecks says whether an agent waits for its pull request's CI
+	// checks, and fixes a failure itself, before it finishes. True by default:
+	// false asks the agent pool not to wait for CI on each pull request task,
+	// so the agent finishes once it has pushed and Flightdeck re-runs or
+	// follows up on a failed run itself. Like AutoMerge, a Flightdeck that
+	// knows the setting always reports true or false, and one older than it
+	// reads nil and refuses any write naming it as an unknown key.
+	WaitForChecks       *bool   `json:"wait_for_checks"`
 	LabelID             *int64  `json:"label_id"`
 	LabelChosenAt       *string `json:"label_chosen_at"`
 	AcceptMachineLabels bool    `json:"accept_machine_labels"`
@@ -65,6 +73,10 @@ func (aw *AgentWork) ReportsAutoMerge() bool { return aw.AutoMerge != nil }
 // the send_ci_failures setting: a read from one that does always has the key.
 func (aw *AgentWork) ReportsSendCIFailures() bool { return aw.SendCIFailures != nil }
 
+// ReportsWaitForChecks reports whether the Flightdeck that answered knows the
+// wait_for_checks setting: a read from one that does always has the key.
+func (aw *AgentWork) ReportsWaitForChecks() bool { return aw.WaitForChecks != nil }
+
 // AgentWorkBlocker is one reason Flightdeck would not send a project's work
 // right now. Code is a stable slug; Message says what is in the way.
 type AgentWorkBlocker struct {
@@ -92,13 +104,13 @@ var AgentWorkRunbooks = []string{"implement-work-item@1"}
 // a blank clears the choice. So a client must leave an unmanaged key out of
 // the write rather than send it empty.
 //
-// auto_merge and send_ci_failures are newer than the rest: a Flightdeck
-// older than either refuses any write naming it as an unknown key, so neither
-// must ever be sent unless asked for.
+// auto_merge, send_ci_failures and wait_for_checks are newer than the rest: a
+// Flightdeck older than any of them refuses any write naming it as an unknown
+// key, so none of them must ever be sent unless asked for.
 var AgentWorkSettingKeys = []string{
-	"enabled", "kinds", "auto_merge", "send_ci_failures", "label_id", "accept_machine_labels", "research_label_id",
-	"agent_account_id", "base_ref", "max_in_progress", "daily_budget_usd", "task_max_usd", "task_max_minutes",
-	"queue_minutes", "runbook",
+	"enabled", "kinds", "auto_merge", "send_ci_failures", "wait_for_checks", "label_id", "accept_machine_labels",
+	"research_label_id", "agent_account_id", "base_ref", "max_in_progress", "daily_budget_usd", "task_max_usd",
+	"task_max_minutes", "queue_minutes", "runbook",
 }
 
 const agentWorkRoot = "agent_work"

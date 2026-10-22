@@ -127,6 +127,8 @@ func TestProjectAgentWork_unconfiguredReadsTheDefaults(t *testing.T) {
 					resource.TestCheckResourceAttr(projectRes, "agent_work.kinds.#", "0"),
 					resource.TestCheckResourceAttr(projectRes, "agent_work.auto_merge", "false"),
 					resource.TestCheckResourceAttr(projectRes, "agent_work.send_ci_failures", "false"),
+					// The one switch that is on by default.
+					resource.TestCheckResourceAttr(projectRes, "agent_work.wait_for_checks", "true"),
 					resource.TestCheckResourceAttr(projectRes, "agent_work.base_ref", "main"),
 					resource.TestCheckResourceAttr(projectRes, "agent_work.max_in_progress", "1"),
 					resource.TestCheckResourceAttr(projectRes, "agent_work.daily_budget_usd", "10"),
@@ -1350,6 +1352,12 @@ func TestAgentWorkRefusedAt(t *testing.T) {
 			refusal(client.CodeInvalidAttribute, "unknown key: send_ci_failures (settable: enabled, kinds, auto_merge, "+
 				"label_id, accept_machine_labels, research_label_id, agent_account_id, base_ref, max_in_progress, "+
 				"daily_budget_usd, task_max_usd, task_max_minutes, queue_minutes, runbook)"), block, false},
+		// And for wait_for_checks, refused by a Flightdeck that has
+		// send_ci_failures but not wait_for_checks.
+		{"wait_for_checks refused by an older Flightdeck", client.Fields{"research_label_id": int64(9), "wait_for_checks": false},
+			refusal(client.CodeInvalidAttribute, "unknown key: wait_for_checks (settable: enabled, kinds, auto_merge, "+
+				"send_ci_failures, label_id, accept_machine_labels, research_label_id, agent_account_id, base_ref, "+
+				"max_in_progress, daily_budget_usd, task_max_usd, task_max_minutes, queue_minutes, runbook)"), block, false},
 		{"another setting refused", client.Fields{"research_label_id": int64(9), "task_max_usd": 20.0},
 			refusal(client.CodeValidationFailed, "Most a task may cost can't be more than the daily budget"), block, false},
 		{"the agent label refused", client.Fields{"label_id": int64(9)},
@@ -1407,7 +1415,7 @@ func TestAgentWorkFields_writePathMatchesSettingKeys(t *testing.T) {
 	kinds, _ := types.SetValueFrom(ctx, types.StringType, []string{"implement-work-item"})
 	fields := mustAgentWorkFields(t, agentWorkModel{
 		Enabled: types.BoolValue(true), Kinds: kinds, AutoMerge: types.BoolValue(false), SendCIFailures: types.BoolValue(false),
-		LabelID: types.Int64Value(7), LabelChosenAt: types.StringValue("2026-10-01T00:00:00Z"), AcceptMachineLabels: types.BoolValue(false),
+		WaitForChecks: types.BoolValue(true), LabelID: types.Int64Value(7), LabelChosenAt: types.StringValue("2026-10-01T00:00:00Z"), AcceptMachineLabels: types.BoolValue(false),
 		ResearchLabelID: types.Int64Value(9), ResearchLabelChosenAt: types.StringValue("2026-10-02T00:00:00Z"),
 		AgentAccountID: types.Int64Value(8), BaseRef: types.StringValue("main"), MaxInProgress: types.Int64Value(1),
 		DailyBudgetUSD: types.Float64Value(10), TaskMaxUSD: types.Float64Value(5), TaskMaxMinutes: types.Int64Value(30),
@@ -1526,6 +1534,35 @@ func TestAgentWorkFields_sendsOnlyConfiguredSettings(t *testing.T) {
 			name:  "both newer settings are sent together",
 			model: agentWorkModel{AutoMerge: types.BoolValue(true), SendCIFailures: types.BoolValue(true)},
 			want:  map[string]any{"auto_merge": true, "send_ci_failures": true},
+		},
+		{
+			// The default is true, so false is the value that changes anything.
+			name:  "wait_for_checks false is a value, and sent",
+			model: agentWorkModel{WaitForChecks: types.BoolValue(false)},
+			want:  map[string]any{"wait_for_checks": false},
+		},
+		{
+			name:  "wait_for_checks true is sent too",
+			model: agentWorkModel{WaitForChecks: types.BoolValue(true), MaxInProgress: types.Int64Value(2)},
+			want:  map[string]any{"wait_for_checks": true, "max_in_progress": int64(2)},
+		},
+		{
+			// Like the other newer settings: an older Flightdeck refuses the key
+			// whatever its value, so an unset wait_for_checks is never sent, not
+			// even as null.
+			name:  "an unset wait_for_checks is left out",
+			model: agentWorkModel{WaitForChecks: types.BoolNull(), Enabled: types.BoolValue(false)},
+			want:  map[string]any{"enabled": false},
+		},
+		{
+			name:  "a wait_for_checks not known until apply is left out",
+			model: agentWorkModel{WaitForChecks: types.BoolUnknown(), Enabled: types.BoolValue(false)},
+			want:  map[string]any{"enabled": false},
+		},
+		{
+			name:  "all three newer settings are sent together",
+			model: agentWorkModel{AutoMerge: types.BoolValue(true), SendCIFailures: types.BoolValue(true), WaitForChecks: types.BoolValue(false)},
+			want:  map[string]any{"auto_merge": true, "send_ci_failures": true, "wait_for_checks": false},
 		},
 		{
 			name:  "money is sent as a number",
@@ -1691,7 +1728,7 @@ func TestWarnAgentWorkBlockers(t *testing.T) {
 func TestPlanAgentWorkComputed(t *testing.T) {
 	ctx := context.Background()
 	prior := &agentWorkModel{Enabled: types.BoolValue(false), AutoMerge: types.BoolValue(false), SendCIFailures: types.BoolValue(false),
-		LabelID: types.Int64Value(7), MaxInProgress: types.Int64Value(1),
+		WaitForChecks: types.BoolValue(true), LabelID: types.Int64Value(7), MaxInProgress: types.Int64Value(1),
 		DailyBudgetUSD: types.Float64Value(12.34), LabelChosenAt: types.StringValue("2026-10-01T00:00:00Z"),
 		ResearchLabelID: types.Int64Value(9), ResearchLabelChosenAt: types.StringValue("2026-10-02T00:00:00Z"), LockVersion: types.Int64Value(3)}
 	cases := []struct {
@@ -1705,6 +1742,8 @@ func TestPlanAgentWorkComputed(t *testing.T) {
 		{name: "auto_merge is not known yet", plan: with(*prior, func(m *agentWorkModel) { m.AutoMerge = types.BoolUnknown() }), wantLabel: true, wantResearch: true},
 		{name: "send_ci_failures changes", plan: with(*prior, func(m *agentWorkModel) { m.SendCIFailures = types.BoolValue(true) }), wantLabel: true, wantResearch: true},
 		{name: "send_ci_failures is not known yet", plan: with(*prior, func(m *agentWorkModel) { m.SendCIFailures = types.BoolUnknown() }), wantLabel: true, wantResearch: true},
+		{name: "wait_for_checks changes", plan: with(*prior, func(m *agentWorkModel) { m.WaitForChecks = types.BoolValue(false) }), wantLabel: true, wantResearch: true},
+		{name: "wait_for_checks is not known yet", plan: with(*prior, func(m *agentWorkModel) { m.WaitForChecks = types.BoolUnknown() }), wantLabel: true, wantResearch: true},
 		{name: "the label changes", plan: with(*prior, func(m *agentWorkModel) { m.LabelID = types.Int64Value(8) }), wantResearch: true},
 		{name: "the label is not known yet", plan: with(*prior, func(m *agentWorkModel) { m.LabelID = types.Int64Unknown() }), wantResearch: true},
 		{name: "the research label changes", plan: with(*prior, func(m *agentWorkModel) { m.ResearchLabelID = types.Int64Value(10) }), wantLabel: true},

@@ -14,7 +14,7 @@ import (
 func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
 		s.stores["agent_work"] = &agentWorkStore{
-			enabled: true, release: AgentWorkWithSendCIFailures,
+			enabled: true, release: AgentWorkWithWaitForChecks,
 			byProject: map[int64]*AgentWorkSetting{}, extraBlockers: map[int64][]AgentWorkBlocker{},
 		}
 		mux.HandleFunc("GET /api/v1/projects/{project_id}/agent-work", s.showAgentWork)
@@ -34,7 +34,11 @@ type AgentWorkSetting struct {
 	// SendCIFailures sends each item Flightdeck files for a failed CI run to
 	// an agent without a person adding the agent label. Off by default, and
 	// never a blocker.
-	SendCIFailures      bool
+	SendCIFailures bool
+	// WaitForChecks has an agent wait for its pull request's CI checks, and fix
+	// a failure itself, before it finishes. ON by default, unlike the other
+	// switches, and never a blocker.
+	WaitForChecks       bool
 	LabelID             *int64
 	LabelChosenAt       *time.Time
 	AcceptMachineLabels bool
@@ -90,19 +94,24 @@ func (s *Server) SetAgentWorkEndpoint(on bool) {
 }
 
 // AgentWorkRelease is a Flightdeck release the agent-work endpoint can act
-// as, oldest first. Flightdeck added auto_merge, then send_ci_failures, and a
-// release knows every setting added up to it, so a Flightdeck older than
-// auto_merge is older than send_ci_failures too. No release knows
-// send_ci_failures without auto_merge, and the fake cannot be made to.
+// as, oldest first. Flightdeck added auto_merge, then send_ci_failures, then
+// wait_for_checks, and a release knows every setting added up to it, so a
+// Flightdeck older than auto_merge is older than the other two as well. No
+// release knows a setting without the ones added before it, and the fake
+// cannot be made to.
 type AgentWorkRelease int
 
 const (
-	// AgentWorkBeforeAutoMerge knows neither auto_merge nor send_ci_failures.
+	// AgentWorkBeforeAutoMerge knows none of auto_merge, send_ci_failures and
+	// wait_for_checks.
 	AgentWorkBeforeAutoMerge AgentWorkRelease = iota
-	// AgentWorkWithAutoMerge knows auto_merge but not send_ci_failures.
+	// AgentWorkWithAutoMerge knows auto_merge only.
 	AgentWorkWithAutoMerge
-	// AgentWorkWithSendCIFailures knows both. The fake starts here.
+	// AgentWorkWithSendCIFailures knows auto_merge and send_ci_failures, but
+	// not wait_for_checks.
 	AgentWorkWithSendCIFailures
+	// AgentWorkWithWaitForChecks knows all three. The fake starts here.
+	AgentWorkWithWaitForChecks
 )
 
 // SetAgentWorkRelease makes the agent-work endpoint act as the given
@@ -114,11 +123,11 @@ func (s *Server) SetAgentWorkRelease(release AgentWorkRelease) {
 }
 
 // SetAgentWorkAutoMergeSupported moves the fake across the release that
-// added auto_merge. false makes it older than that release, so it knows
-// neither auto_merge nor send_ci_failures, as a real Flightdeck older than
-// auto_merge does. true makes it at least that release: one older is
-// upgraded to it (auto_merge, still no send_ci_failures), and a newer one is
-// left as it is.
+// added auto_merge. false makes it older than that release, so it knows none
+// of the newer settings, as a real Flightdeck older than auto_merge does. true
+// makes it at least that release: one older is upgraded to it (auto_merge,
+// still no send_ci_failures or wait_for_checks), and a newer one is left as it
+// is.
 func (s *Server) SetAgentWorkAutoMergeSupported(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -132,19 +141,38 @@ func (s *Server) SetAgentWorkAutoMergeSupported(on bool) {
 }
 
 // SetAgentWorkSendCIFailuresSupported moves the fake across the release that
-// added send_ci_failures. false makes it older than that release: the newest
-// becomes the release with auto_merge but not send_ci_failures, and one older
-// than auto_merge stays so. true makes it the newest, which knows auto_merge
-// too.
+// added send_ci_failures. false makes it older than that release: a newer one
+// becomes the release with auto_merge but not send_ci_failures (nor
+// wait_for_checks), and one older than auto_merge stays so. true makes it at
+// least that release: one older is upgraded to it (auto_merge and
+// send_ci_failures, still no wait_for_checks), and the newest is left as it
+// is.
 func (s *Server) SetAgentWorkSendCIFailuresSupported(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.agentWorkStore()
 	switch {
-	case on:
+	case on && st.release < AgentWorkWithSendCIFailures:
 		st.release = AgentWorkWithSendCIFailures
-	case st.release > AgentWorkWithAutoMerge:
+	case !on && st.release > AgentWorkWithAutoMerge:
 		st.release = AgentWorkWithAutoMerge
+	}
+}
+
+// SetAgentWorkWaitForChecksSupported moves the fake across the release that
+// added wait_for_checks. false makes it older than that release: the newest
+// becomes the release with send_ci_failures but not wait_for_checks, and an
+// older one stays as it is. true makes it the newest, which knows auto_merge
+// and send_ci_failures too.
+func (s *Server) SetAgentWorkWaitForChecksSupported(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.agentWorkStore()
+	switch {
+	case on:
+		st.release = AgentWorkWithWaitForChecks
+	case st.release > AgentWorkWithSendCIFailures:
+		st.release = AgentWorkWithSendCIFailures
 	}
 }
 
@@ -157,6 +185,12 @@ func (st *agentWorkStore) knowsAutoMerge() bool {
 // send_ci_failures.
 func (st *agentWorkStore) knowsSendCIFailures() bool {
 	return st.release >= AgentWorkWithSendCIFailures
+}
+
+// knowsWaitForChecks reports whether the release the fake acts as has
+// wait_for_checks.
+func (st *agentWorkStore) knowsWaitForChecks() bool {
+	return st.release >= AgentWorkWithWaitForChecks
 }
 
 // SetAgentWorkPoolConnected controls the pool_not_connected blocker. The fake
@@ -218,7 +252,7 @@ func (s *Server) SetAgentWorkOutOfBand(projectID int64, fn func(*AgentWorkSettin
 
 func defaultAgentWork() AgentWorkSetting {
 	return AgentWorkSetting{
-		Kinds: []string{}, BaseRef: "main", MaxInProgress: 1, DailyBudgetUSD: 10, TaskMaxUSD: 5,
+		Kinds: []string{}, WaitForChecks: true, BaseRef: "main", MaxInProgress: 1, DailyBudgetUSD: 10, TaskMaxUSD: 5,
 		TaskMaxMinutes: 30, QueueMinutes: 60, Runbook: "implement-work-item@1",
 	}
 }
@@ -236,12 +270,12 @@ var (
 	agentWorkKinds    = []string{agentWorkImplement, agentWorkFixError, agentWorkResearch}
 	agentWorkRunbooks = []string{"implement-work-item@1"}
 	// agentWorkWritable are the settable keys in the API's order (the settings
-	// page's). writableKeys leaves auto_merge and send_ci_failures out on a
-	// Flightdeck older than each.
+	// page's). writableKeys leaves auto_merge, send_ci_failures and
+	// wait_for_checks out on a Flightdeck older than each.
 	agentWorkWritable = []string{
-		"enabled", "kinds", "auto_merge", "send_ci_failures", "label_id", "accept_machine_labels", "research_label_id",
-		"agent_account_id", "base_ref", "max_in_progress", "daily_budget_usd", "task_max_usd", "task_max_minutes",
-		"queue_minutes", "runbook",
+		"enabled", "kinds", "auto_merge", "send_ci_failures", "wait_for_checks", "label_id", "accept_machine_labels",
+		"research_label_id", "agent_account_id", "base_ref", "max_in_progress", "daily_budget_usd", "task_max_usd",
+		"task_max_minutes", "queue_minutes", "runbook",
 	}
 	agentWorkReadOnly = map[string]string{
 		"project_id":      "it is the :project_id in the path, and a project's agent work settings belong to that project",
@@ -260,7 +294,8 @@ var (
 func (st *agentWorkStore) writableKeys() []string {
 	out := make([]string, 0, len(agentWorkWritable))
 	for _, key := range agentWorkWritable {
-		if (key == "auto_merge" && !st.knowsAutoMerge()) || (key == "send_ci_failures" && !st.knowsSendCIFailures()) {
+		if (key == "auto_merge" && !st.knowsAutoMerge()) || (key == "send_ci_failures" && !st.knowsSendCIFailures()) ||
+			(key == "wait_for_checks" && !st.knowsWaitForChecks()) {
 			continue
 		}
 		out = append(out, key)
@@ -426,7 +461,7 @@ func agentWorkValue(key string, v any) (any, string) {
 		return agentWorkNoOpinion{}, ""
 	}
 	switch key {
-	case "enabled", "accept_machine_labels", "auto_merge", "send_ci_failures":
+	case "enabled", "accept_machine_labels", "auto_merge", "send_ci_failures", "wait_for_checks":
 		if b, ok := v.(bool); ok {
 			return b, ""
 		}
@@ -520,8 +555,8 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 		return current, false, http.StatusUnprocessableEntity, "invalid_attribute", strings.Join(readOnly, "; ")
 	}
 	// An older Flightdeck's unknown-key check comes before any value check, so
-	// it refuses auto_merge or send_ci_failures whatever its value, a blank
-	// included.
+	// it refuses auto_merge, send_ci_failures or wait_for_checks whatever its
+	// value, a blank included.
 	writable := s.agentWorkStore().writableKeys()
 	var unknown []string
 	for key := range submitted {
@@ -580,6 +615,8 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 				next.AutoMerge = t
 			case "send_ci_failures":
 				next.SendCIFailures = t
+			case "wait_for_checks":
+				next.WaitForChecks = t
 			default:
 				next.AcceptMachineLabels = t
 			}
@@ -746,7 +783,8 @@ func agentWorkEqual(a, b AgentWorkSetting) bool {
 			return false
 		}
 	}
-	return a.Enabled == b.Enabled && a.AutoMerge == b.AutoMerge && a.SendCIFailures == b.SendCIFailures && sameID(a.LabelID, b.LabelID) && a.AcceptMachineLabels == b.AcceptMachineLabels &&
+	return a.Enabled == b.Enabled && a.AutoMerge == b.AutoMerge && a.SendCIFailures == b.SendCIFailures && a.WaitForChecks == b.WaitForChecks &&
+		sameID(a.LabelID, b.LabelID) && a.AcceptMachineLabels == b.AcceptMachineLabels &&
 		sameID(a.ResearchLabelID, b.ResearchLabelID) && sameID(a.AgentAccountID, b.AgentAccountID) &&
 		a.BaseRef == b.BaseRef && a.MaxInProgress == b.MaxInProgress && a.DailyBudgetUSD == b.DailyBudgetUSD && a.TaskMaxUSD == b.TaskMaxUSD && a.TaskMaxMinutes == b.TaskMaxMinutes &&
 		a.QueueMinutes == b.QueueMinutes && a.Runbook == b.Runbook
@@ -871,6 +909,9 @@ func (s *Server) serializeAgentWork(p *Project, row AgentWorkSetting) map[string
 	}
 	if s.agentWorkStore().knowsSendCIFailures() {
 		out["send_ci_failures"] = row.SendCIFailures
+	}
+	if s.agentWorkStore().knowsWaitForChecks() {
+		out["wait_for_checks"] = row.WaitForChecks
 	}
 	return out
 }

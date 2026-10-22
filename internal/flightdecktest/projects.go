@@ -58,6 +58,9 @@ type Project struct {
 	TerraformManaged bool
 	// SelfHealing holds the stored jsonb overrides; reads resolve defaults.
 	SelfHealing map[string]any
+	// AutoPromote holds the stored auto-promote settings, under the stored
+	// keys (see auto_promote.go); reads resolve defaults.
+	AutoPromote map[string]any
 	// Slack channel configuration, all on the project row (see
 	// slack_channel.go). SlackEventFilter holds the stored overrides only, and
 	// the notifications master switch is the "slack" key of Features.

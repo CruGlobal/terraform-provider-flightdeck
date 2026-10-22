@@ -73,6 +73,34 @@ resource "flightdeck_project" "payments" {
   }
 }
 
+# Auto-promote (workspace owners and admins only) lets Flightdeck promote a
+# project's release candidates to production by itself once every check
+# passes. It needs auto-rollback as its safety net, and it goes to Flightdeck
+# in the same request as self_healing. Each window part you set replaces only
+# that part.
+resource "flightdeck_project" "storefront" {
+  name       = "Storefront"
+  identifier = "STORE"
+
+  self_healing = {
+    feature_enabled = true
+    rollback        = "auto"
+  }
+
+  auto_promote = {
+    mode           = "deps_only" # only when every waiting change is a Dependabot update
+    soak_hours     = 24
+    heads_up_hours = 4
+    window = {
+      days      = ["mon", "tue", "wed", "thu"]
+      start     = "09:00"
+      end       = "15:00"
+      time_zone = "America/Chicago"
+    }
+    freeze_dates = ["2030-12-24", "2030-12-31"] # [] clears the list
+  }
+}
+
 # A project's Slack channel (project admins). Provisioning is asynchronous:
 # enabling the channel enqueues the job, and `channel_id` and
 # `provision_status` are filled in once it has run.
@@ -183,6 +211,13 @@ The endpoint merges, so this block only ever sends what you configure, and a set
 These settings have their own `lock_version`, separate from the project's: a write here never conflicts with a project update and does not bump the project's `lock_version`. (see [below for nested schema](#nestedatt--agent_work))
 - `app` (String) The deployed app this project belongs to, as the deploy pipeline's release events name it: the app's GitHub repository name, 1 to 100 letters, digits, `.`, `_` or `-`. One project is one app, and within a workspace an app belongs to at most one project (compared ignoring case), so an app another project already has fails the apply (`app_taken`). Setting or changing it needs a **workspace owner or admin** token, even where the token could otherwise update the project. When unset, the project's current app is kept: the first release event that names an app binds the project to it, so leaving this unset leaves the binding to the pipeline. The API can set or change `app` but never clear it (a workspace admin can, in Flightdeck's project settings), so removing it from configuration does not unbind the project. That first binding bumps the project's `lock_version`, so an apply racing it fails once with a lock conflict; run `terraform plan` again and re-apply.
 - `archived` (Boolean) Whether the project is archived. New projects are not archived. When unset, the project's current value is kept (so importing an archived project does not unarchive it).
+- `auto_promote` (Attributes) Auto-promote settings: whether Flightdeck promotes this project's release candidates to production by itself, and when it may. They are written through the project's `self-healing` API resource, beside `self_healing.rollback`, because auto-rollback is auto-promote's safety net, so reading and writing them requires the token's user to be a **workspace owner or admin**; for other tokens the attribute is null. When an apply changes both `self_healing` and `auto_promote`, they go to Flightdeck in one request, which Flightdeck checks whole before it saves anything.
+
+Auto-promote is off until `mode` turns it on. A plan that turns it on carries a warning saying so. While it is on, each thing that stops Flightdeck promoting right now (the API's `auto_promote_blockers`, such as auto-rollback not being on, or anything that would stop auto-rollback) is shown as a warning on refresh and after apply rather than stored, because it changes as the project does. A Flightdeck that can't promote yet lists `not_yet_available` for every project; the settings are saved there and take effect once promoting ships.
+
+The endpoint merges, so this attribute only ever sends what you configure, including each part of `window` on its own, and a setting you never name keeps whatever the project has. Each one you leave unset follows Flightdeck's default until someone sets it. A write here bumps the project's `lock_version`.
+
+Needs a Flightdeck that supports auto-promote. On an older one the attribute reads as null, and setting anything in it fails with an error that asks you to upgrade Flightdeck. (see [below for nested schema](#nestedatt--auto_promote))
 - `description` (String) Free-text description. Removing it from configuration clears it.
 - `emoji` (String) Emoji shown next to the project name. Defaults to the server's default (📁).
 - `features` (Map of Boolean) Feature toggles to manage, as a map of feature key to boolean. Only the keys listed here are managed; keys you leave out keep whatever value the project has. Settable keys: `cycles`, `epics`, `milestones`, `views`, `pages`, `meeting_notes`, `decisions`, `intake`, `errors`, `incidents`, `estimates`. `modules` is the old name of `epics`: it still works, with a deprecation warning, and is sent as `epics`; rename it. `self_healing` and `slack` are reported by the `flightdeck_project` data source and refused here, because each is settable on its own endpoint: self-healing through the `self_healing` block, and `slack` — the Slack notifications master switch — as `slack_channel.notifications_enabled`.
@@ -203,7 +238,7 @@ Once the check passes, Flightdeck saves the configuration and enqueues a job tha
 Nothing provisions at all when `available` is false (the workspace has no connected Slack integration) or `scopes_sufficient` is false (the connection predates the channel scopes). Both are fixed by re-authorizing Slack under Settings → Integrations, which the API cannot do; the provider warns rather than failing, since the configuration is still stored.
 
 A write here bumps the project's `lock_version`. Attributes map onto the API's keys by dropping the `slack_` prefix (`enabled` is `slack_channel_enabled`, `mode` is `slack_channel_mode`, `notifications_enabled` is `slack_notifications_enabled`, `name` is `slack_channel_name`, `event_filter` is `slack_event_filter`). (see [below for nested schema](#nestedatt--slack_channel))
-- `terraform_managed` (Boolean) Whether Terraform manages this project's settings. While it is `true`, Flightdeck's web app makes the settings Terraform owns read only (name, identifier, description, emoji, lead, visibility, deployed app, feature toggles, the Slack channel and agent work settings) and turns off archiving and restoring the project, and Flightdeck's MCP tools refuse to change them, because a change made by hand would be undone by the next apply. Flightdeck's API, which this provider uses, still writes everything. Members, states, labels and the rest stay editable in the app. Defaults to `true`; set it to `false` to leave the project editable in the app.
+- `terraform_managed` (Boolean) Whether Terraform manages this project's settings. While it is `true`, Flightdeck's web app makes the settings Terraform owns read only (name, identifier, description, emoji, lead, visibility, deployed app, feature toggles, the Slack channel, and the agent work and auto-promote settings) and turns off archiving and restoring the project, and Flightdeck's MCP tools refuse to change them, because a change made by hand would be undone by the next apply. Flightdeck's API, which this provider uses, still writes everything. Members, states, labels and the rest stay editable in the app. Defaults to `true`; set it to `false` to leave the project editable in the app.
 
 Setting or changing it needs a token whose user is a **workspace owner or admin**, on a create too. Sending the value Flightdeck already has is fine for any token, so a token that is not an owner or admin can still update a project whose flag already matches the configuration. Such a token can create a project only with `terraform_managed = false`. To leave an existing project's flag as it is, add `lifecycle { ignore_changes = [terraform_managed] }` to it.
 
@@ -255,6 +290,29 @@ Read-Only:
 - `label_chosen_at` (String) When `label_id` was last set to a label (RFC 3339), or null while none is chosen. Only a label a person adds after this time counts, so renaming an old label to the agent label brings none of its items along. Read-only: Flightdeck sets it whenever `label_id` changes.
 - `lock_version` (Number) Optimistic-locking version of these settings, separate from the project's. 0 while the project's settings were never saved. Sent as `If-Match` on every write here.
 - `research_label_chosen_at` (String) When `research_label_id` was last set to a label (RFC 3339), or null while none is chosen. Only a label a person adds after this time counts. Read-only: Flightdeck sets it whenever `research_label_id` changes.
+
+
+<a id="nestedatt--auto_promote"></a>
+### Nested Schema for `auto_promote`
+
+Optional:
+
+- `freeze_dates` (Set of String) Days Flightdeck never promotes on, as ISO dates such as `"2026-12-24"`, at most 100. A date that has passed stays until you remove it, so it never shows as drift. `[]` clears the list. When unset, the project's current dates are kept.
+- `heads_up_hours` (Number) How long before a promote Flightdeck posts a heads-up in the project's Slack channel, so someone can hold it, in hours (default 4). A whole number from 1 to 72. When unset, the project's current value is kept.
+- `mode` (String) Whether Flightdeck promotes release candidates by itself: `"off"` (the default) never does, `"deps_only"` promotes only when every change waiting for production is a Dependabot update, and `"all"` promotes any release candidate that passes every check. A plan that moves it away from `"off"` carries a warning. A blocked mode is still accepted: the blockers are shown as warnings instead. Flightdeck posts each change of mode to Slack (the project's channel, or the workspace's for a project that isn't private). When unset, the project's current mode is kept, so removing `mode`, or the whole `auto_promote` block, does not turn auto-promote off: set it to `"off"`. A plan that leaves it unset while it is on warns that it stays on.
+- `soak_hours` (Number) How long a release candidate must run on stage before it may be promoted, in hours (default 24). A whole number from 4 to 720. When unset, the project's current value is kept.
+- `window` (Attributes) When a promote may start. The default is Monday to Friday, 09:00 to 16:00, `America/New_York`. Each part is sent only when configured, and Flightdeck merges it into the window the project has, then checks the window as a whole, so setting only `start` can still be refused for the `end` the project already has. A plan that sets both checks that `start` comes first. One that sets only one checks it against the other: on a new project that is Flightdeck's default window, and a window that would not fit fails the plan; on an existing project it is the value stored at the last refresh, and a mismatch is a warning. When unset, the project's current window is kept. (see [below for nested schema](#nestedatt--auto_promote--window))
+
+<a id="nestedatt--auto_promote--window"></a>
+### Nested Schema for `auto_promote.window`
+
+Optional:
+
+- `days` (Set of String) The days of the week a promote may start on: at least one of `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`. When unset, the current days are kept.
+- `end` (String) When the window closes each day, as 24-hour `HH:MM` with two-digit hours, up to `24:00`, which is the end of the day. It must come after `start`. When unset, the current end is kept.
+- `start` (String) When the window opens each day, as 24-hour `HH:MM` with two-digit hours, from `00:00` to `23:59`. It must come before `end`, since a window can't run past midnight. When unset, the current start is kept.
+- `time_zone` (String) The time zone `start` and `end` are in, as an IANA name spelled exactly, such as `America/New_York` (not `Eastern Time (US & Canada)`). Flightdeck checks the name. When unset, the current time zone is kept.
+
 
 
 <a id="nestedatt--self_healing"></a>

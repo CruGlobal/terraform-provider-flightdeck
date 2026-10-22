@@ -23,6 +23,21 @@ type SelfHealing struct {
 	GloballyDisarmed bool              `json:"globally_disarmed"`
 	Config           SelfHealingConfig `json:"config"`
 	LockVersion      int64             `json:"lock_version"`
+	// AutoPromote is the auto-promote mode (AutoPromoteOff, AutoPromoteDepsOnly
+	// or AutoPromoteAll). It and the four settings after it ride beside
+	// `rollback`, outside `config`, resolved against their defaults. All five
+	// are nil on a Flightdeck that predates auto-promote, which refuses a
+	// write naming any of them as an unknown setting.
+	AutoPromote   *string        `json:"auto_promote"`
+	SoakHours     *int64         `json:"soak_hours"`
+	PromoteWindow *PromoteWindow `json:"promote_window"`
+	// FreezeDates are ISO dates (YYYY-MM-DD), sorted.
+	FreezeDates  []string `json:"freeze_dates"`
+	HeadsUpHours *int64   `json:"heads_up_hours"`
+	// AutoPromoteBlockers lists what would stop auto-promote on this project
+	// right now, in every mode. It passes every rollback blocker through,
+	// because auto-rollback is auto-promote's safety net. Read-only.
+	AutoPromoteBlockers []AutoPromoteBlocker `json:"auto_promote_blockers"`
 	// WritableSettings is the endpoint's own list of what it accepts on a
 	// write. It is reported so the provider's idea of that set can be checked
 	// against the API's rather than only asserted in a comment.
@@ -35,6 +50,43 @@ type RollbackBlocker struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
+
+// AutoPromoteBlocker is one reason auto-promote could not act right now, in
+// the same shape as RollbackBlocker.
+type AutoPromoteBlocker struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// PromoteWindow is when auto-promote may start a promote: the days of the
+// week (in PromoteWindowDays order), a start and an end as 24-hour "HH:MM"
+// (the end may be "24:00"), and the IANA time zone they are in.
+type PromoteWindow struct {
+	Days     []string `json:"days"`
+	Start    string   `json:"start"`
+	End      string   `json:"end"`
+	TimeZone string   `json:"time_zone"`
+}
+
+// The auto-promote modes. Off never promotes; deps_only promotes only when
+// every change waiting for production is a Dependabot update; all promotes
+// any release candidate that passes every check.
+const (
+	AutoPromoteOff      = "off"
+	AutoPromoteDepsOnly = "deps_only"
+	AutoPromoteAll      = "all"
+)
+
+// AutoPromoteModes are the values the API accepts for `auto_promote`.
+var AutoPromoteModes = []string{AutoPromoteOff, AutoPromoteDepsOnly, AutoPromoteAll}
+
+// PromoteWindowDays are the days a promote window may name, in the order the
+// API stores and reads them.
+var PromoteWindowDays = []string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+
+// ReportsAutoPromote reports whether the Flightdeck that answered knows the
+// auto-promote settings: a read from one that does always has the mode.
+func (sh *SelfHealing) ReportsAutoPromote() bool { return sh.AutoPromote != nil }
 
 // The two modes of the self-healing loop. In report only it notes what it
 // would do and never touches production; in auto-rollback it rolls production
@@ -111,6 +163,13 @@ var SelfHealingThresholdKeys = []string{
 // deliberately absent: the mode is set through "rollback".
 var SelfHealingSwitchKeys = []string{"feature_enabled", "rollback", "count_browser_errors"}
 
+// SelfHealingAutoPromoteKeys are the auto-promote settings, which the
+// endpoint takes beside the switches, in the order the API lists them. As
+// for a switch, null or blank is "no opinion" for each of them, and for each
+// part of promote_window. The endpoint's full writable set is these plus
+// SelfHealingSwitchKeys plus SelfHealingThresholdKeys.
+var SelfHealingAutoPromoteKeys = []string{"auto_promote", "soak_hours", "promote_window", "freeze_dates", "heads_up_hours"}
+
 const selfHealingRoot = "self_healing"
 
 func selfHealingPath(projectID int64) string {
@@ -123,9 +182,10 @@ func (c *Client) GetSelfHealing(ctx context.Context, projectID int64) (*SelfHeal
 	return GetResource[*SelfHealing](ctx, c, selfHealingPath(projectID), selfHealingRoot)
 }
 
-// UpdateSelfHealing PATCHes writable settings (the thresholds and the
-// switches, never `armed`) under an If-Match carrying the PROJECT's
-// lock_version.
+// UpdateSelfHealing PATCHes writable settings (the thresholds, the switches
+// and the auto-promote settings, never `armed`) under an If-Match carrying the
+// PROJECT's lock_version. Flightdeck checks the whole request before it saves
+// anything, so the settings of both blocks go in one write.
 //
 // The endpoint MERGES: a key that is absent keeps its stored value, so a write
 // only ever changes what it names. A threshold sent as JSON null drops the

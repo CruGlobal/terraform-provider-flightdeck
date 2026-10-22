@@ -28,7 +28,7 @@ project, not to infrastructure code.
 
 | Resource | Manages |
 | --- | --- |
-| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing configuration, Slack channel configuration, agent work settings, and whether Terraform manages it (`terraform_managed`, which makes the name, identifier, description, emoji, lead, visibility, deployed app, feature toggles, Slack channel and agent work settings read only in Flightdeck's app and turns off archive and restore there; self-healing stays editable); reports the (read-only) GitHub repository link. |
+| `flightdeck_project` | A project: name, identifier, description, emoji, archived flag, lead, visibility, feature toggles, self-healing configuration, auto-promote settings, Slack channel configuration, agent work settings, and whether Terraform manages it (`terraform_managed`, which makes the name, identifier, description, emoji, lead, visibility, deployed app, feature toggles, Slack channel, agent work and auto-promote settings read only in Flightdeck's app and turns off archive and restore there; self-healing stays editable); reports the (read-only) GitHub repository link. |
 | `flightdeck_state` | A workflow state within a project (name, group, color, default, position). |
 | `flightdeck_label` | A label within a project. |
 | `flightdeck_project_member` | A user's membership of a project (by membership id) and their role. |
@@ -159,10 +159,11 @@ Every project `flightdeck_project` manages is marked `terraform_managed`
 unless its configuration says `terraform_managed = false`. While the flag
 is on, Flightdeck's web app shows the settings Terraform owns as read only
 (name, identifier, description, emoji, lead, visibility, deployed app,
-feature toggles, the Slack channel and agent work settings) and turns off
-archiving and restoring the project, and its MCP tools refuse to change
-them. A change made there would only be undone by the next apply.
-Flightdeck's API, which the provider uses, still writes everything.
+feature toggles, the Slack channel, and the agent work and auto-promote
+settings) and turns off archiving and restoring the project, and its MCP
+tools refuse to change them. A change made there would only be undone by
+the next apply. Flightdeck's API, which the provider uses, still writes
+everything.
 
 - **The token needs a workspace owner or admin** to set or change the
   flag, on a create too. Sending back the value Flightdeck already has is

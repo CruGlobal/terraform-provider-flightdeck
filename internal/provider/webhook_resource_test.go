@@ -202,7 +202,7 @@ func TestWebhook_staleWriteAndHeaders(t *testing.T) {
 				Config: webhookConfig(env, `
   url    = "https://ci.example.com/hooks/b"
   events = ["project.updated"]`),
-				ExpectError: regexMust(`(?s)Webhook \d+ modified outside of Terraform.*state\s+has lock_version 0, the server now has 1`),
+				ExpectError: regexMust(`(?s)Webhook \d+ modified outside of Terraform.*state\s+has\s+lock_version\s+0,\s+the\s+server\s+now\s+has\s+1`),
 			},
 		},
 	})

@@ -49,6 +49,7 @@ var liveReady = map[string]bool{
 	"pagerduty_integration": true,
 	"webhook":               true,
 	"self_healing":          true,
+	"auto_promote":          true,
 	"slack_channel":         true,
 	"github_integration":    true,
 	"workspace_member":      true,

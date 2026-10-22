@@ -432,6 +432,11 @@ func warnRollbackBlockers(sh *client.SelfHealing, identifier string, diags *diag
 	if sh == nil || sh.RollbackMode() != client.RollbackAuto {
 		return
 	}
+	// warnAutoPromoteBlockers does not repeat these, so say it here.
+	alsoStopsAutoPromote := ""
+	if autoPromoteOn(sh) {
+		alsoStopsAutoPromote = " It stops auto-promote too, which needs auto-rollback as its safety net."
+	}
 	seen := map[string]int{}
 	for _, b := range sh.RollbackBlockers {
 		seen[b.Code]++
@@ -441,8 +446,8 @@ func warnRollbackBlockers(sh *client.SelfHealing, identifier string, diags *diag
 		}
 		diags.AddAttributeWarning(path.Root("self_healing").AtName("rollback"), summary,
 			b.Message+"\n\nThis project is set to auto-rollback, and this is one of the things that would stop it "+
-				"acting now. Flightdeck checks again with every deploy, so this is reported on each refresh and "+
-				"apply rather than stored in state.")
+				"acting now."+alsoStopsAutoPromote+" Flightdeck checks again with every deploy, so this is reported on "+
+				"each refresh and apply rather than stored in state.")
 	}
 }
 
@@ -537,54 +542,239 @@ func readSelfHealing(ctx context.Context, c *client.Client, projectID int64, dia
 	return selfHealingToObject(sh, diags), sh
 }
 
-// writeSelfHealing PATCHes the configured settings (if any) with the
-// project's current lock_version and returns the block plus the project's
-// new lock_version. With no configured block it just reads. Either way, the
-// result's rollback blockers are reported as warnings while the mode is
-// "auto"; identifier names the project in them.
-func writeSelfHealing(ctx context.Context, c *client.Client, projectID int64, identifier string, configBlock types.Object, lockVersion int64, diags *diag.Diagnostics) (types.Object, int64) {
+// selfHealingWrite is what writeSelfHealing leaves: the self_healing and
+// auto_promote attributes, and the project's lock_version after the write.
+type selfHealingWrite struct {
+	selfHealing types.Object
+	autoPromote types.Object
+	lockVersion int64
+}
+
+// writeSelfHealing PATCHes the configured self_healing and auto_promote
+// settings (if any) in ONE request, with the project's current lock_version,
+// and returns both attributes plus the project's new lock_version. The
+// auto-promote settings ride the same endpoint, Flightdeck checks the whole
+// request before it saves anything, and both share the project's
+// lock_version, so a second request would only add a second chance to fail
+// halfway. With nothing configured it just reads. Either way, the result's
+// rollback blockers are reported as warnings while the mode is "auto", and
+// its auto-promote blockers while auto-promote is on; identifier names the
+// project in them. selfHealingPlanned and autoPromotePlanned are the planned
+// attributes, whose values the result keeps for whatever the configuration
+// leaves unset (keepUnconfiguredAsPlanned).
+//
+// A block the configuration names, even one that sets nothing (`{}`, or every
+// setting null), must come back from Flightdeck. One it cannot read (403, or
+// 404 with no endpoint) or does not have (a Flightdeck without auto-promote)
+// fails the apply with the error a refused write gives, rather than reading
+// as null: the next plan would add it again, on every run. A block the
+// configuration leaves out reads as null with nothing said, as on a refresh.
+func writeSelfHealing(ctx context.Context, c *client.Client, projectID int64, identifier string, configBlock, selfHealingPlanned, autoPromoteConfig, autoPromotePlanned types.Object, lockVersion int64, diags *diag.Diagnostics) selfHealingWrite {
+	failed := selfHealingWrite{
+		selfHealing: types.ObjectNull(selfHealingAttrTypes),
+		autoPromote: types.ObjectNull(autoPromoteAttrTypes),
+		lockVersion: lockVersion,
+	}
 	settings := selfHealingFields(ctx, configBlock, diags)
+	promote := autoPromoteFields(ctx, autoPromoteConfig, diags)
 	if diags.HasError() {
-		return types.ObjectNull(selfHealingAttrTypes), lockVersion
+		return failed
+	}
+	if len(promote) > 0 && settings == nil {
+		settings = client.Fields{}
+	}
+	for key, value := range promote {
+		settings[key] = value
+	}
+	named := selfHealingWriteParts{selfHealing: !configBlock.IsNull(), autoPromote: !autoPromoteConfig.IsNull()}
+	// finish turns Flightdeck's answer (nil when there is none) into both
+	// attributes.
+	finish := func(sh *client.SelfHealing, lockVersion int64) selfHealingWrite {
+		warnRollbackBlockers(sh, identifier, diags)
+		warnAutoPromoteBlockers(sh, identifier, diags)
+		autoPromote := autoPromoteToObject(sh, diags)
+		if sh != nil && named.autoPromote && !sh.ReportsAutoPromote() {
+			addAutoPromoteNotAvailableError("does not report them", "", diags)
+		} else {
+			autoPromote = keepUnconfiguredAsPlanned(ctx, autoPromoteConfig, autoPromotePlanned, autoPromote, diags)
+		}
+		return selfHealingWrite{
+			selfHealing: keepUnconfiguredAsPlanned(ctx, configBlock, selfHealingPlanned, selfHealingToObject(sh, diags), diags),
+			autoPromote: autoPromote,
+			lockVersion: lockVersion,
+		}
 	}
 	if len(settings) == 0 {
-		block, sh := readSelfHealing(ctx, c, projectID, diags)
-		warnRollbackBlockers(sh, identifier, diags)
-		return block, lockVersion
+		sh, err := c.GetSelfHealing(ctx, projectID)
+		switch {
+		case err == nil:
+			return finish(sh, lockVersion)
+		case !client.IsForbidden(err) && !client.IsNotFound(err):
+			addAPIError(diags, "Error reading Flightdeck self-healing configuration", err)
+		case named.selfHealing || named.autoPromote:
+			if !addIfProjectGone(ctx, c, projectID, identifier, err, diags) {
+				addSelfHealingUnavailableError(named, "", err, diags)
+			}
+		default:
+			return finish(nil, lockVersion)
+		}
+		return failed
 	}
 	sh, err := c.UpdateSelfHealing(ctx, projectID, settings, lockVersion)
 	if err != nil {
-		// A refused write that named a setting this Flightdeck is too old for
-		// says so; any other refusal falls through to the cases below.
-		if client.IsValidation(err) && addUnsupportedSettingError(ctx, c, projectID, settings, err, diags) {
-			return types.ObjectNull(selfHealingAttrTypes), lockVersion
+		addSelfHealingWriteError(ctx, c, projectID, identifier, lockVersion, settings, err, diags)
+		return failed
+	}
+	return finish(sh, sh.LockVersion)
+}
+
+// selfHealingWriteParts says which attributes a write to the self-healing
+// endpoint carried settings of, so a refusal can name them.
+type selfHealingWriteParts struct{ selfHealing, autoPromote bool }
+
+func writePartsOf(sent client.Fields) selfHealingWriteParts {
+	var parts selfHealingWriteParts
+	for key := range sent {
+		if isAutoPromoteKey(key) {
+			parts.autoPromote = true
+		} else {
+			parts.selfHealing = true
 		}
-		if addIfProjectGone(ctx, c, projectID, identifier, err, diags) {
-			return types.ObjectNull(selfHealingAttrTypes), lockVersion
-		}
+	}
+	return parts
+}
+
+func (w selfHealingWriteParts) both() bool { return w.selfHealing && w.autoPromote }
+
+// notSaved says what a refused write did not save: only this endpoint's
+// settings, never the whole apply, whose project and other writes may have
+// gone through.
+func (w selfHealingWriteParts) notSaved() string {
+	switch {
+	case w.both():
+		return "Flightdeck checks the whole request before it saves anything, so none of the self_healing or " +
+			"auto_promote settings in this apply were saved."
+	case w.autoPromote:
+		return "None of the auto_promote settings in this apply were saved."
+	default:
+		return "None of the self_healing settings in this apply were saved."
+	}
+}
+
+// addSelfHealingWriteError explains a refused write to the self-healing
+// endpoint, naming what the write carried: self_healing settings,
+// auto_promote settings, or both.
+func addSelfHealingWriteError(ctx context.Context, c *client.Client, projectID int64, identifier string, lockVersion int64, sent client.Fields, err error, diags *diag.Diagnostics) {
+	// A refused write that named a setting this Flightdeck is too old for
+	// says so; any other refusal falls through to the cases below.
+	if client.IsValidation(err) && addUnsupportedSettingError(ctx, c, projectID, sent, err, diags) {
+		return
+	}
+	if addIfProjectGone(ctx, c, projectID, identifier, err, diags) {
+		return
+	}
+	parts := writePartsOf(sent)
+	notSaved := parts.notSaved()
+	if addSelfHealingUnavailableError(parts, notSaved, err, diags) {
+		return
+	}
+	switch {
+	case client.HasCode(err, client.CodeArmingRefused):
+		diags.AddAttributeError(path.Root("self_healing").AtName("feature_enabled"), "Set rollback to turn this project's self-healing on",
+			"This project is stored as auto-rollback, so turning feature_enabled on would start live rollbacks, and "+
+				"Flightdeck refuses that unless the same write says which mode to go live in. Set "+
+				"self_healing.rollback explicitly: \"auto\" to go live with auto-rollback, or \"report\" to start in "+
+				"report only. "+notSaved+" "+apiMessage(err))
+	case client.IsStale(err):
+		what := "Project self-healing configuration"
 		switch {
-		case client.IsNotFound(err):
+		case parts.both():
+			what = "Project self-healing and auto-promote settings"
+		case parts.autoPromote:
+			what = "Project auto-promote settings"
+		}
+		addStaleError(diags, what, lockVersion, nil, err)
+	default:
+		if refusedAt, name, ok := autoPromoteRefusedAt(sent, err); ok {
+			diags.AddAttributeError(refusedAt, "Flightdeck refused auto_promote."+name,
+				notSaved+"\n\nThe API said: "+apiMessage(err))
+			return
+		}
+		addAPIError(diags, "Error updating Flightdeck self-healing configuration", err)
+	}
+}
+
+// addSelfHealingUnavailableError explains a 404 (this Flightdeck has no
+// self-healing endpoint) or a 403 (the token's user is not a workspace admin)
+// from the self-healing endpoint, naming the attributes in parts:
+// self_healing, auto_promote, or both. notSaved, when not empty, says what a
+// refused write did not save; a read that sent nothing has none. It reports
+// whether it added an error.
+func addSelfHealingUnavailableError(parts selfHealingWriteParts, notSaved string, err error, diags *diag.Diagnostics) bool {
+	switch {
+	case client.IsNotFound(err):
+		switch {
+		case parts.both():
+			diags.AddError("Self-healing and auto-promote settings are not available on this Flightdeck",
+				"The project exists but its self-healing endpoint, which carries both the self_healing and the "+
+					"auto_promote settings, answered 404, so this Flightdeck version does not expose them over the API "+
+					"yet. Remove both from the configuration or upgrade Flightdeck. "+apiMessage(err))
+		case parts.autoPromote:
+			addAutoPromoteNotAvailableError("answered 404", apiMessage(err), diags)
+		default:
 			diags.AddAttributeError(path.Root("self_healing"), "Self-healing configuration is not available on this Flightdeck",
-				"The project exists but its self-healing endpoint answered 404, so this Flightdeck version does not expose "+
-					"self-healing over the API yet. Remove the block or upgrade Flightdeck. "+apiMessage(err))
-		case client.IsForbidden(err):
+				"The project exists but its self-healing endpoint answered 404, so this Flightdeck version does not "+
+					"expose self-healing over the API yet. Remove the block or upgrade Flightdeck. "+apiMessage(err))
+		}
+	case client.IsForbidden(err):
+		switch {
+		case parts.both():
+			diags.AddError("Self-healing and auto-promote settings require a workspace admin",
+				sentences("Only a workspace owner or admin may read or write a project's self-healing thresholds and its "+
+					"auto-promote settings, which ride the same endpoint.", notSaved, apiMessage(err)))
+		case parts.autoPromote:
+			diags.AddAttributeError(path.Root("auto_promote"), "Auto-promote settings require a workspace admin",
+				sentences("Only a workspace owner or admin may read or write a project's auto-promote settings, which ride "+
+					"its self-healing endpoint.", notSaved, apiMessage(err)))
+		default:
 			diags.AddAttributeError(path.Root("self_healing"), "Self-healing configuration requires a workspace admin",
 				"Only a workspace owner or admin may read or write a project's self-healing thresholds. "+apiMessage(err))
-		case client.HasCode(err, client.CodeArmingRefused):
-			diags.AddAttributeError(path.Root("self_healing").AtName("feature_enabled"), "Set rollback to turn this project's self-healing on",
-				"This project is stored as auto-rollback, so turning feature_enabled on would start live rollbacks, and "+
-					"Flightdeck refuses that unless the same write says which mode to go live in. Set "+
-					"self_healing.rollback explicitly: \"auto\" to go live with auto-rollback, or \"report\" to start in "+
-					"report only. Nothing was written. "+apiMessage(err))
-		case client.IsStale(err):
-			addStaleError(diags, "Project self-healing configuration", lockVersion, nil, err)
-		default:
-			addAPIError(diags, "Error updating Flightdeck self-healing configuration", err)
 		}
-		return types.ObjectNull(selfHealingAttrTypes), lockVersion
+	default:
+		return false
 	}
-	warnRollbackBlockers(sh, identifier, diags)
-	return selfHealingToObject(sh, diags), sh.LockVersion
+	return true
+}
+
+// addAutoPromoteNotAvailableError reports auto_promote as not available on
+// this Flightdeck. why is how the self-healing endpoint showed it ("answered
+// 404", or "does not report them"), and apiSaid the API's message, if any.
+func addAutoPromoteNotAvailableError(why, apiSaid string, diags *diag.Diagnostics) {
+	diags.AddAttributeError(path.Root("auto_promote"), "Auto-promote settings are not available on this Flightdeck",
+		sentences("The project exists but its self-healing endpoint, which carries the auto-promote settings, "+why+
+			", so this Flightdeck version does not expose them over the API yet. Remove auto_promote or upgrade "+
+			"Flightdeck.", apiSaid))
+}
+
+// sentences joins the ones that are not empty with a space.
+func sentences(parts ...string) string {
+	kept := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, " ")
+}
+
+// isAutoPromoteKey reports whether key is one of the auto-promote settings.
+func isAutoPromoteKey(key string) bool {
+	for _, k := range client.SelfHealingAutoPromoteKeys {
+		if k == key {
+			return true
+		}
+	}
+	return false
 }
 
 // selfHealingNewerSettings are the settings an older Flightdeck refuses as
@@ -596,14 +786,22 @@ var selfHealingNewerSettings = []string{"rollback", "count_browser_errors"}
 // prose, so rather than match on its wording, a fresh read is asked what the
 // endpoint accepts. It reports whether it added a diagnostic; false leaves the
 // error to the caller's generic handling.
+//
+// The auto-promote settings arrived together, so a Flightdeck too old for one
+// is too old for all of them, and that is reported once, on auto_promote.
 func addUnsupportedSettingError(ctx context.Context, c *client.Client, projectID int64, sent client.Fields, err error, diags *diag.Diagnostics) bool {
-	var missing []string
+	var missing, promote []string
 	for _, key := range selfHealingNewerSettings {
 		if _, named := sent[key]; named {
 			missing = append(missing, key)
 		}
 	}
-	if len(missing) == 0 {
+	for _, key := range client.SelfHealingAutoPromoteKeys {
+		if _, named := sent[key]; named {
+			promote = append(promote, key)
+		}
+	}
+	if len(missing) == 0 && len(promote) == 0 {
 		return false
 	}
 	sh, rerr := c.GetSelfHealing(ctx, projectID)
@@ -623,8 +821,20 @@ func addUnsupportedSettingError(ctx context.Context, c *client.Client, projectID
 		}
 		diags.AddAttributeError(path.Root("self_healing").AtName(key), "This Flightdeck is too old for self_healing."+key,
 			fmt.Sprintf("The Flightdeck at this endpoint does not accept %s on its self-healing API, so it cannot be set "+
-				"from Terraform there. Remove %s from the configuration, or upgrade Flightdeck. Nothing was written. %s",
-				key, key, apiMessage(err)))
+				"from Terraform there. Remove %s from the configuration, or upgrade Flightdeck. %s %s",
+				key, key, writePartsOf(sent).notSaved(), apiMessage(err)))
+		added = true
+	}
+	if len(promote) > 0 && (!sh.ReportsAutoPromote() || !sh.Accepts("auto_promote")) {
+		what := "an unknown setting"
+		if len(promote) > 1 {
+			what = "unknown settings"
+		}
+		diags.AddAttributeError(path.Root("auto_promote"), "This Flightdeck does not support auto_promote yet",
+			fmt.Sprintf("This Flightdeck is older than the release that added auto-promote, so it refused %s as %s. "+
+				"%s\n\nUpgrade Flightdeck first, then apply again. Until then, leave auto_promote out of the "+
+				"configuration: on this Flightdeck it reads as null, and the provider never sends it while it is "+
+				"unset.\n\nThe API said: %s", strings.Join(promote, ", "), what, writePartsOf(sent).notSaved(), apiMessage(err)))
 		added = true
 	}
 	return added

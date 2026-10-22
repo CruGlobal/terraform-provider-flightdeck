@@ -62,6 +62,7 @@ type projectModel struct {
 	TerraformManaged   types.Bool   `tfsdk:"terraform_managed"`
 	LockVersion        types.Int64  `tfsdk:"lock_version"`
 	SelfHealing        types.Object `tfsdk:"self_healing"`
+	AutoPromote        types.Object `tfsdk:"auto_promote"`
 	SlackChannel       types.Object `tfsdk:"slack_channel"`
 	AgentWork          types.Object `tfsdk:"agent_work"`
 }
@@ -85,8 +86,8 @@ const (
 
 // projectToModel maps an API project into state. prior supplies the feature
 // keys to keep when filter is featuresFromPrior. The self_healing,
-// slack_channel and agent_work blocks travel on their own endpoints and are
-// filled separately; they start null here.
+// auto_promote, slack_channel and agent_work blocks travel on their own
+// endpoints and are filled separately; they start null here.
 func projectToModel(ctx context.Context, p *client.Project, prior *projectModel, filter featureKeyFilter, diags *diag.Diagnostics) projectModel {
 	m := projectModel{
 		ID:                 types.Int64Value(p.ID),
@@ -102,6 +103,7 @@ func projectToModel(ctx context.Context, p *client.Project, prior *projectModel,
 		TerraformManaged:   types.BoolPointerValue(p.TerraformManaged),
 		LockVersion:        types.Int64Value(p.LockVersion),
 		SelfHealing:        types.ObjectNull(selfHealingAttrTypes),
+		AutoPromote:        types.ObjectNull(autoPromoteAttrTypes),
 		SlackChannel:       types.ObjectNull(slackChannelAttrTypes),
 		AgentWork:          types.ObjectNull(agentWorkAttrTypes),
 	}
@@ -164,8 +166,8 @@ func stringPointerValue(s *string) types.String {
 // removing it from configuration clears it server-side. features is sent only
 // when configured: an absent block means "not managed here". lead_id is sent
 // only when configured. github_repo_full_name is read-only over the API and
-// never sent; the self_healing, slack_channel and agent_work blocks travel on
-// their own endpoints.
+// never sent; the self_healing, auto_promote, slack_channel and agent_work
+// blocks travel on their own endpoints.
 //
 // app is sent only when the plan sets or changes it. An unset app plans the
 // prior value (UseStateForUnknown), so it is never sent and the binding the

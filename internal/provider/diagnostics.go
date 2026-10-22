@@ -103,7 +103,7 @@ func addStaleError(diags *diag.Diagnostics, what string, stateVersion int64, cur
 			"Nothing was written. Run `terraform plan` again to re-read it, then re-apply.", what, stateVersion)
 	} else {
 		summary = what + " modified outside of Terraform"
-		detail = fmt.Sprintf("%s was changed outside of Terraform since the last refresh (state has lock_version %d", what, stateVersion)
+		detail = fmt.Sprintf("%s changed outside of Terraform since the last refresh (state has lock_version %d", what, stateVersion)
 		if current != nil {
 			detail += fmt.Sprintf(", the server now has %d", *current)
 		}

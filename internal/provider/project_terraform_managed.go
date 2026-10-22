@@ -30,11 +30,11 @@ import (
 // terraformManagedDescription is the resource attribute's documentation.
 const terraformManagedDescription = "Whether Terraform manages this project's settings. While it is `true`, Flightdeck's " +
 	"web app makes the settings Terraform owns read only (name, identifier, description, emoji, lead, visibility, " +
-	"deployed app, feature toggles, the Slack channel and agent work settings) and turns off archiving and restoring " +
-	"the project, and Flightdeck's MCP tools refuse to change them, because a change made by hand would be undone by " +
-	"the next apply. Flightdeck's API, which this provider uses, still writes everything. Members, states, labels " +
-	"and the rest stay editable in the app. Defaults to `true`; set it to `false` to leave the project editable in " +
-	"the app.\n\n" +
+	"deployed app, feature toggles, the Slack channel, and the agent work and auto-promote settings) and turns off " +
+	"archiving and restoring the project, and Flightdeck's MCP tools refuse to change them, because a change made by " +
+	"hand would be undone by the next apply. Flightdeck's API, which this provider uses, still writes everything. " +
+	"Members, states, labels and the rest stay editable in the app. Defaults to `true`; set it to `false` to leave " +
+	"the project editable in the app.\n\n" +
 	"Setting or changing it needs a token whose user is a **workspace owner or admin**, on a create too. Sending " +
 	"the value Flightdeck already has is fine for any token, so a token that is not an owner or admin can still " +
 	"update a project whose flag already matches the configuration. Such a token can create a project only with " +

@@ -14,6 +14,8 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/flightdecktest"
 
@@ -171,6 +173,158 @@ func TestProjectSelfHealing_nonAdminToken(t *testing.T) {
   }`),
 				ExpectError: regexMust(`Self-healing configuration requires a workspace admin`),
 			},
+		},
+	})
+}
+
+// A self_healing block that sets nothing creates the project, whether it is
+// written as {} or has every setting null (a module passing through an
+// optional variable that defaults to null). Nothing is sent, and the plan
+// knew none of the settings, so each one is taken as Flightdeck reports it.
+// The next plan is empty.
+func TestProjectSelfHealing_blockThatSetsNothingOnCreate(t *testing.T) {
+	for _, tc := range []struct{ name, variable, block string }{
+		{name: "empty", block: "{}"},
+		{
+			name: "every setting null",
+			variable: `
+variable "bake" {
+  type    = number
+  default = null
+}
+`,
+			block: "{\n    bake_minutes = var.bake\n  }",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t, "self_healing")
+			env.requireFake(t)
+			identifier := randIdentifier()
+			config := tc.variable + projectConfig(env, identifier, "  name = \"Sets nothing\"\n  self_healing = "+tc.block)
+			runTest(t, resource.TestCase{
+				Steps: []resource.TestStep{
+					{
+						Config: config,
+						Check: resource.ComposeAggregateTestCheckFunc(
+							resource.TestCheckResourceAttr(projectRes, "self_healing.bake_minutes", "20"),
+							resource.TestCheckResourceAttr(projectRes, "self_healing.absolute_floor", "5"),
+							resource.TestCheckResourceAttr(projectRes, "self_healing.rollback", "report"),
+							resource.TestCheckResourceAttr(projectRes, "self_healing.armed", "false"),
+						),
+					},
+					{Config: config, PlanOnly: true},
+				},
+			})
+			if reqs, bodies := selfHealingPatches(t, env); len(reqs) != 0 {
+				t.Fatalf("a block that sets nothing must send nothing, got %v", bodies)
+			}
+		})
+	}
+}
+
+// unreadableBlock is a way Flightdeck can fail to answer for a block the
+// configuration names: the endpoint refuses the token, is missing, or leaves
+// the block out.
+type unreadableBlock struct {
+	reason string
+	// block is the attribute: self_healing or auto_promote.
+	block string
+	// setup makes Flightdeck unable to answer for it.
+	setup func(env *testEnv)
+	// nonAdmin marks a token that can only create a project with
+	// terraform_managed off.
+	nonAdmin bool
+	// summary and detail are the error the apply must fail with, on block.
+	summary, detail string
+}
+
+// testNamedBlockUnreadable runs each case with the block written as {} and
+// with every setting null, added to an existing project and on a create.
+// Naming the block fails the apply on it, with the error a refused write
+// gives and without claiming anything was not saved, and nothing is sent.
+// Leaving the block out stays silent, with an empty plan.
+func testNamedBlockUnreadable(t *testing.T, cases []unreadableBlock) {
+	t.Helper()
+	setting := map[string]string{"self_healing": "bake_minutes", "auto_promote": "soak_hours"}
+	for _, tc := range cases {
+		for _, body := range []struct{ name, block string }{
+			{"empty", "{}"},
+			{"every setting null", "{\n    " + setting[tc.block] + " = var.unset\n  }"},
+		} {
+			for _, creating := range []bool{false, true} {
+				when := "added"
+				if creating {
+					when = "on create"
+				}
+				t.Run(tc.reason+", "+body.name+", "+when, func(t *testing.T) {
+					env := newTestEnv(t, tc.block)
+					env.requireFake(t)
+					tc.setup(env)
+					identifier := randIdentifier()
+					config := func(block string) string {
+						attrs := "  name = \"Unreadable\"\n"
+						if tc.nonAdmin {
+							attrs += "  terraform_managed = false\n"
+						}
+						if block != "" {
+							attrs += "  " + tc.block + " = " + block + "\n"
+						}
+						return `
+variable "unset" {
+  type    = number
+  default = null
+}
+` + projectConfig(env, identifier, attrs)
+					}
+					named := resource.TestStep{
+						Config:      config(body.block),
+						ExpectError: regexMust(errorMatching(tc.summary, tc.detail)),
+					}
+					steps := []resource.TestStep{named}
+					if !creating {
+						steps = []resource.TestStep{
+							{Config: config(""), Check: resource.TestCheckNoResourceAttr(projectRes, tc.block+".%")},
+							{Config: config(""), PlanOnly: true},
+							named,
+						}
+					}
+					recorded := runTestRecordingApplyDiagnostics(t, resource.TestCase{Steps: steps})
+					errs := recorded.bySeverity(tfprotov6.DiagnosticSeverityError)
+					at := tftypes.NewAttributePath().WithAttributeName(tc.block)
+					if len(errs) != 1 || !diagnosticAt(errs, tc.summary, at, tc.detail) {
+						t.Fatalf("want one error on %s, got: %s", tc.block, describeWithPaths(errs))
+					}
+					if strings.Contains(errs[0].Detail, "saved") {
+						t.Errorf("nothing was sent, so the error must not speak of what was saved: %s", errs[0].Detail)
+					}
+					for _, w := range append(recorded.planWarnings(), recorded.readWarnings()...) {
+						t.Errorf("a block left out, or one that cannot be read, warns of nothing; got [%s] %s", w.Summary, w.Detail)
+					}
+					if reqs, bodies := selfHealingPatches(t, env); len(reqs) != 0 {
+						t.Fatalf("a block that sets nothing must send nothing, got %v", bodies)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A self_healing block the configuration names, even one that sets nothing,
+// fails the apply when Flightdeck cannot answer for it, rather than reading
+// as null and planning it again on every run. Left out, it stays silent.
+func TestProjectSelfHealing_namedBlockFlightdeckCannotRead(t *testing.T) {
+	testNamedBlockUnreadable(t, []unreadableBlock{
+		{
+			reason: "not an admin", block: "self_healing", nonAdmin: true,
+			setup:   func(env *testEnv) { env.fake.SetWorkspaceAdmin(false) },
+			summary: "Self-healing configuration requires a workspace admin",
+			detail:  "Only a workspace owner or admin may read or write a project's self-healing thresholds.",
+		},
+		{
+			reason: "no endpoint", block: "self_healing",
+			setup:   func(env *testEnv) { env.fake.SetSelfHealingEndpoint(false) },
+			summary: "Self-healing configuration is not available on this Flightdeck",
+			detail:  "The project exists but its self-healing endpoint answered 404",
 		},
 	})
 }
@@ -613,9 +767,10 @@ func TestProjectSelfHealing_mergedWindowStillFailsAtApply(t *testing.T) {
 	})
 }
 
-// SelfHealingThresholdKeys and SelfHealingSwitchKeys document the endpoint's
-// writable set, but selfHealingFields writes its own list by hand — so they
-// can drift apart silently, and all are exported, which puts them out of
+// SelfHealingThresholdKeys, SelfHealingSwitchKeys and
+// SelfHealingAutoPromoteKeys document the endpoint's writable set, but
+// selfHealingFields and autoPromoteFields write their own lists by hand — so
+// they can drift apart silently, and all are exported, which puts them out of
 // reach of the unused-symbol linters. These two tests are what hold the
 // invariant: one against the write path, one against the API's own answer.
 func TestProjectSelfHealing_writePathMatchesThresholdKeys(t *testing.T) {
@@ -646,8 +801,18 @@ func TestProjectSelfHealing_writePathMatchesThresholdKeys(t *testing.T) {
 	if diags.HasError() {
 		t.Fatalf("selfHealingFields: %v", diags.Errors())
 	}
+	// Every auto-promote setting set too: they go in the same write.
+	for k, v := range autoPromoteFields(ctx, fullAutoPromoteBlock(t), &diags) {
+		if _, twice := fields[k]; twice {
+			t.Fatalf("%q is written by both blocks", k)
+		}
+		fields[k] = v
+	}
+	if diags.HasError() {
+		t.Fatalf("autoPromoteFields: %v", diags.Errors())
+	}
 
-	want := append(append([]string{}, client.SelfHealingThresholdKeys...), client.SelfHealingSwitchKeys...)
+	want := allSelfHealingKeys()
 	got := make([]string, 0, len(fields))
 	for k := range fields {
 		got = append(got, k)
@@ -685,12 +850,13 @@ func TestProjectSelfHealing_thresholdKeysMatchTheAPI(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					want := append(append([]string{}, client.SelfHealingThresholdKeys...), client.SelfHealingSwitchKeys...)
+					want := allSelfHealingKeys()
 					got := append([]string{}, sh.WritableSettings...)
 					sort.Strings(want)
 					sort.Strings(got)
 					if strings.Join(want, ",") != strings.Join(got, ",") {
-						return fmt.Errorf("SelfHealingThresholdKeys and SelfHealingSwitchKeys no longer mirror the API:\n  API: %v\n list: %v", got, want)
+						return fmt.Errorf("SelfHealingThresholdKeys, SelfHealingSwitchKeys and SelfHealingAutoPromoteKeys no longer "+
+							"mirror the API:\n  API: %v\n list: %v", got, want)
 					}
 					for _, k := range got {
 						if k == "armed" {
@@ -702,4 +868,12 @@ func TestProjectSelfHealing_thresholdKeysMatchTheAPI(t *testing.T) {
 			},
 		},
 	})
+}
+
+// allSelfHealingKeys is every setting the provider knows the self-healing
+// endpoint takes: the thresholds, the switches and the auto-promote settings.
+func allSelfHealingKeys() []string {
+	out := append([]string{}, client.SelfHealingThresholdKeys...)
+	out = append(out, client.SelfHealingSwitchKeys...)
+	return append(out, client.SelfHealingAutoPromoteKeys...)
 }

@@ -2,6 +2,7 @@ package flightdecktest
 
 import (
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -25,7 +26,35 @@ type selfHealingStore struct {
 	// blockers overrides the release-side rollback blockers per project; a
 	// project absent here reports that it has no release yet.
 	blockers map[int64][]RollbackBlocker
+	// autoPromoteUnsupported simulates a Flightdeck that has `rollback` but
+	// predates auto-promote (see SetAutoPromoteSupported). A legacy one
+	// predates it too.
+	autoPromoteUnsupported bool
+	// promoting clears the not_yet_available auto-promote blocker.
+	promoting bool
+	// defaults and autoPromoteDefaults change a default the way a Flightdeck
+	// release can: every project that never set the key follows it, and no
+	// lock_version moves (SetSelfHealingDefault, SetAutoPromoteDefault).
+	defaults            map[string]any
+	autoPromoteDefaults map[string]any
 }
+
+// SetSelfHealingDefault changes a threshold's default, as a Flightdeck
+// release that changes it does: projects that never set it read the new
+// value, and no lock_version moves.
+func (s *Server) SetSelfHealingDefault(key string, value any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.selfHealingStore()
+	if st.defaults == nil {
+		st.defaults = map[string]any{}
+	}
+	st.defaults[key] = value
+}
+
+// knowsAutoPromote reports whether the Flightdeck the fake acts as has the
+// auto-promote settings.
+func (st *selfHealingStore) knowsAutoPromote() bool { return !st.legacy && !st.autoPromoteUnsupported }
 
 // RollbackBlocker is one entry of the read's rollback_blockers.
 type RollbackBlocker struct {
@@ -79,9 +108,14 @@ var SelfHealingDefaults = map[string]any{
 	"max_rollbacks_per_hour": int64(1), "recovery_window_minutes": int64(15),
 }
 
-func resolveSelfHealing(overrides map[string]any) map[string]any {
+// resolveSelfHealing is the stored overrides with every unset key at its
+// default: the documented one, or one SetSelfHealingDefault changed.
+func (s *Server) resolveSelfHealing(overrides map[string]any) map[string]any {
 	out := map[string]any{}
 	for k, v := range SelfHealingDefaults {
+		out[k] = v
+	}
+	for k, v := range s.selfHealingStore().defaults {
 		out[k] = v
 	}
 	for k, v := range overrides {
@@ -137,17 +171,35 @@ var selfHealingLimits = map[string]selfHealingLimit{
 // refused with arming_refused unless the same write names rollback.
 func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, string, string) {
 	legacy := s.selfHealingStore().legacy
-	resolved := resolveSelfHealing(p.SelfHealing)
+	resolved := s.resolveSelfHealing(p.SelfHealing)
 	storedAuto := truthy(resolved["armed"])
 	switches := map[string]bool{"armed": true, "feature_enabled": true, "lock_version": true}
 	if !legacy {
 		switches["rollback"] = true
 		switches["count_browser_errors"] = true
 	}
+	autoPromote := map[string]bool{}
+	if s.selfHealingStore().knowsAutoPromote() {
+		for _, k := range AutoPromoteWritable {
+			switches[k], autoPromote[k] = true, true
+		}
+	}
+	var unknown []string
 	for k := range submitted {
 		if _, known := selfHealingLimits[k]; !known && !switches[k] {
-			return http.StatusUnprocessableEntity, "invalid_attribute", "unknown self-healing setting: " + k
+			unknown = append(unknown, k)
 		}
+	}
+	if len(unknown) > 0 {
+		// The API names the unknown keys sorted, then what it does take.
+		sort.Strings(unknown)
+		plural := ""
+		if len(unknown) > 1 {
+			plural = "s"
+		}
+		return http.StatusUnprocessableEntity, "invalid_attribute",
+			"unknown self-healing setting" + plural + ": " + strings.Join(unknown, ", ") +
+				" (settable: " + strings.Join(s.selfHealingWritable(), ", ") + ")"
 	}
 	blank := func(v any) bool { return v == nil || strings.TrimSpace(asString(v)) == "" }
 	boolSwitch := func(key string) (bool, bool, string) {
@@ -195,11 +247,11 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 				`armed cannot be changed directly; set rollback to "report" or "auto" instead`
 		}
 	}
+	// The API's order: the go-live guard (which reads feature_enabled), then
+	// count_browser_errors, then the auto-promote settings, then the
+	// thresholds. So a write that is going live without saying how is refused
+	// for that, whatever else in it is wrong.
 	featureOn, featureNamed, msg := boolSwitch("feature_enabled")
-	if msg != "" {
-		return http.StatusUnprocessableEntity, "invalid_attribute", msg
-	}
-	countBrowser, countNamed, msg := boolSwitch("count_browser_errors")
 	if msg != "" {
 		return http.StatusUnprocessableEntity, "invalid_attribute", msg
 	}
@@ -209,6 +261,20 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 	if !legacy && featureNamed && featureOn && !wasOn && storedAuto && !modeNamed {
 		return http.StatusUnprocessableEntity, "arming_refused",
 			`This project is set to auto-rollback, so turning self-healing on would start live rollbacks. Send rollback: "auto" to go live with auto-rollback, or rollback: "report" to start in report only.`
+	}
+	countBrowser, countNamed, msg := boolSwitch("count_browser_errors")
+	if msg != "" {
+		return http.StatusUnprocessableEntity, "invalid_attribute", msg
+	}
+	// The auto-promote settings are validated with the rest, before anything
+	// is assigned, against the settings in effect.
+	var promoteChanges map[string]any
+	if len(autoPromote) > 0 {
+		var refusal autoPromoteRefusal
+		promoteChanges, refusal = parseAutoPromote(s.resolveAutoPromote(p.AutoPromote), submitted)
+		if refusal != "" {
+			return http.StatusUnprocessableEntity, "invalid_attribute", string(refusal)
+		}
 	}
 	next := map[string]any{}
 	for k, v := range p.SelfHealing {
@@ -248,7 +314,7 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 	if countNamed {
 		next["count_browser_errors"] = countBrowser
 	}
-	after := resolveSelfHealing(next)
+	after := s.resolveSelfHealing(next)
 	shortW, _ := asFloat64(after["short_window_minutes"])
 	longW, _ := asFloat64(after["long_window_minutes"])
 	if shortW > longW {
@@ -259,6 +325,7 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 			"short_window_minutes (" + asString(int64(shortW)) + ") cannot exceed long_window_minutes (" + asString(int64(longW)) + ")"
 	}
 	p.SelfHealing = next
+	s.assignAutoPromote(p, promoteChanges)
 	// feature_enabled lives on the project's feature map, not among the
 	// thresholds, and a null is a no-op rather than a reset.
 	if featureNamed {
@@ -292,17 +359,35 @@ func (s *Server) rollbackBlockers(p *Project) []RollbackBlocker {
 	return append(out, release...)
 }
 
+// selfHealingWritable is the read's writable_settings: the thresholds, then
+// the switches this Flightdeck has, then the auto-promote settings if it has
+// them, as the API lists them.
+func (s *Server) selfHealingWritable() []string {
+	writable := make([]string, 0, len(selfHealingLimits)+3+len(AutoPromoteWritable))
+	writable = append(writable, selfHealingThresholdOrder...)
+	writable = append(writable, "feature_enabled")
+	if !s.selfHealingStore().legacy {
+		writable = append(writable, "rollback", "count_browser_errors")
+	}
+	if s.selfHealingStore().knowsAutoPromote() {
+		writable = append(writable, AutoPromoteWritable...)
+	}
+	return writable
+}
+
+// selfHealingThresholdOrder is the API's order of the thresholds.
+var selfHealingThresholdOrder = []string{
+	"bake_minutes", "baseline_multiplier", "absolute_floor", "long_window_minutes", "short_window_minutes",
+	"burn_rate", "sustain_count", "consecutive_error_limit", "cooldown_minutes", "max_rollbacks_per_hour",
+	"recovery_window_minutes",
+}
+
 func (s *Server) serializeSelfHealing(p *Project) map[string]any {
 	overrides := map[string]any{}
 	for k, v := range p.SelfHealing {
 		overrides[k] = v
 	}
-	config := resolveSelfHealing(p.SelfHealing)
-	writable := make([]string, 0, len(selfHealingLimits)+3)
-	for k := range selfHealingLimits {
-		writable = append(writable, k)
-	}
-	writable = append(writable, "feature_enabled")
+	config := s.resolveSelfHealing(p.SelfHealing)
 	out := map[string]any{
 		"project_id": p.ID, "feature_enabled": s.selfHealingFeatureOn(p), "globally_disarmed": false,
 		"config": config, "overrides": overrides,
@@ -312,14 +397,19 @@ func (s *Server) serializeSelfHealing(p *Project) map[string]any {
 		delete(config, "count_browser_errors")
 		delete(overrides, "count_browser_errors")
 	} else {
-		writable = append(writable, "rollback", "count_browser_errors")
 		out["rollback"] = "report"
 		if truthy(config["armed"]) {
 			out["rollback"] = "auto"
 		}
 		out["rollback_blockers"] = s.rollbackBlockers(p)
 	}
-	out["writable_settings"] = writable
+	if s.selfHealingStore().knowsAutoPromote() {
+		for k, v := range s.autoPromoteWire(p.AutoPromote) {
+			out[k] = v
+		}
+		out["auto_promote_blockers"] = s.autoPromoteBlockers(p)
+	}
+	out["writable_settings"] = s.selfHealingWritable()
 	return out
 }
 
@@ -381,6 +471,7 @@ func (s *Server) updateSelfHealing(w http.ResponseWriter, r *http.Request) {
 	for k, v := range p.Features {
 		candidate.Features[k] = v
 	}
+	candidate.AutoPromote = copyAutoPromote(p.AutoPromote)
 	if status, code, msg := s.applySelfHealing(&candidate, attrs); status != 0 {
 		writeError(w, status, code, msg)
 		return

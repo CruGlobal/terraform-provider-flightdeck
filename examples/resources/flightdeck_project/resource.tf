@@ -46,6 +46,34 @@ resource "flightdeck_project" "payments" {
   }
 }
 
+# Auto-promote (workspace owners and admins only) lets Flightdeck promote a
+# project's release candidates to production by itself once every check
+# passes. It needs auto-rollback as its safety net, and it goes to Flightdeck
+# in the same request as self_healing. Each window part you set replaces only
+# that part.
+resource "flightdeck_project" "storefront" {
+  name       = "Storefront"
+  identifier = "STORE"
+
+  self_healing = {
+    feature_enabled = true
+    rollback        = "auto"
+  }
+
+  auto_promote = {
+    mode           = "deps_only" # only when every waiting change is a Dependabot update
+    soak_hours     = 24
+    heads_up_hours = 4
+    window = {
+      days      = ["mon", "tue", "wed", "thu"]
+      start     = "09:00"
+      end       = "15:00"
+      time_zone = "America/Chicago"
+    }
+    freeze_dates = ["2030-12-24", "2030-12-31"] # [] clears the list
+  }
+}
+
 # A project's Slack channel (project admins). Provisioning is asynchronous:
 # enabling the channel enqueues the job, and `channel_id` and
 # `provision_status` are filled in once it has run.

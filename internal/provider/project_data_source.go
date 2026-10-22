@@ -134,6 +134,7 @@ func (d *projectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 					"recovery_window_minutes": schema.Int64Attribute{MarkdownDescription: "Post-rollback grace period, in minutes.", Computed: true},
 				},
 			},
+			"auto_promote":  autoPromoteDataSourceSchema(),
 			"slack_channel": slackChannelDataSourceSchema(),
 			"agent_work":    agentWorkDataSourceSchema(),
 		},
@@ -162,9 +163,11 @@ func (d *projectDataSource) Read(ctx context.Context, req datasource.ReadRequest
 	}
 
 	state := projectToModel(ctx, p, nil, featuresAll, &resp.Diagnostics)
-	// Rollback and agent work blockers are the managing resource's to report,
-	// not a lookup's.
-	state.SelfHealing, _ = readSelfHealing(ctx, d.client, p.ID, &resp.Diagnostics)
+	// Rollback, auto-promote and agent work blockers are the managing
+	// resource's to report, not a lookup's.
+	var sh *client.SelfHealing
+	state.SelfHealing, sh = readSelfHealing(ctx, d.client, p.ID, &resp.Diagnostics)
+	state.AutoPromote = autoPromoteToObject(sh, &resp.Diagnostics)
 	state.AgentWork, _ = readAgentWork(ctx, d.client, p.ID, &resp.Diagnostics)
 	state.SlackChannel = readSlackChannel(ctx, d.client, p.ID, types.MapNull(types.BoolType), slackEventsAll, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)

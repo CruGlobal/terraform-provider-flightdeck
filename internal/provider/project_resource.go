@@ -164,6 +164,7 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Computed: true,
 			},
 			"self_healing":  selfHealingSchema(),
+			"auto_promote":  autoPromoteSchema(),
 			"slack_channel": slackChannelSchema(),
 			"agent_work":    agentWorkSchema(),
 		},
@@ -174,10 +175,13 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 // keeps the deprecated self_healing.armed in step with the planned mode and
 // agent_work's computed attributes in step with its settings, and
 // warns about what ValidateConfig cannot see: an apply that turns
-// auto-rollback or agent work on, which needs the prior value, and the
-// self-healing burn-rate windows and agent work limits as the API will MERGE
-// them, which needs the prior values the plan carries for settings the
-// configuration does not mention.
+// auto-rollback, auto-promote or agent work on, which needs the prior value,
+// and the self-healing burn-rate windows, the promote window and agent work
+// limits as the API will MERGE them, which needs the prior values the plan
+// carries for settings the configuration does not mention. On a create, a
+// partial promote window is checked against Flightdeck's default window, and
+// one that cannot fit it fails the plan. It also warns when auto-promote is on
+// and the configuration leaves its mode unset, which keeps it on.
 func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	// Nothing to warn about while destroying (no plan).
 	if req.Plan.Raw.IsNull() {
@@ -191,6 +195,7 @@ func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 	}
 	creating := req.State.Raw.IsNull()
 	prior := types.ObjectNull(selfHealingAttrTypes)
+	priorAutoPromote := types.ObjectNull(autoPromoteAttrTypes)
 	priorAgentWork := types.ObjectNull(agentWorkAttrTypes)
 	var priorProject *projectModel
 	if !creating {
@@ -200,6 +205,7 @@ func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 			return
 		}
 		prior = state.SelfHealing
+		priorAutoPromote = state.AutoPromote
 		priorAgentWork = state.AgentWork
 		priorProject = &state
 	}
@@ -209,14 +215,21 @@ func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("self_healing"), planned)...)
 	}
 	warnAutoRollback(ctx, plan.Identifier, config.SelfHealing, prior, plan.SelfHealing, &resp.Diagnostics)
+	warnAutoPromote(ctx, plan.Identifier, config.AutoPromote, priorAutoPromote, plan.AutoPromote, &resp.Diagnostics)
+	warnAutoPromoteModeUnset(ctx, plan.Identifier, config.AutoPromote, priorAutoPromote, &resp.Diagnostics)
 	if planned := planAgentWorkComputed(ctx, priorAgentWork, plan.AgentWork, &resp.Diagnostics); !planned.Equal(plan.AgentWork) {
 		plan.AgentWork = planned
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("agent_work"), planned)...)
 	}
 	warnAgentWorkEnabled(ctx, plan.Identifier, config.AgentWork, priorAgentWork, plan.AgentWork, &resp.Diagnostics)
-	// Nothing merged to check while creating (no prior).
-	if !creating {
+	// Settings the API merges are checked against the stored values the plan
+	// carries, which a create has none of. A create's partial promote window is
+	// merged into Flightdeck's default window instead, which the plan knows.
+	if creating {
+		checkAutoPromoteWindowOnCreate(ctx, config.AutoPromote, &resp.Diagnostics)
+	} else {
 		warnSelfHealingWindows(ctx, config.SelfHealing, plan.SelfHealing, &resp.Diagnostics)
+		warnAutoPromoteWindow(ctx, config.AutoPromote, plan.AutoPromote, &resp.Diagnostics)
 		warnAgentWorkBudget(ctx, config.AgentWork, plan.AgentWork, &resp.Diagnostics)
 	}
 }
@@ -228,6 +241,7 @@ func (r *projectResource) ValidateConfig(ctx context.Context, req resource.Valid
 		return
 	}
 	validateSelfHealingConfig(ctx, cfg.SelfHealing, &resp.Diagnostics)
+	validateAutoPromoteConfig(ctx, cfg.AutoPromote, &resp.Diagnostics)
 	validateAgentWorkConfig(ctx, cfg.AgentWork, &resp.Diagnostics)
 }
 
@@ -263,10 +277,12 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	// unlike an update it never leaves it unsent.
 	state := projectToModel(ctx, created, &plan, featuresFromPrior, &resp.Diagnostics)
 	reconcileFeatures(ctx, &state, &plan, &resp.Diagnostics)
-	block, lockVersion := writeSelfHealing(ctx, r.client, created.ID, created.Identifier, config.SelfHealing, created.LockVersion, &resp.Diagnostics)
-	state.SelfHealing = block
+	// self_healing and auto_promote share one endpoint, and one write.
+	sh := writeSelfHealing(ctx, r.client, created.ID, created.Identifier, config.SelfHealing, plan.SelfHealing,
+		config.AutoPromote, plan.AutoPromote, created.LockVersion, &resp.Diagnostics)
+	state.SelfHealing, state.AutoPromote = sh.selfHealing, sh.autoPromote
 	slack, lockVersion := writeSlackChannel(ctx, r.client, created.ID, config.SlackChannel, plan.SlackChannel,
-		types.ObjectNull(slackChannelAttrTypes), lockVersion, slackChannelOnCreate, &resp.Diagnostics)
+		types.ObjectNull(slackChannelAttrTypes), sh.lockVersion, slackChannelOnCreate, &resp.Diagnostics)
 	state.SlackChannel = slack
 	state.LockVersion = types.Int64Value(lockVersion)
 	// Agent work has its own lock_version, so it leaves the project's alone.
@@ -300,7 +316,9 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 	newState := projectToModel(ctx, p, &state, featuresFromPrior, &resp.Diagnostics)
 	block, sh := readSelfHealing(ctx, r.client, p.ID, &resp.Diagnostics)
 	newState.SelfHealing = block
+	newState.AutoPromote = autoPromoteToObject(sh, &resp.Diagnostics)
 	warnRollbackBlockers(sh, p.Identifier, &resp.Diagnostics)
+	warnAutoPromoteBlockers(sh, p.Identifier, &resp.Diagnostics)
 	newState.SlackChannel = readSlackChannel(ctx, r.client, p.ID,
 		slackEventFilterOf(ctx, state.SlackChannel, &resp.Diagnostics), slackEventsManaged, &resp.Diagnostics)
 	agentWork, aw := readAgentWork(ctx, r.client, p.ID, &resp.Diagnostics)
@@ -368,10 +386,12 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	reconcileFeatures(ctx, &newState, &plan, &resp.Diagnostics)
 	// Each block's write pins the lock_version the previous call produced and
 	// bumps it again; the state keeps the final value.
-	block, lockVersion := writeSelfHealing(ctx, r.client, id, updated.Identifier, config.SelfHealing, updated.LockVersion, &resp.Diagnostics)
-	newState.SelfHealing = block
+	// self_healing and auto_promote share one endpoint, and one write.
+	sh := writeSelfHealing(ctx, r.client, id, updated.Identifier, config.SelfHealing, plan.SelfHealing,
+		config.AutoPromote, plan.AutoPromote, updated.LockVersion, &resp.Diagnostics)
+	newState.SelfHealing, newState.AutoPromote = sh.selfHealing, sh.autoPromote
 	slack, lockVersion := writeSlackChannel(ctx, r.client, id, config.SlackChannel, plan.SlackChannel,
-		state.SlackChannel, lockVersion, slackChannelOnUpdate, &resp.Diagnostics)
+		state.SlackChannel, sh.lockVersion, slackChannelOnUpdate, &resp.Diagnostics)
 	newState.SlackChannel = slack
 	newState.LockVersion = types.Int64Value(lockVersion)
 	// Agent work pins its own lock_version, from the block in state.
@@ -420,8 +440,11 @@ func (r *projectResource) ImportState(ctx context.Context, req resource.ImportSt
 	}
 
 	state := projectToModel(ctx, p, nil, featuresToggleable, &resp.Diagnostics)
-	// Import is followed by a refresh, which reports any rollback blockers.
-	state.SelfHealing, _ = readSelfHealing(ctx, r.client, p.ID, &resp.Diagnostics)
+	// Import is followed by a refresh, which reports any rollback and
+	// auto-promote blockers.
+	var sh *client.SelfHealing
+	state.SelfHealing, sh = readSelfHealing(ctx, r.client, p.ID, &resp.Diagnostics)
+	state.AutoPromote = autoPromoteToObject(sh, &resp.Diagnostics)
 	// No prior configuration to defer to, so no event categories are managed;
 	// list the ones you want in `slack_channel.event_filter` afterwards.
 	state.SlackChannel = readSlackChannel(ctx, r.client, p.ID, types.MapNull(types.BoolType), slackEventsManaged, &resp.Diagnostics)

@@ -46,6 +46,7 @@ output "app_terraform_managed" {
 - `agent_work` (Attributes) Agent work settings (whether AutoPilot agents may take the project's work items, and how much), read from the project's `agent-work` API resource. Null unless the token's user is a workspace owner or admin and the Flightdeck version exposes the endpoint. (see [below for nested schema](#nestedatt--agent_work))
 - `app` (String) The deployed app the project belongs to, as the deploy pipeline's release events name it, if any.
 - `archived` (Boolean) Whether the project is archived.
+- `auto_promote` (Attributes) Auto-promote settings (whether Flightdeck promotes the project's release candidates to production by itself, and when), read from the project's `self-healing` API resource. Null unless the token's user is a workspace owner or admin and the Flightdeck version supports auto-promote. (see [below for nested schema](#nestedatt--auto_promote))
 - `description` (String) Free-text description.
 - `emoji` (String) Emoji shown next to the project name.
 - `features` (Map of Boolean) Effective value of every feature toggle the API reports, including read-only ones such as `self_healing` and `slack`.
@@ -82,6 +83,29 @@ Read-Only:
 - `task_max_minutes` (Number) The most minutes one task may run.
 - `task_max_usd` (Number) The most one task may cost, in US dollars.
 - `wait_for_checks` (Boolean) Whether an agent waits for its pull request's CI checks before it finishes. Null on a Flightdeck older than the setting.
+
+
+<a id="nestedatt--auto_promote"></a>
+### Nested Schema for `auto_promote`
+
+Read-Only:
+
+- `freeze_dates` (Set of String) Days Flightdeck never promotes on (ISO dates).
+- `heads_up_hours` (Number) How long before a promote Flightdeck posts a heads-up, in hours.
+- `mode` (String) `"off"`, `"deps_only"` or `"all"`.
+- `soak_hours` (Number) How long a release candidate must run on stage first, in hours.
+- `window` (Attributes) When a promote may start. (see [below for nested schema](#nestedatt--auto_promote--window))
+
+<a id="nestedatt--auto_promote--window"></a>
+### Nested Schema for `auto_promote.window`
+
+Read-Only:
+
+- `days` (Set of String) The days of the week a promote may start on.
+- `end` (String) When the window closes each day (`HH:MM`, up to `24:00`).
+- `start` (String) When the window opens each day (`HH:MM`).
+- `time_zone` (String) The IANA time zone of `start` and `end`.
+
 
 
 <a id="nestedatt--self_healing"></a>

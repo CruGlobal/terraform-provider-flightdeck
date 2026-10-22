@@ -897,8 +897,9 @@ func TestAgentWorkSendCIFailuresRefused(t *testing.T) {
 // A Flightdeck older than auto_merge is older than send_ci_failures too. A
 // configuration that sets only auto_merge fails there with one error, on
 // auto_merge: send_ci_failures was not sent, so it is not blamed. Upgraded to
-// the newest Flightdeck, the same configuration applies, and the unset
-// send_ci_failures is adopted from the server without planning anything.
+// the release with send_ci_failures, the same configuration applies, and the
+// unset send_ci_failures is adopted from the server without planning
+// anything.
 func TestProjectAgentWork_autoMergeOnAFlightdeckOlderThanBoth(t *testing.T) {
 	env := newTestEnv(t, "agent_work")
 	env.requireFake(t)
@@ -919,7 +920,7 @@ func TestProjectAgentWork_autoMergeOnAFlightdeckOlderThanBoth(t *testing.T) {
 				ExpectError: regexMust(`This Flightdeck does not support agent_work\.auto_merge yet`),
 			},
 			{
-				// Flightdeck is upgraded to the newest release.
+				// Flightdeck is upgraded to the release with send_ci_failures.
 				PreConfig: func() { env.fake.SetAgentWorkRelease(flightdecktest.AgentWorkWithSendCIFailures) },
 				Config:    withAutoMerge,
 				Check:     resource.TestCheckResourceAttr(projectRes, "agent_work.auto_merge", "true"),
@@ -994,9 +995,9 @@ func TestProjectAgentWork_newerSettingsAtCreateOnAFlightdeckOlderThanBoth(t *tes
 	}
 }
 
-// Flightdeck is upgraded from below auto_merge to the newest release, or
-// rolled back from the newest to below auto_merge, between the plan and the
-// apply: both newer settings change at once. Left unset, each keeps the value
+// Flightdeck is upgraded from below auto_merge to the release with
+// send_ci_failures, or rolled back from that release to below auto_merge,
+// between the plan and the apply: both settings change at once. Left unset, each keeps the value
 // the plan promised, and the next refresh adopts the server's for both
 // without planning anything.
 func TestProjectAgentWork_newerSettingsUnsetSurviveAServerChangeDuringApply(t *testing.T) {

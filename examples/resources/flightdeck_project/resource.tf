@@ -128,5 +128,10 @@ resource "flightdeck_project" "billing" {
     # waiting for a person to add the agent label. Only workflows on the
     # GitHub integration's ci_workflows list count.
     send_ci_failures = true
+    # Don't have agents wait for CI (on by default): for a repository whose
+    # CI takes longer than an agent should wait. The agent finishes once it
+    # has pushed, and Flightdeck re-runs or follows up on a failed run itself
+    # for workflows on the GitHub integration's ci_workflows list.
+    wait_for_checks = false
   }
 }

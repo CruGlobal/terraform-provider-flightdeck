@@ -81,6 +81,7 @@ Read-Only:
 - `send_ci_failures` (Boolean) Whether items Flightdeck files for failed CI runs go to an agent without a person adding the agent label. Null on a Flightdeck older than the setting.
 - `task_max_minutes` (Number) The most minutes one task may run.
 - `task_max_usd` (Number) The most one task may cost, in US dollars.
+- `wait_for_checks` (Boolean) Whether an agent waits for its pull request's CI checks before it finishes. Null on a Flightdeck older than the setting.
 
 
 <a id="nestedatt--self_healing"></a>

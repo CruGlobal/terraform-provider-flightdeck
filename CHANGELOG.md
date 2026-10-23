@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.12.1...v0.13.0) (2026-10-22)
+
+
+### Added
+
+* manage a project's auto-promote settings (flightdeck_project.auto_promote) ([#58](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/58)) ([d151c46](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/d151c46de600d9f945dd7802488ba6203e49d27c))
+* manage agent_work.wait_for_checks on flightdeck_project ([#56](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/56)) ([48c01de](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/48c01de573ec603c428f6e2015ba7ff18c14f51f))
+
 ## [0.12.1](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.12.0...v0.12.1) (2026-10-21)
 
 

@@ -14,7 +14,7 @@ import (
 func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
 		s.stores["agent_work"] = &agentWorkStore{
-			enabled: true, release: AgentWorkWithWaitForChecks,
+			enabled: true, release: AgentWorkWithSendErrors,
 			byProject: map[int64]*AgentWorkSetting{}, extraBlockers: map[int64][]AgentWorkBlocker{},
 		}
 		mux.HandleFunc("GET /api/v1/projects/{project_id}/agent-work", s.showAgentWork)
@@ -35,6 +35,13 @@ type AgentWorkSetting struct {
 	// an agent without a person adding the agent label. Off by default, and
 	// never a blocker.
 	SendCIFailures bool
+	// SendErrors sends each item an error alert rule files to an agent, as
+	// fix-error, without a person adding the agent label. Off by default, and
+	// never a blocker. SendErrorsSince is when it last went from off to on,
+	// stamped whenever it changes (nil while it is off), and read-only over
+	// the API.
+	SendErrors      bool
+	SendErrorsSince *time.Time
 	// WaitForChecks has an agent wait for its pull request's CI checks, and fix
 	// a failure itself, before it finishes. ON by default, unlike the other
 	// switches, and never a blocker.
@@ -95,23 +102,26 @@ func (s *Server) SetAgentWorkEndpoint(on bool) {
 
 // AgentWorkRelease is a Flightdeck release the agent-work endpoint can act
 // as, oldest first. Flightdeck added auto_merge, then send_ci_failures, then
-// wait_for_checks, and a release knows every setting added up to it, so a
-// Flightdeck older than auto_merge is older than the other two as well. No
-// release knows a setting without the ones added before it, and the fake
-// cannot be made to.
+// wait_for_checks, then send_errors, and a release knows every setting added
+// up to it, so a Flightdeck older than auto_merge is older than the other
+// three as well. No release knows a setting without the ones added before it,
+// and the fake cannot be made to.
 type AgentWorkRelease int
 
 const (
-	// AgentWorkBeforeAutoMerge knows none of auto_merge, send_ci_failures and
-	// wait_for_checks.
+	// AgentWorkBeforeAutoMerge knows none of auto_merge, send_ci_failures,
+	// wait_for_checks and send_errors.
 	AgentWorkBeforeAutoMerge AgentWorkRelease = iota
 	// AgentWorkWithAutoMerge knows auto_merge only.
 	AgentWorkWithAutoMerge
 	// AgentWorkWithSendCIFailures knows auto_merge and send_ci_failures, but
-	// not wait_for_checks.
+	// not wait_for_checks or send_errors.
 	AgentWorkWithSendCIFailures
-	// AgentWorkWithWaitForChecks knows all three. The fake starts here.
+	// AgentWorkWithWaitForChecks knows auto_merge, send_ci_failures and
+	// wait_for_checks, but not send_errors.
 	AgentWorkWithWaitForChecks
+	// AgentWorkWithSendErrors knows all four. The fake starts here.
+	AgentWorkWithSendErrors
 )
 
 // SetAgentWorkRelease makes the agent-work endpoint act as the given
@@ -126,8 +136,8 @@ func (s *Server) SetAgentWorkRelease(release AgentWorkRelease) {
 // added auto_merge. false makes it older than that release, so it knows none
 // of the newer settings, as a real Flightdeck older than auto_merge does. true
 // makes it at least that release: one older is upgraded to it (auto_merge,
-// still no send_ci_failures or wait_for_checks), and a newer one is left as it
-// is.
+// still no send_ci_failures, wait_for_checks or send_errors), and a newer one
+// is left as it is.
 func (s *Server) SetAgentWorkAutoMergeSupported(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -143,10 +153,10 @@ func (s *Server) SetAgentWorkAutoMergeSupported(on bool) {
 // SetAgentWorkSendCIFailuresSupported moves the fake across the release that
 // added send_ci_failures. false makes it older than that release: a newer one
 // becomes the release with auto_merge but not send_ci_failures (nor
-// wait_for_checks), and one older than auto_merge stays so. true makes it at
-// least that release: one older is upgraded to it (auto_merge and
-// send_ci_failures, still no wait_for_checks), and the newest is left as it
-// is.
+// wait_for_checks or send_errors), and one older than auto_merge stays so.
+// true makes it at least that release: one older is upgraded to it
+// (auto_merge and send_ci_failures, still no wait_for_checks or send_errors),
+// and a newer one is left as it is.
 func (s *Server) SetAgentWorkSendCIFailuresSupported(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -160,19 +170,37 @@ func (s *Server) SetAgentWorkSendCIFailuresSupported(on bool) {
 }
 
 // SetAgentWorkWaitForChecksSupported moves the fake across the release that
-// added wait_for_checks. false makes it older than that release: the newest
-// becomes the release with send_ci_failures but not wait_for_checks, and an
-// older one stays as it is. true makes it the newest, which knows auto_merge
-// and send_ci_failures too.
+// added wait_for_checks. false makes it older than that release: a newer one
+// becomes the release with send_ci_failures but not wait_for_checks (nor
+// send_errors), and an older one stays as it is. true makes it at least that
+// release: one older is upgraded to it (auto_merge, send_ci_failures and
+// wait_for_checks, still no send_errors), and the newest is left as it is.
 func (s *Server) SetAgentWorkWaitForChecksSupported(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.agentWorkStore()
 	switch {
-	case on:
+	case on && st.release < AgentWorkWithWaitForChecks:
 		st.release = AgentWorkWithWaitForChecks
-	case st.release > AgentWorkWithSendCIFailures:
+	case !on && st.release > AgentWorkWithSendCIFailures:
 		st.release = AgentWorkWithSendCIFailures
+	}
+}
+
+// SetAgentWorkSendErrorsSupported moves the fake across the release that
+// added send_errors. false makes it older than that release: the newest
+// becomes the release with wait_for_checks but not send_errors, and an older
+// one stays as it is. true makes it the newest, which knows the other three
+// too.
+func (s *Server) SetAgentWorkSendErrorsSupported(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.agentWorkStore()
+	switch {
+	case on:
+		st.release = AgentWorkWithSendErrors
+	case st.release > AgentWorkWithWaitForChecks:
+		st.release = AgentWorkWithWaitForChecks
 	}
 }
 
@@ -191,6 +219,12 @@ func (st *agentWorkStore) knowsSendCIFailures() bool {
 // wait_for_checks.
 func (st *agentWorkStore) knowsWaitForChecks() bool {
 	return st.release >= AgentWorkWithWaitForChecks
+}
+
+// knowsSendErrors reports whether the release the fake acts as has
+// send_errors (and the read-only send_errors_since that comes with it).
+func (st *agentWorkStore) knowsSendErrors() bool {
+	return st.release >= AgentWorkWithSendErrors
 }
 
 // SetAgentWorkPoolConnected controls the pool_not_connected blocker. The fake
@@ -237,13 +271,16 @@ func (s *Server) SetAgentWorkOutOfBand(projectID int64, fn func(*AgentWorkSettin
 		row = &d
 		st.byProject[projectID] = row
 	}
-	before, beforeResearch := row.LabelID, row.ResearchLabelID
+	before, beforeResearch, beforeSendErrors := row.LabelID, row.ResearchLabelID, row.SendErrors
 	fn(row)
 	if !sameID(before, row.LabelID) {
 		stampLabelChosenAt(row)
 	}
 	if !sameID(beforeResearch, row.ResearchLabelID) {
 		stampResearchLabelChosenAt(row)
+	}
+	if beforeSendErrors != row.SendErrors {
+		stampSendErrorsSince(row)
 	}
 	row.LockVersion++
 	now := time.Now()
@@ -270,12 +307,12 @@ var (
 	agentWorkKinds    = []string{agentWorkImplement, agentWorkFixError, agentWorkResearch}
 	agentWorkRunbooks = []string{"implement-work-item@1"}
 	// agentWorkWritable are the settable keys in the API's order (the settings
-	// page's). writableKeys leaves auto_merge, send_ci_failures and
-	// wait_for_checks out on a Flightdeck older than each.
+	// page's). writableKeys leaves auto_merge, send_ci_failures, send_errors
+	// and wait_for_checks out on a Flightdeck older than each.
 	agentWorkWritable = []string{
-		"enabled", "kinds", "auto_merge", "send_ci_failures", "wait_for_checks", "label_id", "accept_machine_labels",
-		"research_label_id", "agent_account_id", "base_ref", "max_in_progress", "daily_budget_usd", "task_max_usd",
-		"task_max_minutes", "queue_minutes", "runbook",
+		"enabled", "kinds", "auto_merge", "send_ci_failures", "send_errors", "wait_for_checks", "label_id",
+		"accept_machine_labels", "research_label_id", "agent_account_id", "base_ref", "max_in_progress",
+		"daily_budget_usd", "task_max_usd", "task_max_minutes", "queue_minutes", "runbook",
 	}
 	agentWorkReadOnly = map[string]string{
 		"project_id":      "it is the :project_id in the path, and a project's agent work settings belong to that project",
@@ -283,6 +320,10 @@ var (
 		"label_chosen_at": "Flightdeck sets it when label_id changes: to now when a label is chosen, and to null when it is cleared",
 		"research_label_chosen_at": "Flightdeck sets it when research_label_id changes: to now when a label is chosen, " +
 			"and to null when it is cleared",
+		// Only on a Flightdeck that has send_errors (readOnlyKey); an older one
+		// refuses it as an unknown key.
+		"send_errors_since": "Flightdeck sets it when send_errors changes: to now when it is turned on, and to null " +
+			"when it is turned off",
 		"updated_at": "the database sets it",
 	}
 	// agentWorkNullable are the references a blank CLEARS rather than leaves
@@ -295,12 +336,23 @@ func (st *agentWorkStore) writableKeys() []string {
 	out := make([]string, 0, len(agentWorkWritable))
 	for _, key := range agentWorkWritable {
 		if (key == "auto_merge" && !st.knowsAutoMerge()) || (key == "send_ci_failures" && !st.knowsSendCIFailures()) ||
-			(key == "wait_for_checks" && !st.knowsWaitForChecks()) {
+			(key == "wait_for_checks" && !st.knowsWaitForChecks()) || (key == "send_errors" && !st.knowsSendErrors()) {
 			continue
 		}
 		out = append(out, key)
 	}
 	return out
+}
+
+// readOnlyKey reports why key is read-only on this Flightdeck, if it is.
+// send_errors_since came with send_errors, so an older Flightdeck does not
+// know it at all and refuses it as an unknown key instead.
+func (st *agentWorkStore) readOnlyKey(key string) (string, bool) {
+	if key == "send_errors_since" && !st.knowsSendErrors() {
+		return "", false
+	}
+	why, ok := agentWorkReadOnly[key]
+	return why, ok
 }
 
 // agentWorkNoOpinion is what a blank means for every key but the nullable
@@ -461,7 +513,7 @@ func agentWorkValue(key string, v any) (any, string) {
 		return agentWorkNoOpinion{}, ""
 	}
 	switch key {
-	case "enabled", "accept_machine_labels", "auto_merge", "send_ci_failures", "wait_for_checks":
+	case "enabled", "accept_machine_labels", "auto_merge", "send_ci_failures", "send_errors", "wait_for_checks":
 		if b, ok := v.(bool); ok {
 			return b, ""
 		}
@@ -546,7 +598,7 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 	delete(submitted, "lock_version")
 	var readOnly []string
 	for key := range submitted {
-		if why, ro := agentWorkReadOnly[key]; ro {
+		if why, ro := s.agentWorkStore().readOnlyKey(key); ro {
 			readOnly = append(readOnly, key+" is read-only over the API — "+why)
 		}
 	}
@@ -555,8 +607,8 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 		return current, false, http.StatusUnprocessableEntity, "invalid_attribute", strings.Join(readOnly, "; ")
 	}
 	// An older Flightdeck's unknown-key check comes before any value check, so
-	// it refuses auto_merge, send_ci_failures or wait_for_checks whatever its
-	// value, a blank included.
+	// it refuses auto_merge, send_ci_failures, send_errors or wait_for_checks
+	// whatever its value, a blank included.
 	writable := s.agentWorkStore().writableKeys()
 	var unknown []string
 	for key := range submitted {
@@ -615,6 +667,8 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 				next.AutoMerge = t
 			case "send_ci_failures":
 				next.SendCIFailures = t
+			case "send_errors":
+				next.SendErrors = t
 			case "wait_for_checks":
 				next.WaitForChecks = t
 			default:
@@ -783,7 +837,8 @@ func agentWorkEqual(a, b AgentWorkSetting) bool {
 			return false
 		}
 	}
-	return a.Enabled == b.Enabled && a.AutoMerge == b.AutoMerge && a.SendCIFailures == b.SendCIFailures && a.WaitForChecks == b.WaitForChecks &&
+	return a.Enabled == b.Enabled && a.AutoMerge == b.AutoMerge && a.SendCIFailures == b.SendCIFailures && a.SendErrors == b.SendErrors &&
+		a.WaitForChecks == b.WaitForChecks &&
 		sameID(a.LabelID, b.LabelID) && a.AcceptMachineLabels == b.AcceptMachineLabels &&
 		sameID(a.ResearchLabelID, b.ResearchLabelID) && sameID(a.AgentAccountID, b.AgentAccountID) &&
 		a.BaseRef == b.BaseRef && a.MaxInProgress == b.MaxInProgress && a.DailyBudgetUSD == b.DailyBudgetUSD && a.TaskMaxUSD == b.TaskMaxUSD && a.TaskMaxMinutes == b.TaskMaxMinutes &&
@@ -806,6 +861,17 @@ func stampResearchLabelChosenAt(row *AgentWorkSetting) {
 	}
 	now := time.Now()
 	row.ResearchLabelChosenAt = &now
+}
+
+// stampSendErrorsSince is the API's stamp when send_errors changes: now when
+// it is turned on, nil when it is turned off.
+func stampSendErrorsSince(row *AgentWorkSetting) {
+	if !row.SendErrors {
+		row.SendErrorsSince = nil
+		return
+	}
+	now := time.Now()
+	row.SendErrorsSince = &now
 }
 
 // agentWorkBlockers is the fake's blockers, in the API's order, for the ones
@@ -913,6 +979,15 @@ func (s *Server) serializeAgentWork(p *Project, row AgentWorkSetting) map[string
 	if s.agentWorkStore().knowsWaitForChecks() {
 		out["wait_for_checks"] = row.WaitForChecks
 	}
+	if s.agentWorkStore().knowsSendErrors() {
+		out["send_errors"] = row.SendErrors
+		// Null while send_errors is off, as the API reads it.
+		var since any
+		if row.SendErrors && row.SendErrorsSince != nil {
+			since = iso(*row.SendErrorsSince)
+		}
+		out["send_errors_since"] = since
+	}
 	return out
 }
 
@@ -989,6 +1064,9 @@ func (s *Server) updateAgentWork(w http.ResponseWriter, r *http.Request) {
 	}
 	if !sameID(current.ResearchLabelID, next.ResearchLabelID) {
 		stampResearchLabelChosenAt(&next)
+	}
+	if current.SendErrors != next.SendErrors {
+		stampSendErrorsSince(&next)
 	}
 	if persisted {
 		next.LockVersion = current.LockVersion + 1

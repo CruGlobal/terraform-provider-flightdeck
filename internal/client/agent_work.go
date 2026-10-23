@@ -32,6 +32,15 @@ type AgentWork struct {
 	// knows the setting always reports true or false, and one older than it
 	// reads nil and refuses any write naming it as an unknown key.
 	SendCIFailures *bool `json:"send_ci_failures"`
+	// SendErrors sends each item one of Flightdeck's error alert rules files
+	// to an agent, as fix-error, without a person adding the agent label, while
+	// fix-error is one of the kinds. Only an item filed since the switch last
+	// went on counts; the read reports when that was as send_errors_since,
+	// which is read-only and which this client never sends. Like AutoMerge, a
+	// Flightdeck that knows the setting always reports true or false, and one
+	// older than it reads nil and refuses any write naming it as an unknown
+	// key.
+	SendErrors *bool `json:"send_errors"`
 	// WaitForChecks says whether an agent waits for its pull request's CI
 	// checks, and fixes a failure itself, before it finishes. True by default:
 	// false asks the agent pool not to wait for CI on each pull request task,
@@ -77,6 +86,10 @@ func (aw *AgentWork) ReportsSendCIFailures() bool { return aw.SendCIFailures != 
 // wait_for_checks setting: a read from one that does always has the key.
 func (aw *AgentWork) ReportsWaitForChecks() bool { return aw.WaitForChecks != nil }
 
+// ReportsSendErrors reports whether the Flightdeck that answered knows the
+// send_errors setting: a read from one that does always has the key.
+func (aw *AgentWork) ReportsSendErrors() bool { return aw.SendErrors != nil }
+
 // AgentWorkBlocker is one reason Flightdeck would not send a project's work
 // right now. Code is a stable slug; Message says what is in the way.
 type AgentWorkBlocker struct {
@@ -96,21 +109,21 @@ var AgentWorkRunbooks = []string{"implement-work-item@1"}
 
 // AgentWorkSettingKeys are the writable settings, in the order the API
 // documents them. Every other key the read reports (project_id, blockers,
-// label_chosen_at, research_label_chosen_at, updated_at) is refused on a
-// write with a 422.
+// label_chosen_at, research_label_chosen_at, send_errors_since, updated_at)
+// is refused on a write with a 422.
 //
 // A key sent as null or a blank string is "no opinion" and leaves the stored
 // value alone, EXCEPT label_id, research_label_id and agent_account_id, where
 // a blank clears the choice. So a client must leave an unmanaged key out of
 // the write rather than send it empty.
 //
-// auto_merge, send_ci_failures and wait_for_checks are newer than the rest: a
-// Flightdeck older than any of them refuses any write naming it as an unknown
-// key, so none of them must ever be sent unless asked for.
+// auto_merge, send_ci_failures, send_errors and wait_for_checks are newer
+// than the rest: a Flightdeck older than any of them refuses any write naming
+// it as an unknown key, so none of them must ever be sent unless asked for.
 var AgentWorkSettingKeys = []string{
-	"enabled", "kinds", "auto_merge", "send_ci_failures", "wait_for_checks", "label_id", "accept_machine_labels",
-	"research_label_id", "agent_account_id", "base_ref", "max_in_progress", "daily_budget_usd", "task_max_usd",
-	"task_max_minutes", "queue_minutes", "runbook",
+	"enabled", "kinds", "auto_merge", "send_ci_failures", "send_errors", "wait_for_checks", "label_id",
+	"accept_machine_labels", "research_label_id", "agent_account_id", "base_ref", "max_in_progress",
+	"daily_budget_usd", "task_max_usd", "task_max_minutes", "queue_minutes", "runbook",
 }
 
 const agentWorkRoot = "agent_work"

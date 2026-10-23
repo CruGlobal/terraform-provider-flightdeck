@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.13.0...v0.14.0) (2026-10-23)
+
+
+### Added
+
+* manage agent_work.send_errors on flightdeck_project ([#59](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/59)) ([8231075](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/82310757bf7d072f03f0541279a9defd06b73091))
+
 ## [0.13.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.12.1...v0.13.0) (2026-10-22)
 
 

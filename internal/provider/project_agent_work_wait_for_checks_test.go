@@ -379,7 +379,8 @@ func TestProjectAgentWork_waitForChecksOnAnOlderFlightdeckAtCreateWarns(t *testi
 		t.Fatalf("no create-time warning on agent_work.wait_for_checks; apply warnings: %s", describeWithPaths(warnings))
 	}
 	for _, w := range warnings {
-		if strings.Contains(w.Summary, "auto_merge") || strings.Contains(w.Summary, "send_ci_failures") {
+		if strings.Contains(w.Summary, "auto_merge") || strings.Contains(w.Summary, "send_ci_failures") ||
+			strings.Contains(w.Summary, "send_errors") {
 			t.Errorf("only wait_for_checks was sent, so nothing else may warn about it: %s", w.Summary)
 		}
 	}
@@ -906,11 +907,12 @@ func TestProjectAgentWork_newerSettingsAtCreateOnAFlightdeckOlderThanAll(t *test
 	}
 }
 
-// Flightdeck is upgraded from below auto_merge to the newest release, or
-// rolled back from the newest to below auto_merge, between the plan and the
-// apply: all three newer settings change at once. Left unset, each keeps the
-// value the plan promised, and the next refresh adopts the server's for all
-// of them without planning anything.
+// Flightdeck is upgraded from below auto_merge to the release with
+// wait_for_checks, or rolled back from that release to below auto_merge,
+// between the plan and the apply: auto_merge, send_ci_failures and
+// wait_for_checks change at once. Left unset, each keeps the value the plan
+// promised, and the next refresh adopts the server's for all of them without
+// planning anything.
 func TestProjectAgentWork_allNewerSettingsUnsetSurviveAServerChangeDuringApply(t *testing.T) {
 	release := func(all bool) flightdecktest.AgentWorkRelease {
 		if all {

@@ -673,12 +673,252 @@ func TestAgentWork_waitForChecksContract(t *testing.T) {
 	}
 }
 
+// The fake's send_errors follows the API's contract, the same rule as
+// send_ci_failures: it is false until set, true and false are values, a null
+// or a blank is no opinion, leaving the key out leaves it alone, and any other
+// value is a 422 invalid_attribute naming the key. The read also carries
+// send_errors_since, which the fake stamps when send_errors turns on, clears
+// when it turns off, and refuses on a write as read-only, as the API does. A
+// Flightdeck older than the setting reads without either key and refuses any
+// write naming them, whatever the value, as unknown keys. The provider's tests
+// lean on this, so it is checked here directly, including a Flightdeck that
+// has the other three newer settings but not this one, and one older than all
+// four.
+func TestAgentWork_sendErrorsContract(t *testing.T) {
+	ctx := context.Background()
+	fake := flightdecktest.New(t)
+	c, err := New(fake.URL, fake.Token())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := fake.AddProject("Send errors", "SER").ID
+	// since reads send_errors_since as the API sends it (AgentWork does not
+	// carry it), and whether the read has the key at all.
+	since := func() (any, bool) {
+		t.Helper()
+		got, err := GetResource[map[string]any](ctx, c, agentWorkPath(project), agentWorkRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, ok := got["send_errors_since"]
+		return v, ok
+	}
+	stamped := func(what string) string {
+		t.Helper()
+		v, ok := since()
+		str, isStr := v.(string)
+		if !ok || !isStr {
+			t.Fatalf("%s: send_errors_since must be a time, got %#v (present: %t)", what, v, ok)
+		}
+		if _, err := time.Parse(time.RFC3339, str); err != nil {
+			t.Fatalf("%s: send_errors_since %q is not RFC 3339: %v", what, str, err)
+		}
+		return str
+	}
+	cleared := func(what string) {
+		t.Helper()
+		if v, ok := since(); !ok || v != nil {
+			t.Fatalf("%s: send_errors_since must read null, got %#v (present: %t)", what, v, ok)
+		}
+	}
+
+	aw, err := c.GetAgentWork(ctx, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !aw.ReportsSendErrors() || *aw.SendErrors {
+		t.Fatalf("an unsaved project reads send_errors false, got %s (reported: %t)", show(aw.SendErrors), aw.ReportsSendErrors())
+	}
+	cleared("an unsaved project")
+	version := aw.LockVersion
+	write := func(fields Fields) (*AgentWork, error) {
+		t.Helper()
+		got, err := c.UpdateAgentWork(ctx, project, fields, version)
+		if err == nil {
+			version = got.LockVersion
+		}
+		return got, err
+	}
+	mustWrite := func(fields Fields) *AgentWork {
+		t.Helper()
+		got, err := write(fields)
+		if err != nil {
+			t.Fatalf("writing %v: %v", fields, err)
+		}
+		return got
+	}
+	want := func(got *AgentWork, want bool, what string) {
+		t.Helper()
+		if got.SendErrors == nil || *got.SendErrors != want {
+			t.Fatalf("%s: send_errors reads %s, want %t", what, show(got.SendErrors), want)
+		}
+	}
+	othersAre := func(got *AgentWork, autoMerge, sendCIFailures, waitForChecks bool) {
+		t.Helper()
+		if got.AutoMerge == nil || *got.AutoMerge != autoMerge || got.SendCIFailures == nil || *got.SendCIFailures != sendCIFailures ||
+			got.WaitForChecks == nil || *got.WaitForChecks != waitForChecks {
+			t.Fatalf("setting send_errors must leave the other switches alone, got auto_merge %s, send_ci_failures %s, wait_for_checks %s",
+				show(got.AutoMerge), show(got.SendCIFailures), show(got.WaitForChecks))
+		}
+	}
+
+	got := mustWrite(Fields{"send_errors": true})
+	want(got, true, "set true")
+	if got.LockVersion != 1 {
+		t.Fatalf("the first write that changes something creates the row at 1, got %d", got.LockVersion)
+	}
+	othersAre(got, false, false, true)
+	first := stamped("turned on")
+
+	// A null or a blank is no opinion: nothing changes, no version moves, and
+	// the time it was turned on stays.
+	for _, blank := range []any{nil, "", "  ", "\t\n\v\f\r ", "\x00", " \x00\t"} {
+		got = mustWrite(Fields{"send_errors": blank})
+		want(got, true, fmt.Sprintf("a blank %#v", blank))
+		if got.LockVersion != 1 {
+			t.Fatalf("a blank %#v moved lock_version to %d", blank, got.LockVersion)
+		}
+	}
+	if now := stamped("after the blanks"); now != first {
+		t.Fatalf("a blank moved send_errors_since from %s to %s", first, now)
+	}
+
+	// Leaving the key out leaves it alone, and so do the other switches.
+	got = mustWrite(Fields{"max_in_progress": 2})
+	want(got, true, "a write without the key")
+	got = mustWrite(Fields{"auto_merge": true, "send_ci_failures": true, "wait_for_checks": false})
+	want(got, true, "a write of the other switches only")
+
+	// Setting it to what it already is changes nothing, so the time stays.
+	// Move the stored time back first, so a fresh stamp would show.
+	longAgo := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	fake.SetAgentWorkOutOfBand(project, func(row *flightdecktest.AgentWorkSetting) { row.SendErrorsSince = &longAgo })
+	if aw, err = c.GetAgentWork(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	version = aw.LockVersion
+	got = mustWrite(Fields{"send_errors": true})
+	if got.LockVersion != version {
+		t.Fatalf("writing send_errors true when it is already true moved lock_version to %d", got.LockVersion)
+	}
+	if now := stamped("set to what it already is"); now != longAgo.Format(time.RFC3339) {
+		t.Fatalf("a write that changed nothing moved send_errors_since to %s", now)
+	}
+
+	// send_errors_since is the server's: refused as read-only, with its reason,
+	// and nothing else in the write is saved.
+	for _, value := range []any{"2026-10-01T00:00:00Z", nil} {
+		_, err := write(Fields{"send_errors_since": value, "send_errors": false, "max_in_progress": 3})
+		apiErr, ok := AsError(err)
+		if !ok || apiErr.Status != 422 || apiErr.Code != CodeInvalidAttribute ||
+			!strings.HasPrefix(apiErr.Message, "send_errors_since is read-only over the API") ||
+			!strings.HasSuffix(apiErr.Message, "Flightdeck sets it when send_errors changes: to now when it is turned on, and to null when it is turned off") {
+			t.Fatalf("writing send_errors_since %#v: want a 422 invalid_attribute saying it is read-only, got %v", value, err)
+		}
+	}
+	if aw, err = c.GetAgentWork(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	want(aw, true, "after the refused send_errors_since")
+	if aw.MaxInProgress != 2 {
+		t.Fatalf("a refused send_errors_since must leave the rest of its write unsaved, max_in_progress is %d", aw.MaxInProgress)
+	}
+
+	got = mustWrite(Fields{"send_errors": false})
+	want(got, false, "set false")
+	othersAre(got, true, true, false)
+	cleared("turned off")
+
+	// Turned on again, it is stamped afresh.
+	got = mustWrite(Fields{"send_errors": true})
+	want(got, true, "set true again")
+	if again := stamped("turned on again"); again == longAgo.Format(time.RFC3339) {
+		t.Fatalf("turning send_errors on again kept the old send_errors_since %s", again)
+	}
+	got = mustWrite(Fields{"send_errors": false})
+	want(got, false, "set false again")
+
+	// Only a real JSON boolean is a value, refused in the API's words.
+	for _, tc := range []struct {
+		bad  any
+		echo string
+	}{
+		{"true", `"true"`}, {"false", `"false"`}, {1, "1"}, {0, "0"}, {[]any{}, "[]"}, {[]any{true}, "[true]"},
+		{map[string]any{}, "{}"}, {map[string]any{"on": true}, `{"on" => true}`},
+		{"yes", `"yes"`}, {"\u00a0", "\"\u00a0\""},
+	} {
+		_, err := write(Fields{"send_errors": tc.bad, "max_in_progress": 4})
+		apiErr, ok := AsError(err)
+		msg := "send_errors must be true or false, got " + tc.echo
+		if !ok || apiErr.Status != 422 || apiErr.Code != CodeInvalidAttribute || apiErr.Message != msg {
+			t.Fatalf("writing send_errors %#v: want a 422 invalid_attribute saying %q, got %v", tc.bad, msg, err)
+		}
+	}
+	if aw, err = c.GetAgentWork(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	want(aw, false, "after the refused writes")
+	if aw.MaxInProgress != 2 {
+		t.Fatalf("a refused send_errors must leave the rest of its write unsaved, max_in_progress is %d", aw.MaxInProgress)
+	}
+
+	// A Flightdeck that has the other three newer settings but not
+	// send_errors: neither key is read, and both are unknown on a write.
+	fake.SetAgentWorkSendErrorsSupported(false)
+	if aw, err = c.GetAgentWork(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if aw.ReportsSendErrors() || !aw.ReportsAutoMerge() || !aw.ReportsSendCIFailures() || !aw.ReportsWaitForChecks() {
+		t.Fatalf("this Flightdeck reads the other three newer settings but not send_errors, got send_errors %s, auto_merge %s, "+
+			"send_ci_failures %s, wait_for_checks %s", show(aw.SendErrors), show(aw.AutoMerge), show(aw.SendCIFailures), show(aw.WaitForChecks))
+	}
+	if v, ok := since(); ok {
+		t.Fatalf("this Flightdeck must not read send_errors_since, got %#v", v)
+	}
+	version = aw.LockVersion
+	for _, value := range []any{true, false, nil, ""} {
+		_, err := write(Fields{"send_errors": value, "wait_for_checks": true})
+		apiErr, ok := AsError(err)
+		if !ok || apiErr.Status != 422 || apiErr.Code != CodeInvalidAttribute ||
+			!strings.HasPrefix(apiErr.Message, "unknown key: send_errors (settable: enabled, kinds, auto_merge, send_ci_failures, wait_for_checks, label_id, ") {
+			t.Fatalf("this Flightdeck must refuse send_errors %#v as an unknown key and list the other switches as settable, got %v", value, err)
+		}
+		if strings.Contains(strings.TrimPrefix(apiErr.Message, "unknown key: send_errors"), "send_errors") {
+			t.Fatalf("this Flightdeck must not list send_errors as settable: %s", apiErr.Message)
+		}
+	}
+	_, err = write(Fields{"send_errors_since": "2026-10-01T00:00:00Z"})
+	if apiErr, ok := AsError(err); !ok || apiErr.Status != 422 || apiErr.Code != CodeInvalidAttribute ||
+		!strings.HasPrefix(apiErr.Message, "unknown key: send_errors_since (settable: ") {
+		t.Fatalf("this Flightdeck must refuse send_errors_since as an unknown key, not a read-only one, got %v", err)
+	}
+	got = mustWrite(Fields{"wait_for_checks": true})
+	if got.WaitForChecks == nil || !*got.WaitForChecks || got.ReportsSendErrors() {
+		t.Fatalf("this Flightdeck takes a write without send_errors: wait_for_checks %s, send_errors %s",
+			show(got.WaitForChecks), show(got.SendErrors))
+	}
+
+	// A Flightdeck older than all four names all four, sorted, as the API
+	// does.
+	fake.SetAgentWorkAutoMergeSupported(false)
+	_, err = write(Fields{"send_errors": true, "wait_for_checks": false, "send_ci_failures": false, "auto_merge": false})
+	apiErr, ok := AsError(err)
+	if !ok || apiErr.Status != 422 || apiErr.Code != CodeInvalidAttribute ||
+		!strings.HasPrefix(apiErr.Message, "unknown keys: auto_merge, send_ci_failures, send_errors, wait_for_checks (settable: enabled, kinds, label_id, ") {
+		t.Fatalf("a Flightdeck older than all four must refuse them as unknown keys, got %v", err)
+	}
+	if row := fake.AgentWorkOf(project); row == nil || row.SendErrors || row.SendErrorsSince != nil || !row.WaitForChecks ||
+		!row.SendCIFailures || !row.AutoMerge {
+		t.Fatalf("the older Flightdecks' refusals must save nothing, got %+v", row)
+	}
+}
+
 // The fake acts as one Flightdeck release at a time, and releases are
 // ordered: auto_merge came first, then send_ci_failures, then
-// wait_for_checks. So a fake older than auto_merge knows none of them, and
-// none knows a setting without the ones before it. The older-Flightdeck tests
-// of all three settings lean on this, so the switches are checked here
-// directly.
+// wait_for_checks, then send_errors. So a fake older than auto_merge knows
+// none of them, and none knows a setting without the ones before it. The
+// older-Flightdeck tests of all four settings lean on this, so the switches
+// are checked here directly.
 func TestAgentWork_fakeReleasesAreOrdered(t *testing.T) {
 	ctx := context.Background()
 	fake := flightdecktest.New(t)
@@ -687,24 +927,27 @@ func TestAgentWork_fakeReleasesAreOrdered(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := fake.AddProject("Releases", "REL").ID
-	knows := func(what string, autoMerge, sendCIFailures, waitForChecks bool) {
+	knows := func(what string, autoMerge, sendCIFailures, waitForChecks, sendErrors bool) {
 		t.Helper()
 		aw, err := c.GetAgentWork(ctx, project)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if aw.ReportsAutoMerge() != autoMerge || aw.ReportsSendCIFailures() != sendCIFailures || aw.ReportsWaitForChecks() != waitForChecks {
-			t.Fatalf("%s: reads auto_merge %t, send_ci_failures %t and wait_for_checks %t, want %t, %t and %t", what,
-				aw.ReportsAutoMerge(), aw.ReportsSendCIFailures(), aw.ReportsWaitForChecks(), autoMerge, sendCIFailures, waitForChecks)
+		if aw.ReportsAutoMerge() != autoMerge || aw.ReportsSendCIFailures() != sendCIFailures || aw.ReportsWaitForChecks() != waitForChecks ||
+			aw.ReportsSendErrors() != sendErrors {
+			t.Fatalf("%s: reads auto_merge %t, send_ci_failures %t, wait_for_checks %t and send_errors %t, want %t, %t, %t and %t", what,
+				aw.ReportsAutoMerge(), aw.ReportsSendCIFailures(), aw.ReportsWaitForChecks(), aw.ReportsSendErrors(),
+				autoMerge, sendCIFailures, waitForChecks, sendErrors)
 		}
 		// A write naming a setting the release lacks is refused as an unknown
 		// key; one it knows is taken.
-		for key, known := range map[string]bool{"auto_merge": autoMerge, "send_ci_failures": sendCIFailures, "wait_for_checks": waitForChecks} {
+		for key, known := range map[string]bool{"auto_merge": autoMerge, "send_ci_failures": sendCIFailures,
+			"wait_for_checks": waitForChecks, "send_errors": sendErrors} {
 			_, err := c.UpdateAgentWork(ctx, project, Fields{key: false}, aw.LockVersion)
 			switch {
 			case known && err != nil:
 				t.Fatalf("%s: a write of %s must be taken, got %v", what, key, err)
-			case !known && (err == nil || !strings.Contains(err.Error(), "unknown key: "+key)):
+			case !known && (err == nil || !strings.Contains(err.Error(), "unknown key: "+key+" ")):
 				t.Fatalf("%s: a write of %s must be refused as an unknown key, got %v", what, key, err)
 			}
 			// Reread: a write that changed something moved the version.
@@ -714,35 +957,56 @@ func TestAgentWork_fakeReleasesAreOrdered(t *testing.T) {
 		}
 	}
 
-	knows("the fake's default", true, true, true)
+	knows("the fake's default", true, true, true, true)
 	fake.SetAgentWorkAutoMergeSupported(false)
-	knows("auto_merge turned off", false, false, false)
+	knows("auto_merge turned off", false, false, false, false)
 	fake.SetAgentWorkAutoMergeSupported(true)
-	knows("auto_merge turned back on", true, false, false)
+	knows("auto_merge turned back on", true, false, false, false)
 	fake.SetAgentWorkSendCIFailuresSupported(true)
-	knows("send_ci_failures turned on", true, true, false)
+	knows("send_ci_failures turned on", true, true, false, false)
 	fake.SetAgentWorkSendCIFailuresSupported(false)
-	knows("send_ci_failures turned off", true, false, false)
+	knows("send_ci_failures turned off", true, false, false, false)
 	fake.SetAgentWorkAutoMergeSupported(true)
-	knows("auto_merge turned on, already known", true, false, false)
+	knows("auto_merge turned on, already known", true, false, false, false)
 	fake.SetAgentWorkRelease(flightdecktest.AgentWorkBeforeAutoMerge)
 	fake.SetAgentWorkSendCIFailuresSupported(false)
-	knows("send_ci_failures turned off below auto_merge", false, false, false)
+	knows("send_ci_failures turned off below auto_merge", false, false, false, false)
 	fake.SetAgentWorkSendCIFailuresSupported(true)
-	knows("send_ci_failures turned on below auto_merge", true, true, false)
+	knows("send_ci_failures turned on below auto_merge", true, true, false, false)
 	fake.SetAgentWorkRelease(flightdecktest.AgentWorkWithAutoMerge)
-	knows("the release with auto_merge", true, false, false)
+	knows("the release with auto_merge", true, false, false, false)
 	fake.SetAgentWorkWaitForChecksSupported(true)
-	knows("wait_for_checks turned on", true, true, true)
+	knows("wait_for_checks turned on", true, true, true, false)
 	fake.SetAgentWorkSendCIFailuresSupported(true)
-	knows("send_ci_failures turned on, already known", true, true, true)
+	knows("send_ci_failures turned on, already known", true, true, true, false)
 	fake.SetAgentWorkWaitForChecksSupported(false)
-	knows("wait_for_checks turned off", true, true, false)
+	knows("wait_for_checks turned off", true, true, false, false)
 	fake.SetAgentWorkRelease(flightdecktest.AgentWorkBeforeAutoMerge)
 	fake.SetAgentWorkWaitForChecksSupported(false)
-	knows("wait_for_checks turned off below auto_merge", false, false, false)
+	knows("wait_for_checks turned off below auto_merge", false, false, false, false)
 	fake.SetAgentWorkWaitForChecksSupported(true)
-	knows("wait_for_checks turned on below auto_merge", true, true, true)
+	knows("wait_for_checks turned on below auto_merge", true, true, true, false)
 	fake.SetAgentWorkSendCIFailuresSupported(false)
-	knows("send_ci_failures turned off from the newest", true, false, false)
+	knows("send_ci_failures turned off from wait_for_checks", true, false, false, false)
+	fake.SetAgentWorkSendErrorsSupported(true)
+	knows("send_errors turned on", true, true, true, true)
+	fake.SetAgentWorkWaitForChecksSupported(true)
+	knows("wait_for_checks turned on, already known", true, true, true, true)
+	fake.SetAgentWorkSendErrorsSupported(false)
+	knows("send_errors turned off", true, true, true, false)
+	fake.SetAgentWorkSendErrorsSupported(false)
+	knows("send_errors turned off again", true, true, true, false)
+	fake.SetAgentWorkRelease(flightdecktest.AgentWorkBeforeAutoMerge)
+	fake.SetAgentWorkSendErrorsSupported(false)
+	knows("send_errors turned off below auto_merge", false, false, false, false)
+	fake.SetAgentWorkSendErrorsSupported(true)
+	knows("send_errors turned on below auto_merge", true, true, true, true)
+	fake.SetAgentWorkWaitForChecksSupported(false)
+	knows("wait_for_checks turned off from the newest", true, true, false, false)
+	fake.SetAgentWorkSendErrorsSupported(true)
+	fake.SetAgentWorkSendCIFailuresSupported(false)
+	knows("send_ci_failures turned off from the newest", true, false, false, false)
+	fake.SetAgentWorkSendErrorsSupported(true)
+	fake.SetAgentWorkAutoMergeSupported(false)
+	knows("auto_merge turned off from the newest", false, false, false, false)
 }

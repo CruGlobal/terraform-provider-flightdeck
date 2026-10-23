@@ -141,7 +141,7 @@ resource "flightdeck_project" "billing" {
   agent_work = {
     enabled = true
     # Add a kind only once AutoPilot allows it for the project.
-    kinds             = ["implement-work-item", "research"]
+    kinds             = ["implement-work-item", "fix-error", "research"]
     label_id          = flightdeck_label.agent_ready.id
     research_label_id = flightdeck_label.research_first.id
     agent_account_id  = data.flightdeck_workspace_member.agent.id
@@ -156,6 +156,11 @@ resource "flightdeck_project" "billing" {
     # waiting for a person to add the agent label. Only workflows on the
     # GitHub integration's ci_workflows list count.
     send_ci_failures = true
+    # Send items Flightdeck's error alert rules file to an agent as
+    # fix-error, without waiting for a person to add the agent label. It
+    # needs "fix-error" in kinds, and only items filed after it is turned on
+    # count.
+    send_errors = true
     # Don't have agents wait for CI (on by default): for a repository whose
     # CI takes longer than an agent should wait. The agent finishes once it
     # has pushed, and Flightdeck re-runs or follows up on a failed run itself

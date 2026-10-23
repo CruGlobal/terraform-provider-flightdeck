@@ -80,6 +80,7 @@ Read-Only:
 - `research_label_id` (Number) Id of the label that sends an item for research first, if one is chosen.
 - `runbook` (String) The steps the agent follows for `implement-work-item`.
 - `send_ci_failures` (Boolean) Whether items Flightdeck files for failed CI runs go to an agent without a person adding the agent label. Null on a Flightdeck older than the setting.
+- `send_errors` (Boolean) Whether items Flightdeck's error alert rules file go to an agent, as `fix-error`, without a person adding the agent label. Null on a Flightdeck older than the setting.
 - `task_max_minutes` (Number) The most minutes one task may run.
 - `task_max_usd` (Number) The most one task may cost, in US dollars.
 - `wait_for_checks` (Boolean) Whether an agent waits for its pull request's CI checks before it finishes. Null on a Flightdeck older than the setting.

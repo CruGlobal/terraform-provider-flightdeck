@@ -51,12 +51,14 @@ import (
 //     with the project and the day, like self-healing's rollback_blockers. It
 //     is reported as warnings on refresh and apply while agent work is on,
 //     never stored.
-//   - `auto_merge`, `send_ci_failures` and `wait_for_checks` are newer than
-//     the rest (agentWorkNewerSettings). A Flightdeck older than one has no
-//     such key on a read and refuses any write naming it, so it reads as null
-//     there and, like every setting, is sent only when configured. A write
-//     that names it to such a Flightdeck is refused, and the provider says to
-//     upgrade (agentWorkSettingRefused).
+//   - `auto_merge`, `send_ci_failures`, `send_errors` and `wait_for_checks`
+//     are newer than the rest (agentWorkNewerSettings). A Flightdeck older
+//     than one has no such key on a read and refuses any write naming it, so
+//     it reads as null there and, like every setting, is sent only when
+//     configured. A write that names it to such a Flightdeck is refused, and
+//     the provider says to upgrade (agentWorkSettingRefused). The read's
+//     `send_errors_since` is read-only and not in the block, so it is never
+//     sent.
 //
 // Every attribute is Optional+Computed or Computed, for the reason the
 // slack_channel block gives: an Optional-only member nulled by dropping the
@@ -68,6 +70,7 @@ type agentWorkModel struct {
 	Kinds               types.Set    `tfsdk:"kinds"`
 	AutoMerge           types.Bool   `tfsdk:"auto_merge"`
 	SendCIFailures      types.Bool   `tfsdk:"send_ci_failures"`
+	SendErrors          types.Bool   `tfsdk:"send_errors"`
 	WaitForChecks       types.Bool   `tfsdk:"wait_for_checks"`
 	LabelID             types.Int64  `tfsdk:"label_id"`
 	LabelChosenAt       types.String `tfsdk:"label_chosen_at"`
@@ -92,6 +95,7 @@ var agentWorkAttrTypes = map[string]attr.Type{
 	"kinds":                    types.SetType{ElemType: types.StringType},
 	"auto_merge":               types.BoolType,
 	"send_ci_failures":         types.BoolType,
+	"send_errors":              types.BoolType,
 	"wait_for_checks":          types.BoolType,
 	"label_id":                 types.Int64Type,
 	"label_chosen_at":          types.StringType,
@@ -158,7 +162,7 @@ func agentWorkSchema() schema.Attribute {
 	return schema.SingleNestedAttribute{
 		MarkdownDescription: "Agent work settings, managed through the project's `agent-work` API resource: whether " +
 			"AutoPilot, the AI agents Flightdeck sends work to, may take this project's work items, which labels mark an " +
-			"item for them, whether items filed for failed CI runs go to them without a label, the service account they " +
+			"item for them, whether items filed for failed CI runs or logged errors go to them without a label, the service account they " +
 			"work as, whether they wait for CI on their pull requests, and how much they may spend and run. An agent works on a " +
 			"copy of the project's GitHub repository and opens a pull request, which a person reviews and merges unless " +
 			"`auto_merge` is on. Reading and " +
@@ -185,7 +189,8 @@ func agentWorkSchema() schema.Attribute {
 				MarkdownDescription: "Whether AutoPilot agents may take this project's work items. Off by default. Once it " +
 					"is on and nothing in `blockers` stands in the way, agents take each work item a person marks with " +
 					"the agent label (and, while `send_ci_failures` is on, each item Flightdeck files for a failed CI " +
-					"run) and open pull requests for it, and, while `research` is one of the kinds, research " +
+					"run, and while `send_errors` is on, each item an error alert rule files) and open pull requests " +
+					"for it, and, while `research` is one of the kinds, research " +
 					"each item marked with the research label and post a report on it. A plan that turns it on warns. " +
 					"Flightdeck posts the change to the project's Slack updates. When unset, the project's current " +
 					"value is kept; set it explicitly, even to `false`, for Terraform to own it.",
@@ -212,6 +217,12 @@ func agentWorkSchema() schema.Attribute {
 			},
 			"send_ci_failures": schema.BoolAttribute{
 				MarkdownDescription: sendCIFailuresDescription,
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"send_errors": schema.BoolAttribute{
+				MarkdownDescription: sendErrorsDescription,
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
@@ -316,6 +327,7 @@ func agentWorkDataSourceSchema() datasourceschema.Attribute {
 			"kinds":                    datasourceschema.SetAttribute{MarkdownDescription: "The kinds of work agents may do.", ElementType: types.StringType, Computed: true},
 			"auto_merge":               datasourceschema.BoolAttribute{MarkdownDescription: autoMergeDataSourceDescription, Computed: true},
 			"send_ci_failures":         datasourceschema.BoolAttribute{MarkdownDescription: sendCIFailuresDataSourceDescription, Computed: true},
+			"send_errors":              datasourceschema.BoolAttribute{MarkdownDescription: sendErrorsDataSourceDescription, Computed: true},
 			"wait_for_checks":          datasourceschema.BoolAttribute{MarkdownDescription: waitForChecksDataSourceDescription, Computed: true},
 			"label_id":                 datasourceschema.Int64Attribute{MarkdownDescription: "Id of the label that marks an item for an agent, if one is chosen.", Computed: true},
 			"label_chosen_at":          datasourceschema.StringAttribute{MarkdownDescription: "When `label_id` was last set to a label (RFC 3339).", Computed: true},
@@ -490,7 +502,8 @@ func sameAgentWorkSettings(a, b agentWorkModel) bool {
 	}
 	same := func(x, y attr.Value) bool { return !x.IsUnknown() && !y.IsUnknown() && x.Equal(y) }
 	return same(a.Enabled, b.Enabled) && same(a.Kinds, b.Kinds) && same(a.AutoMerge, b.AutoMerge) &&
-		same(a.SendCIFailures, b.SendCIFailures) && same(a.WaitForChecks, b.WaitForChecks) && same(a.LabelID, b.LabelID) &&
+		same(a.SendCIFailures, b.SendCIFailures) && same(a.SendErrors, b.SendErrors) && same(a.WaitForChecks, b.WaitForChecks) &&
+		same(a.LabelID, b.LabelID) &&
 		same(a.AcceptMachineLabels, b.AcceptMachineLabels) && same(a.ResearchLabelID, b.ResearchLabelID) &&
 		same(a.AgentAccountID, b.AgentAccountID) &&
 		same(a.BaseRef, b.BaseRef) && same(a.MaxInProgress, b.MaxInProgress) &&
@@ -503,8 +516,9 @@ func known(v attr.Value) bool { return !v.IsNull() && !v.IsUnknown() }
 
 // agentWorkActs is what the plan-time warning says agents will do.
 const agentWorkActs = "AutoPilot agents may then take each of this project's work items that a person marks with the " +
-	"agent label (and, while send_ci_failures is on, each item Flightdeck files for a failed CI run), work on a copy " +
-	"of its GitHub repository as the agent account, and open pull requests, which people " +
+	"agent label (and, while send_ci_failures is on, each item Flightdeck files for a failed CI run, and while " +
+	"send_errors is on, each item an error alert rule files), work on a copy of its GitHub repository as the agent " +
+	"account, and open pull requests, which people " +
 	"review and merge unless auto_merge is on. If research is one of the kinds, an item a person marks with the research label is researched " +
 	"instead, and the agent posts its report on the item as a comment. All of this stays within the daily budget " +
 	"and the per-task limits."
@@ -589,6 +603,7 @@ func agentWorkToObject(ctx context.Context, aw *client.AgentWork, diags *diag.Di
 		"kinds":                    set,
 		"auto_merge":               types.BoolPointerValue(aw.AutoMerge),
 		"send_ci_failures":         types.BoolPointerValue(aw.SendCIFailures),
+		"send_errors":              types.BoolPointerValue(aw.SendErrors),
 		"wait_for_checks":          types.BoolPointerValue(aw.WaitForChecks),
 		"label_id":                 types.Int64PointerValue(aw.LabelID),
 		"label_chosen_at":          types.StringPointerValue(aw.LabelChosenAt),
@@ -650,6 +665,7 @@ func agentWorkFields(ctx context.Context, block types.Object, diags *diag.Diagno
 	}
 	putBool("auto_merge", m.AutoMerge)
 	putBool("send_ci_failures", m.SendCIFailures)
+	putBool("send_errors", m.SendErrors)
 	putBool("wait_for_checks", m.WaitForChecks)
 	putInt("label_id", m.LabelID)
 	putBool("accept_machine_labels", m.AcceptMachineLabels)
@@ -767,10 +783,10 @@ const (
 // create), whose lock_version is the If-Match; without one, the current
 // version is read first. planned is the planned block, which a create-time
 // refusal hands back so the apply stays consistent with its plan, and whose
-// newer settings (auto_merge, send_ci_failures, wait_for_checks) the block keeps while the
-// configuration leaves them unset (keepUnsetAsPlanned). Either way, blockers
-// are reported as warnings while agent work is on; identifier names the
-// project in them.
+// newer settings (auto_merge, send_ci_failures, send_errors, wait_for_checks)
+// the block keeps while the configuration leaves them unset
+// (keepUnsetAsPlanned). Either way, blockers are reported as warnings while
+// agent work is on; identifier names the project in them.
 func writeAgentWork(ctx context.Context, c *client.Client, projectID int64, identifier string, configBlock, priorBlock, planned types.Object, apply agentWorkApply, diags *diag.Diagnostics) types.Object {
 	block := writeAgentWorkSettings(ctx, c, projectID, identifier, configBlock, priorBlock, planned, apply, diags)
 	for _, setting := range agentWorkNewerSettings {
@@ -1059,6 +1075,29 @@ const sendCIFailuresDescription = "Whether to send each work item Flightdeck fil
 const sendCIFailuresDataSourceDescription = "Whether items Flightdeck files for failed CI runs go to an agent " +
 	"without a person adding the agent label. Null on a Flightdeck older than the setting."
 
+// sendErrorsDescription is the resource attribute's documentation.
+const sendErrorsDescription = "Whether to send each work item one of Flightdeck's error alert rules files to an " +
+	"agent, as `fix-error`, without waiting for a person to add the agent label. Off by default, so such an item " +
+	"waits for a person to label it. It applies only while `fix-error` is one of the `kinds` and an agent label " +
+	"is chosen (`label_id`), and only to items filed since it was last turned on, within the last 24 hours: " +
+	"turning it on never sends the items already in the backlog. The error must be at `error` or `critical` " +
+	"level and still active (not muted, snoozed or resolved), and the alert rule that filed the item must still " +
+	"be on and still file work items. Flightdeck waits 15 minutes after an item is filed (or accepted, for an " +
+	"item that waits in intake), so a person who sees the alert can take it first, and never sends one a person " +
+	"is assigned to or has started. It sends each such item once, and only one item per error: after that, an " +
+	"item goes again only when a person adds the agent label. The usual limits still hold, such as " +
+	"`max_in_progress` and the budget. Turning it on or off is posted to the project's Slack updates. When " +
+	"unset, the project's current value is kept; set it explicitly, even to `false`, for Terraform to own it.\n\n" +
+	"Needs a Flightdeck that supports `send_errors`. On an older one it reads as null and is never sent while " +
+	"it is unset. Setting it there fails an update with an error that asks you to upgrade Flightdeck. On the apply " +
+	"that creates the project it is a warning instead, so the new project isn't marked tainted, and the next plan " +
+	"shows what is still to apply."
+
+// sendErrorsDataSourceDescription is the data source attribute's
+// documentation.
+const sendErrorsDataSourceDescription = "Whether items Flightdeck's error alert rules file go to an agent, as " +
+	"`fix-error`, without a person adding the agent label. Null on a Flightdeck older than the setting."
+
 // waitForChecksDescription is the resource attribute's documentation.
 const waitForChecksDescription = "Whether an agent waits for its pull request's CI checks, and fixes a failure " +
 	"itself, before it finishes. **On by default**, unlike the other switches here. Set it to `false` for a " +
@@ -1109,12 +1148,19 @@ var (
 		key: "send_ci_failures", added: "sending CI failures to agents",
 		unknownNote: agentWorkSendCIFailuresUnknownNote, reported: (*client.AgentWork).ReportsSendCIFailures,
 	}
+	agentWorkSendErrors = agentWorkNewerSetting{
+		key: "send_errors", added: "sending errors to agents",
+		unknownNote: agentWorkSendErrorsUnknownNote, reported: (*client.AgentWork).ReportsSendErrors,
+	}
 	agentWorkWaitForChecks = agentWorkNewerSetting{
 		key: "wait_for_checks", added: "the choice of whether agents wait for CI",
 		unknownNote: agentWorkWaitForChecksUnknownNote, reported: (*client.AgentWork).ReportsWaitForChecks,
 	}
-	// agentWorkNewerSettings are the newer settings, in the API's order.
-	agentWorkNewerSettings = []agentWorkNewerSetting{agentWorkAutoMerge, agentWorkSendCIFailures, agentWorkWaitForChecks}
+	// agentWorkNewerSettings are the newer settings, in the API's order. That
+	// is not the order Flightdeck added them in: send_errors came last, but
+	// the API lists it next to send_ci_failures.
+	agentWorkNewerSettings = []agentWorkNewerSetting{agentWorkAutoMerge, agentWorkSendCIFailures, agentWorkSendErrors,
+		agentWorkWaitForChecks}
 )
 
 // agentWorkAutoMergeUnknownNote is auto_merge's unknownNote.
@@ -1126,6 +1172,11 @@ const agentWorkAutoMergeUnknownNote = "If the API calls auto_merge an unknown ke
 const agentWorkSendCIFailuresUnknownNote = "If the API calls send_ci_failures an unknown key, this Flightdeck is " +
 	"older than the release that added sending CI failures to agents: upgrade Flightdeck first, or leave " +
 	"`send_ci_failures` out of the agent_work block."
+
+// agentWorkSendErrorsUnknownNote is send_errors' unknownNote.
+const agentWorkSendErrorsUnknownNote = "If the API calls send_errors an unknown key, this Flightdeck is older " +
+	"than the release that added sending errors to agents: upgrade Flightdeck first, or leave `send_errors` out " +
+	"of the agent_work block."
 
 // agentWorkWaitForChecksUnknownNote is wait_for_checks' unknownNote.
 const agentWorkWaitForChecksUnknownNote = "If the API calls wait_for_checks an unknown key, this Flightdeck is " +

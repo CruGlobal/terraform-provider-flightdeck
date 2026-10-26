@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/float64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
@@ -51,14 +53,20 @@ import (
 //     with the project and the day, like self-healing's rollback_blockers. It
 //     is reported as warnings on refresh and apply while agent work is on,
 //     never stored.
-//   - `auto_merge`, `send_ci_failures`, `send_errors` and `wait_for_checks`
-//     are newer than the rest (agentWorkNewerSettings). A Flightdeck older
-//     than one has no such key on a read and refuses any write naming it, so
-//     it reads as null there and, like every setting, is sent only when
-//     configured. A write that names it to such a Flightdeck is refused, and
-//     the provider says to upgrade (agentWorkSettingRefused). The read's
-//     `send_errors_since` is read-only and not in the block, so it is never
-//     sent.
+//   - `models`, `auto_merge`, `send_ci_failures`, `send_errors` and
+//     `wait_for_checks` are newer than the rest (agentWorkNewerSettings). A
+//     Flightdeck older than one has no such key on a read and refuses any
+//     write naming it, so it reads as null there and, like every setting, is
+//     sent only when configured. A write that names it to such a Flightdeck
+//     is refused, and the provider says to upgrade (agentWorkSettingRefused).
+//     The read's `send_errors_since` is read-only and not in the block, so it
+//     is never sent.
+//   - `models` is the one setting that is a map. Like `kinds`, a write
+//     REPLACES it: a kind left out goes back to AutoPilot's default, and `{}`
+//     clears them all. The plan checks its keys, the kinds of work, but never
+//     its model names: Flightdeck names the models it offers, the list may
+//     grow, and it accepts a model it no longer offers for the kind that
+//     already has it.
 //
 // Every attribute is Optional+Computed or Computed, for the reason the
 // slack_channel block gives: an Optional-only member nulled by dropping the
@@ -68,6 +76,7 @@ import (
 type agentWorkModel struct {
 	Enabled             types.Bool   `tfsdk:"enabled"`
 	Kinds               types.Set    `tfsdk:"kinds"`
+	Models              types.Map    `tfsdk:"models"`
 	AutoMerge           types.Bool   `tfsdk:"auto_merge"`
 	SendCIFailures      types.Bool   `tfsdk:"send_ci_failures"`
 	SendErrors          types.Bool   `tfsdk:"send_errors"`
@@ -93,6 +102,7 @@ type agentWorkModel struct {
 var agentWorkAttrTypes = map[string]attr.Type{
 	"enabled":                  types.BoolType,
 	"kinds":                    types.SetType{ElemType: types.StringType},
+	"models":                   types.MapType{ElemType: types.StringType},
 	"auto_merge":               types.BoolType,
 	"send_ci_failures":         types.BoolType,
 	"send_errors":              types.BoolType,
@@ -162,7 +172,8 @@ func agentWorkSchema() schema.Attribute {
 	return schema.SingleNestedAttribute{
 		MarkdownDescription: "Agent work settings, managed through the project's `agent-work` API resource: whether " +
 			"AutoPilot, the AI agents Flightdeck sends work to, may take this project's work items, which labels mark an " +
-			"item for them, whether items filed for failed CI runs or logged errors go to them without a label, the service account they " +
+			"item for them, which AI model each kind of work runs on, whether items filed for failed CI runs or logged errors go to " +
+			"them without a label, the service account they " +
 			"work as, whether they wait for CI on their pull requests, and how much they may spend and run. An agent works on a " +
 			"copy of the project's GitHub repository and opens a pull request, which a person reviews and merges unless " +
 			"`auto_merge` is on. Reading and " +
@@ -208,6 +219,14 @@ func agentWorkSchema() schema.Attribute {
 				Computed:      true,
 				Validators:    []validator.Set{setvalidator.ValueStringsAre(stringvalidator.OneOf(client.AgentWorkKinds...))},
 				PlanModifiers: []planmodifier.Set{setplanmodifier.UseStateForUnknown()},
+			},
+			"models": schema.MapAttribute{
+				MarkdownDescription: modelsDescription,
+				ElementType:         types.StringType,
+				Optional:            true,
+				Computed:            true,
+				Validators:          []validator.Map{agentWorkModelsValidator{}},
+				PlanModifiers:       []planmodifier.Map{mapplanmodifier.UseStateForUnknown()},
 			},
 			"auto_merge": schema.BoolAttribute{
 				MarkdownDescription: autoMergeDescription,
@@ -325,6 +344,7 @@ func agentWorkDataSourceSchema() datasourceschema.Attribute {
 		Attributes: map[string]datasourceschema.Attribute{
 			"enabled":                  datasourceschema.BoolAttribute{MarkdownDescription: "Whether agents may take the project's work items.", Computed: true},
 			"kinds":                    datasourceschema.SetAttribute{MarkdownDescription: "The kinds of work agents may do.", ElementType: types.StringType, Computed: true},
+			"models":                   datasourceschema.MapAttribute{MarkdownDescription: modelsDataSourceDescription, ElementType: types.StringType, Computed: true},
 			"auto_merge":               datasourceschema.BoolAttribute{MarkdownDescription: autoMergeDataSourceDescription, Computed: true},
 			"send_ci_failures":         datasourceschema.BoolAttribute{MarkdownDescription: sendCIFailuresDataSourceDescription, Computed: true},
 			"send_errors":              datasourceschema.BoolAttribute{MarkdownDescription: sendErrorsDataSourceDescription, Computed: true},
@@ -501,7 +521,7 @@ func sameAgentWorkSettings(a, b agentWorkModel) bool {
 		return x.IsNull() || x.ValueFloat64() == y.ValueFloat64()
 	}
 	same := func(x, y attr.Value) bool { return !x.IsUnknown() && !y.IsUnknown() && x.Equal(y) }
-	return same(a.Enabled, b.Enabled) && same(a.Kinds, b.Kinds) && same(a.AutoMerge, b.AutoMerge) &&
+	return same(a.Enabled, b.Enabled) && same(a.Kinds, b.Kinds) && same(a.Models, b.Models) && same(a.AutoMerge, b.AutoMerge) &&
 		same(a.SendCIFailures, b.SendCIFailures) && same(a.SendErrors, b.SendErrors) && same(a.WaitForChecks, b.WaitForChecks) &&
 		same(a.LabelID, b.LabelID) &&
 		same(a.AcceptMachineLabels, b.AcceptMachineLabels) && same(a.ResearchLabelID, b.ResearchLabelID) &&
@@ -598,9 +618,16 @@ func agentWorkToObject(ctx context.Context, aw *client.AgentWork, diags *diag.Di
 	}
 	set, d := types.SetValueFrom(ctx, types.StringType, kinds)
 	diags.Append(d...)
+	// A Flightdeck older than models has no such key, and reads as null.
+	models := types.MapNull(types.StringType)
+	if aw.ReportsModels() {
+		models, d = types.MapValueFrom(ctx, types.StringType, aw.Models)
+		diags.Append(d...)
+	}
 	obj, d := types.ObjectValue(agentWorkAttrTypes, map[string]attr.Value{
 		"enabled":                  types.BoolValue(aw.Enabled),
 		"kinds":                    set,
+		"models":                   models,
 		"auto_merge":               types.BoolPointerValue(aw.AutoMerge),
 		"send_ci_failures":         types.BoolPointerValue(aw.SendCIFailures),
 		"send_errors":              types.BoolPointerValue(aw.SendErrors),
@@ -662,6 +689,14 @@ func agentWorkFields(ctx context.Context, block types.Object, diags *diag.Diagno
 		kinds := []string{}
 		diags.Append(m.Kinds.ElementsAs(ctx, &kinds, false)...)
 		fields["kinds"] = kindsInAPIOrder(kinds)
+	}
+	if known(m.Models) {
+		// The whole map, which replaces the stored one. The plan refuses a null
+		// or blank model (agentWorkModelsValidator), which Flightdeck would read
+		// as leaving that kind out.
+		models := map[string]string{}
+		diags.Append(m.Models.ElementsAs(ctx, &models, false)...)
+		fields["models"] = models
 	}
 	putBool("auto_merge", m.AutoMerge)
 	putBool("send_ci_failures", m.SendCIFailures)
@@ -760,6 +795,54 @@ func readAgentWork(ctx context.Context, c *client.Client, projectID int64, diags
 	return agentWorkToObject(ctx, aw, diags), aw
 }
 
+// agentWorkModelsValidator checks models at plan time: each key must be a kind
+// of work, and each model must be named. It never checks a model's name:
+// Flightdeck names the models it offers, the list may grow, and it accepts a
+// model it no longer offers for a kind that already has it, so only Flightdeck
+// can say. A null or blank model is refused because Flightdeck reads it as
+// leaving the kind out, so the apply would store something other than the
+// plan said.
+type agentWorkModelsValidator struct{}
+
+func (agentWorkModelsValidator) Description(context.Context) string {
+	return "each key must be a kind of work (" + strings.Join(client.AgentWorkKinds, ", ") + "), and each model must be named"
+}
+
+func (v agentWorkModelsValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (agentWorkModelsValidator) ValidateMap(_ context.Context, req validator.MapRequest, resp *validator.MapResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	elements := req.ConfigValue.Elements()
+	kinds := make([]string, 0, len(elements))
+	for kind := range elements {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	for _, kind := range kinds {
+		at := req.Path.AtMapKey(kind)
+		if !slices.Contains(client.AgentWorkKinds, kind) {
+			resp.Diagnostics.AddAttributeError(at, "Unknown kind of work in agent_work.models",
+				fmt.Sprintf("%q is not a kind of work. The keys of models are the kinds of work (%s), and each one maps to "+
+					"the AI model that kind of work runs on.", kind, strings.Join(client.AgentWorkKinds, ", ")))
+			continue
+		}
+		model, ok := elements[kind].(types.String)
+		if !ok || model.IsUnknown() {
+			continue
+		}
+		if model.IsNull() || isBlank(model.ValueString()) {
+			resp.Diagnostics.AddAttributeError(at, "No model named for "+kind,
+				fmt.Sprintf("agent_work.models gives %s no model. Flightdeck reads a missing model as \"use AutoPilot's "+
+					"default\" and leaves %s out of what it stores, so the apply would not match the plan. To use the "+
+					"default for %s, leave it out of models.", kind, kind, kind))
+		}
+	}
+}
+
 // agentWorkApply says which apply a write belongs to, which decides how a
 // refusal is reported.
 type agentWorkApply int
@@ -783,8 +866,8 @@ const (
 // create), whose lock_version is the If-Match; without one, the current
 // version is read first. planned is the planned block, which a create-time
 // refusal hands back so the apply stays consistent with its plan, and whose
-// newer settings (auto_merge, send_ci_failures, send_errors, wait_for_checks)
-// the block keeps while the configuration leaves them unset
+// newer settings (models, auto_merge, send_ci_failures, send_errors,
+// wait_for_checks) the block keeps while the configuration leaves them unset
 // (keepUnsetAsPlanned). Either way, blockers are reported as warnings while
 // agent work is on; identifier names the project in them.
 func writeAgentWork(ctx context.Context, c *client.Client, projectID int64, identifier string, configBlock, priorBlock, planned types.Object, apply agentWorkApply, diags *diag.Diagnostics) types.Object {
@@ -889,6 +972,9 @@ func writeAgentWorkSettings(ctx context.Context, c *client.Client, projectID int
 				return agentWorkKeepPlan(planned, block, diags)
 			}
 			at, _ := agentWorkRefusedAt(settings, err)
+			if agentWorkModelsRefused(settings, err) {
+				at = path.Root("agent_work").AtName("models")
+			}
 			diags.AddAttributeWarning(at, "Agent work settings were not saved",
 				"The project was created, but Flightdeck refused this block's settings and saved none of them. The next "+
 					"plan shows them again, and the next apply tries again, so fix the configuration before then.\n\n"+
@@ -977,6 +1063,29 @@ func agentWorkRefusedAt(sent client.Fields, err error) (at path.Path, ok bool) {
 // research_label_id as an unknown key lists label_id among the settable keys.
 var namesAgentLabel = regexp.MustCompile(`Agent label`)
 
+// agentWorkModelsRefused reports whether a refused write failed on the models
+// it sent: an unknown kind, a model Flightdeck doesn't offer, or a value that
+// isn't an object. Flightdeck starts each such refusal with the key, as
+// "models has an unknown kind: ...", "models.research must be one of: ...",
+// or "models must be an object ...". An older Flightdeck's refusal of the key
+// itself starts "unknown key", and is the newer settings' to explain.
+func agentWorkModelsRefused(sent client.Fields, err error) bool {
+	if !client.HasCode(err, client.CodeInvalidAttribute) {
+		return false
+	}
+	if _, named := sent["models"]; !named {
+		return false
+	}
+	msg := strings.TrimSpace(apiMessage(err))
+	return strings.HasPrefix(msg, "models ") || strings.HasPrefix(msg, "models.")
+}
+
+// agentWorkModelsRule is what a refused models map must be.
+const agentWorkModelsRule = "agent_work.models maps kinds of work to AI models that Flightdeck offers, and its " +
+	"message below says what it takes. The provider doesn't check model names itself, because that list can " +
+	"change. A model Flightdeck no longer offers is still accepted for a kind it is already set for, but not for " +
+	"any other kind."
+
 // agentWorkResearchLabelRule is what a refused research label must be.
 const agentWorkResearchLabelRule = "research_label_id must be a label in this project, and a different label from " +
 	"label_id. Flightdeck names a clash between the two as the research label's problem, whichever of them this " +
@@ -1024,6 +1133,11 @@ func addAgentWorkWriteError(ctx context.Context, c *client.Client, projectID, lo
 		// When that read could not tell, the refusal itself may still name a
 		// newer setting as an unknown key; only then is its upgrade note added.
 		note := agentWorkUnknownNotes(err)
+		if agentWorkModelsRefused(sent, err) {
+			diags.AddAttributeError(at.AtName("models"), "Flightdeck refused agent_work.models",
+				"Nothing was saved. "+agentWorkModelsRule+"\n\nThe API said: "+apiMessage(err))
+			return
+		}
 		if label, ok := agentWorkRefusedAt(sent, err); ok {
 			detail := "Nothing was saved. " + agentWorkResearchLabelRule + "\n\nThe API said: " + apiMessage(err)
 			if client.HasCode(err, client.CodeInvalidAttribute) {
@@ -1037,6 +1151,30 @@ func addAgentWorkWriteError(ctx context.Context, c *client.Client, projectID, lo
 		addAPIError(diags, "Error updating Flightdeck agent work settings", err)
 	}
 }
+
+// modelsDescription is the resource attribute's documentation.
+const modelsDescription = "Which AI model each kind of work runs on, as a map from kind of work to model name, for " +
+	"example `{ \"implement-work-item\" = \"opus-5-5\" }`. The keys are kinds of work: `" +
+	"implement-work-item`, `fix-error` and `research`, and the plan fails on any other key. Each kind needs a model " +
+	"name; a blank one fails the plan. A kind left out of the map uses AutoPilot's default (Sonnet 5.5 today), and " +
+	"`{}` puts every kind back on the default. Setting it replaces the whole map Flightdeck holds, so a kind removed " +
+	"from it goes back to the default.\n\n" +
+	"Flightdeck names the models it offers (`sonnet-5-5` and `opus-5-5` today, and the list may grow), so the " +
+	"provider doesn't check model names: Flightdeck refuses a model it doesn't offer, and the apply fails with its " +
+	"message, which lists the ones it does. A model Flightdeck no longer offers is still accepted for the kind it " +
+	"is already set for, so a configuration that names it keeps applying. A work item's own agent model, set in " +
+	"Flightdeck, wins over this. Opus costs more than Sonnet, so the daily budget and each task's limit run out " +
+	"sooner. If AutoPilot doesn't run a model named here, it refuses the tasks that ask for it, and Flightdeck holds " +
+	"the project's agent work for a while (the `model_refused` blocker). When unset, the project's current models " +
+	"are kept; set it explicitly, even to `{}`, for Terraform to own it.\n\n" +
+	"Needs a Flightdeck that supports `models`. On an older one it reads as null and is never sent while it is " +
+	"unset. Setting it there fails an update with an error that asks you to upgrade Flightdeck. On the apply that " +
+	"creates the project it is a warning instead, so the new project isn't marked tainted, and the next plan shows " +
+	"what is still to apply."
+
+// modelsDataSourceDescription is the data source attribute's documentation.
+const modelsDataSourceDescription = "Which AI model each kind of work runs on, as a map from kind of work to model " +
+	"name. A kind not in the map uses AutoPilot's default. Null on a Flightdeck older than the setting."
 
 // autoMergeDescription is the resource attribute's documentation.
 const autoMergeDescription = "Whether to ask AutoPilot to turn on GitHub auto-merge for each pull request an agent " +
@@ -1140,6 +1278,10 @@ type agentWorkNewerSetting struct {
 }
 
 var (
+	agentWorkModels = agentWorkNewerSetting{
+		key: "models", added: "the choice of AI model for each kind of work",
+		unknownNote: agentWorkModelsUnknownNote, reported: (*client.AgentWork).ReportsModels,
+	}
 	agentWorkAutoMerge = agentWorkNewerSetting{
 		key: "auto_merge", added: "auto-merge for agent pull requests",
 		unknownNote: agentWorkAutoMergeUnknownNote, reported: (*client.AgentWork).ReportsAutoMerge,
@@ -1157,11 +1299,17 @@ var (
 		unknownNote: agentWorkWaitForChecksUnknownNote, reported: (*client.AgentWork).ReportsWaitForChecks,
 	}
 	// agentWorkNewerSettings are the newer settings, in the API's order. That
-	// is not the order Flightdeck added them in: send_errors came last, but
-	// the API lists it next to send_ci_failures.
-	agentWorkNewerSettings = []agentWorkNewerSetting{agentWorkAutoMerge, agentWorkSendCIFailures, agentWorkSendErrors,
-		agentWorkWaitForChecks}
+	// is not the order Flightdeck added them in: models came last, but the API
+	// lists it next to kinds, and send_errors came before it, but the API
+	// lists that next to send_ci_failures.
+	agentWorkNewerSettings = []agentWorkNewerSetting{agentWorkModels, agentWorkAutoMerge, agentWorkSendCIFailures,
+		agentWorkSendErrors, agentWorkWaitForChecks}
 )
+
+// agentWorkModelsUnknownNote is models' unknownNote.
+const agentWorkModelsUnknownNote = "If the API calls models an unknown key, this Flightdeck is older than the " +
+	"release that added the choice of AI model for each kind of work: upgrade Flightdeck first, or leave `models` " +
+	"out of the agent_work block."
 
 // agentWorkAutoMergeUnknownNote is auto_merge's unknownNote.
 const agentWorkAutoMergeUnknownNote = "If the API calls auto_merge an unknown key, this Flightdeck is older than " +

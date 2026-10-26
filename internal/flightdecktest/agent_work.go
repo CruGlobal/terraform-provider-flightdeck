@@ -14,7 +14,7 @@ import (
 func init() {
 	registerResource(func(s *Server, mux *http.ServeMux) {
 		s.stores["agent_work"] = &agentWorkStore{
-			enabled: true, release: AgentWorkWithSendErrors,
+			enabled: true, release: AgentWorkWithModels, models: append([]string(nil), agentWorkModels...),
 			byProject: map[int64]*AgentWorkSetting{}, extraBlockers: map[int64][]AgentWorkBlocker{},
 		}
 		mux.HandleFunc("GET /api/v1/projects/{project_id}/agent-work", s.showAgentWork)
@@ -28,6 +28,10 @@ func init() {
 type AgentWorkSetting struct {
 	Enabled bool
 	Kinds   []string
+	// Models maps a kind of work to the AI model its tasks ask for. A kind not
+	// in it uses AutoPilot's default. Empty by default, never nil on a row the
+	// fake made, and never a blocker.
+	Models map[string]string
 	// AutoMerge asks AutoPilot to turn on GitHub auto-merge for each pull
 	// request an agent opens for the project. Off by default.
 	AutoMerge bool
@@ -78,7 +82,10 @@ type agentWorkStore struct {
 	// release is the Flightdeck release the endpoint acts as. A setting newer
 	// than it is unknown: reads leave the key out, and a write naming it is
 	// refused as an unknown key, whatever its value.
-	release   AgentWorkRelease
+	release AgentWorkRelease
+	// models are the AI models the release offers, in the API's order: the
+	// names a write may set a kind to, and the ones a refusal lists.
+	models    []string
 	byProject map[int64]*AgentWorkSetting
 	// poolConnected clears the pool_not_connected blocker.
 	poolConnected bool
@@ -102,15 +109,15 @@ func (s *Server) SetAgentWorkEndpoint(on bool) {
 
 // AgentWorkRelease is a Flightdeck release the agent-work endpoint can act
 // as, oldest first. Flightdeck added auto_merge, then send_ci_failures, then
-// wait_for_checks, then send_errors, and a release knows every setting added
-// up to it, so a Flightdeck older than auto_merge is older than the other
-// three as well. No release knows a setting without the ones added before it,
-// and the fake cannot be made to.
+// wait_for_checks, then send_errors, then models, and a release knows every
+// setting added up to it, so a Flightdeck older than auto_merge is older than
+// the other four as well. No release knows a setting without the ones added
+// before it, and the fake cannot be made to.
 type AgentWorkRelease int
 
 const (
 	// AgentWorkBeforeAutoMerge knows none of auto_merge, send_ci_failures,
-	// wait_for_checks and send_errors.
+	// wait_for_checks, send_errors and models.
 	AgentWorkBeforeAutoMerge AgentWorkRelease = iota
 	// AgentWorkWithAutoMerge knows auto_merge only.
 	AgentWorkWithAutoMerge
@@ -120,8 +127,11 @@ const (
 	// AgentWorkWithWaitForChecks knows auto_merge, send_ci_failures and
 	// wait_for_checks, but not send_errors.
 	AgentWorkWithWaitForChecks
-	// AgentWorkWithSendErrors knows all four. The fake starts here.
+	// AgentWorkWithSendErrors knows auto_merge, send_ci_failures,
+	// wait_for_checks and send_errors, but not models.
 	AgentWorkWithSendErrors
+	// AgentWorkWithModels knows all five. The fake starts here.
+	AgentWorkWithModels
 )
 
 // SetAgentWorkRelease makes the agent-work endpoint act as the given
@@ -188,20 +198,47 @@ func (s *Server) SetAgentWorkWaitForChecksSupported(on bool) {
 }
 
 // SetAgentWorkSendErrorsSupported moves the fake across the release that
-// added send_errors. false makes it older than that release: the newest
-// becomes the release with wait_for_checks but not send_errors, and an older
-// one stays as it is. true makes it the newest, which knows the other three
-// too.
+// added send_errors. false makes it older than that release: a newer one
+// becomes the release with wait_for_checks but not send_errors (nor models),
+// and an older one stays as it is. true makes it at least that release: one
+// older is upgraded to it (the other three too, still no models), and the
+// newest is left as it is.
 func (s *Server) SetAgentWorkSendErrorsSupported(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.agentWorkStore()
 	switch {
-	case on:
+	case on && st.release < AgentWorkWithSendErrors:
 		st.release = AgentWorkWithSendErrors
-	case st.release > AgentWorkWithWaitForChecks:
+	case !on && st.release > AgentWorkWithWaitForChecks:
 		st.release = AgentWorkWithWaitForChecks
 	}
+}
+
+// SetAgentWorkModelsSupported moves the fake across the release that added
+// models. false makes it older than that release: the newest becomes the
+// release with send_errors but not models, and an older one stays as it is.
+// true makes it the newest, which knows the other four too.
+func (s *Server) SetAgentWorkModelsSupported(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.agentWorkStore()
+	switch {
+	case on:
+		st.release = AgentWorkWithModels
+	case st.release > AgentWorkWithSendErrors:
+		st.release = AgentWorkWithSendErrors
+	}
+}
+
+// SetAgentWorkModelsOffered sets the AI models the fake offers, in order, as
+// a Flightdeck that adds a model to its list, or takes one off it, does. A
+// model taken off the list stays stored for the kinds it was set for, and a
+// write may send it back for those kinds unchanged.
+func (s *Server) SetAgentWorkModelsOffered(names ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.agentWorkStore().models = append([]string(nil), names...)
 }
 
 // knowsAutoMerge reports whether the release the fake acts as has auto_merge.
@@ -225,6 +262,11 @@ func (st *agentWorkStore) knowsWaitForChecks() bool {
 // send_errors (and the read-only send_errors_since that comes with it).
 func (st *agentWorkStore) knowsSendErrors() bool {
 	return st.release >= AgentWorkWithSendErrors
+}
+
+// knowsModels reports whether the release the fake acts as has models.
+func (st *agentWorkStore) knowsModels() bool {
+	return st.release >= AgentWorkWithModels
 }
 
 // SetAgentWorkPoolConnected controls the pool_not_connected blocker. The fake
@@ -255,7 +297,17 @@ func (s *Server) AgentWorkOf(projectID int64) *AgentWorkSetting {
 	}
 	cp := *row
 	cp.Kinds = append([]string(nil), row.Kinds...)
+	cp.Models = copyModels(row.Models)
 	return &cp
+}
+
+// copyModels is a copy of a models map, never nil.
+func copyModels(models map[string]string) map[string]string {
+	out := make(map[string]string, len(models))
+	for kind, model := range models {
+		out[kind] = model
+	}
+	return out
 }
 
 // SetAgentWorkOutOfBand changes a project's settings the way the settings page
@@ -289,7 +341,7 @@ func (s *Server) SetAgentWorkOutOfBand(projectID int64, fn func(*AgentWorkSettin
 
 func defaultAgentWork() AgentWorkSetting {
 	return AgentWorkSetting{
-		Kinds: []string{}, WaitForChecks: true, BaseRef: "main", MaxInProgress: 1, DailyBudgetUSD: 10, TaskMaxUSD: 5,
+		Kinds: []string{}, Models: map[string]string{}, WaitForChecks: true, BaseRef: "main", MaxInProgress: 1, DailyBudgetUSD: 10, TaskMaxUSD: 5,
 		TaskMaxMinutes: 30, QueueMinutes: 60, Runbook: "implement-work-item@1",
 	}
 }
@@ -306,11 +358,14 @@ const (
 var (
 	agentWorkKinds    = []string{agentWorkImplement, agentWorkFixError, agentWorkResearch}
 	agentWorkRunbooks = []string{"implement-work-item@1"}
+	// agentWorkModels are the AI models the API offers, in its order, until a
+	// test changes the list (SetAgentWorkModelsOffered).
+	agentWorkModels = []string{"sonnet-5-5", "opus-5-5"}
 	// agentWorkWritable are the settable keys in the API's order (the settings
-	// page's). writableKeys leaves auto_merge, send_ci_failures, send_errors
-	// and wait_for_checks out on a Flightdeck older than each.
+	// page's). writableKeys leaves models, auto_merge, send_ci_failures,
+	// send_errors and wait_for_checks out on a Flightdeck older than each.
 	agentWorkWritable = []string{
-		"enabled", "kinds", "auto_merge", "send_ci_failures", "send_errors", "wait_for_checks", "label_id",
+		"enabled", "kinds", "models", "auto_merge", "send_ci_failures", "send_errors", "wait_for_checks", "label_id",
 		"accept_machine_labels", "research_label_id", "agent_account_id", "base_ref", "max_in_progress",
 		"daily_budget_usd", "task_max_usd", "task_max_minutes", "queue_minutes", "runbook",
 	}
@@ -336,7 +391,8 @@ func (st *agentWorkStore) writableKeys() []string {
 	out := make([]string, 0, len(agentWorkWritable))
 	for _, key := range agentWorkWritable {
 		if (key == "auto_merge" && !st.knowsAutoMerge()) || (key == "send_ci_failures" && !st.knowsSendCIFailures()) ||
-			(key == "wait_for_checks" && !st.knowsWaitForChecks()) || (key == "send_errors" && !st.knowsSendErrors()) {
+			(key == "wait_for_checks" && !st.knowsWaitForChecks()) || (key == "send_errors" && !st.knowsSendErrors()) ||
+			(key == "models" && !st.knowsModels()) {
 			continue
 		}
 		out = append(out, key)
@@ -590,6 +646,64 @@ func agentWorkValue(key string, v any) (any, string) {
 	return nil, "unknown key: " + key
 }
 
+// modelsValue is the API's check of models (Api::AgentWorkAttributes#models!),
+// returning the map to store, agentWorkNoOpinion{} to leave it alone, or a 422
+// invalid_attribute message. A blank for the whole key is no opinion; any
+// other value that isn't an object is refused. The object REPLACES the stored
+// map: a kind left out, or whose model is blank, goes back to the default. An
+// unknown kind is refused, and so is a model the release doesn't offer, unless
+// it is the one already stored for that kind, which passes so that a read
+// PATCHes back unchanged after its model came off the list.
+//
+// The API names unknown kinds, and walks the models, in the order they were
+// sent; the fake's decoded object has no order, so it names unknown kinds
+// sorted and walks the models in the kinds' order. Only a write with more than
+// one thing wrong can tell, and the provider never reads which one is named.
+func (st *agentWorkStore) modelsValue(v any, stored map[string]string) (any, string) {
+	if agentWorkBlank(v) {
+		return agentWorkNoOpinion{}, ""
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return nil, "models must be an object of kinds of work to model names, got " + agentWorkEcho(v)
+	}
+	var unknown []string
+	for kind := range obj {
+		if !contains(agentWorkKinds, kind) {
+			unknown = append(unknown, kind)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		what := "an unknown kind"
+		if len(unknown) > 1 {
+			what = "unknown kinds"
+		}
+		if len(unknown) > 5 {
+			unknown = unknown[:5]
+		}
+		echoes := make([]string, 0, len(unknown))
+		for _, kind := range unknown {
+			echoes = append(echoes, agentWorkEcho(kind))
+		}
+		return nil, fmt.Sprintf("models has %s: %s (valid: %s)", what, strings.Join(echoes, ", "), strings.Join(agentWorkKinds, ", "))
+	}
+	out := map[string]string{}
+	for _, kind := range agentWorkKinds {
+		model, sent := obj[kind]
+		if !sent || agentWorkBlank(model) {
+			continue
+		}
+		name, isName := model.(string)
+		held, wasStored := stored[kind]
+		if !isName || (!contains(st.models, name) && (!wasStored || held != name)) {
+			return nil, fmt.Sprintf("models.%s must be one of: %s, got %s", kind, strings.Join(st.models, ", "), agentWorkEcho(model))
+		}
+		out[kind] = name
+	}
+	return out, ""
+}
+
 // applyAgentWork mirrors the API's write: read-only keys refused by name,
 // unknown keys refused, every value type-checked before anything is assigned,
 // then the model's value rules against the merged row. It returns the merged
@@ -644,7 +758,13 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 	}
 	values := map[string]any{}
 	for key, raw := range submitted {
-		v, msg := agentWorkValue(key, railsDeepMunge(raw))
+		var v any
+		var msg string
+		if key == "models" {
+			v, msg = s.agentWorkStore().modelsValue(railsDeepMunge(raw), current.Models)
+		} else {
+			v, msg = agentWorkValue(key, railsDeepMunge(raw))
+		}
 		if msg != "" {
 			return current, false, http.StatusUnprocessableEntity, "invalid_attribute", msg
 		}
@@ -655,6 +775,7 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 
 	next := current
 	next.Kinds = append([]string(nil), current.Kinds...)
+	next.Models = copyModels(current.Models)
 	var moneyRefused []string
 	// agentWorkValue has already checked each value's type for its key.
 	for key, v := range values {
@@ -676,6 +797,8 @@ func (s *Server) applyAgentWork(p *Project, current AgentWorkSetting, submitted 
 			}
 		case []string:
 			next.Kinds = t
+		case map[string]string:
+			next.Models = t
 		case *int64:
 			switch key {
 			case "label_id":
@@ -837,6 +960,14 @@ func agentWorkEqual(a, b AgentWorkSetting) bool {
 			return false
 		}
 	}
+	if len(a.Models) != len(b.Models) {
+		return false
+	}
+	for kind, model := range a.Models {
+		if held, ok := b.Models[kind]; !ok || held != model {
+			return false
+		}
+	}
 	return a.Enabled == b.Enabled && a.AutoMerge == b.AutoMerge && a.SendCIFailures == b.SendCIFailures && a.SendErrors == b.SendErrors &&
 		a.WaitForChecks == b.WaitForChecks &&
 		sameID(a.LabelID, b.LabelID) && a.AcceptMachineLabels == b.AcceptMachineLabels &&
@@ -978,6 +1109,10 @@ func (s *Server) serializeAgentWork(p *Project, row AgentWorkSetting) map[string
 	}
 	if s.agentWorkStore().knowsWaitForChecks() {
 		out["wait_for_checks"] = row.WaitForChecks
+	}
+	if s.agentWorkStore().knowsModels() {
+		// An object, {} when no kind has a model.
+		out["models"] = copyModels(row.Models)
 	}
 	if s.agentWorkStore().knowsSendErrors() {
 		out["send_errors"] = row.SendErrors

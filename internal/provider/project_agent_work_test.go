@@ -21,6 +21,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
@@ -122,6 +123,10 @@ func TestProjectAgentWork_unconfiguredReadsTheDefaults(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: projectConfig(env, identifier, `  name = "Defaults"`),
+				// No kind has a model: every kind uses AutoPilot's default. That
+				// reads as {}, not null, which TestCheckResourceAttr can't tell
+				// apart.
+				ConfigStateChecks: []statecheck.StateCheck{modelsAre(projectRes, map[string]string{})},
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(projectRes, "agent_work.enabled", "false"),
 					resource.TestCheckResourceAttr(projectRes, "agent_work.kinds.#", "0"),
@@ -1420,8 +1425,9 @@ func describeWithPaths(diags []*tfprotov6.Diagnostic) string {
 func TestAgentWorkFields_writePathMatchesSettingKeys(t *testing.T) {
 	ctx := context.Background()
 	kinds, _ := types.SetValueFrom(ctx, types.StringType, []string{"implement-work-item"})
+	models, _ := types.MapValueFrom(ctx, types.StringType, map[string]string{"research": "opus-5-5"})
 	fields := mustAgentWorkFields(t, agentWorkModel{
-		Enabled: types.BoolValue(true), Kinds: kinds, AutoMerge: types.BoolValue(false), SendCIFailures: types.BoolValue(false),
+		Enabled: types.BoolValue(true), Kinds: kinds, Models: models, AutoMerge: types.BoolValue(false), SendCIFailures: types.BoolValue(false),
 		SendErrors: types.BoolValue(false), WaitForChecks: types.BoolValue(true), LabelID: types.Int64Value(7), LabelChosenAt: types.StringValue("2026-10-01T00:00:00Z"), AcceptMachineLabels: types.BoolValue(false),
 		ResearchLabelID: types.Int64Value(9), ResearchLabelChosenAt: types.StringValue("2026-10-02T00:00:00Z"),
 		AgentAccountID: types.Int64Value(8), BaseRef: types.StringValue("main"), MaxInProgress: types.Int64Value(1),
@@ -1601,6 +1607,30 @@ func TestAgentWorkFields_sendsOnlyConfiguredSettings(t *testing.T) {
 			want: map[string]any{"auto_merge": true, "send_ci_failures": true, "send_errors": true, "wait_for_checks": false},
 		},
 		{
+			name:  "models are sent as an object of kind to model",
+			model: agentWorkModel{Models: types.MapValueMust(types.StringType, map[string]attr.Value{"implement-work-item": types.StringValue("opus-5-5"), "research": types.StringValue("sonnet-5-5")})},
+			want:  map[string]any{"models": map[string]string{"implement-work-item": "opus-5-5", "research": "sonnet-5-5"}},
+		},
+		{
+			// {} is a value: it puts every kind back on the default.
+			name:  "an empty models map is sent, as {}",
+			model: agentWorkModel{Models: types.MapValueMust(types.StringType, map[string]attr.Value{}), MaxInProgress: types.Int64Value(2)},
+			want:  map[string]any{"models": map[string]string{}, "max_in_progress": int64(2)},
+		},
+		{
+			// Like the other newer settings: an older Flightdeck refuses the key
+			// whatever its value, so an unset models is never sent, not even as
+			// null.
+			name:  "an unset models is left out",
+			model: agentWorkModel{Models: types.MapNull(types.StringType), Enabled: types.BoolValue(false)},
+			want:  map[string]any{"enabled": false},
+		},
+		{
+			name:  "a models not known until apply is left out",
+			model: agentWorkModel{Models: types.MapUnknown(types.StringType), Enabled: types.BoolValue(false)},
+			want:  map[string]any{"enabled": false},
+		},
+		{
 			name:  "money is sent as a number",
 			model: agentWorkModel{DailyBudgetUSD: types.Float64Value(12.34), TaskMaxUSD: types.Float64Value(2.5)},
 			want:  map[string]any{"daily_budget_usd": 12.34, "task_max_usd": 2.5},
@@ -1764,6 +1794,7 @@ func TestWarnAgentWorkBlockers(t *testing.T) {
 func TestPlanAgentWorkComputed(t *testing.T) {
 	ctx := context.Background()
 	prior := &agentWorkModel{Enabled: types.BoolValue(false), AutoMerge: types.BoolValue(false), SendCIFailures: types.BoolValue(false),
+		Models:     types.MapValueMust(types.StringType, map[string]attr.Value{"research": types.StringValue("opus-5-5")}),
 		SendErrors: types.BoolValue(false), WaitForChecks: types.BoolValue(true), LabelID: types.Int64Value(7), MaxInProgress: types.Int64Value(1),
 		DailyBudgetUSD: types.Float64Value(12.34), LabelChosenAt: types.StringValue("2026-10-01T00:00:00Z"),
 		ResearchLabelID: types.Int64Value(9), ResearchLabelChosenAt: types.StringValue("2026-10-02T00:00:00Z"), LockVersion: types.Int64Value(3)}
@@ -1782,6 +1813,17 @@ func TestPlanAgentWorkComputed(t *testing.T) {
 		{name: "wait_for_checks is not known yet", plan: with(*prior, func(m *agentWorkModel) { m.WaitForChecks = types.BoolUnknown() }), wantLabel: true, wantResearch: true},
 		{name: "send_errors changes", plan: with(*prior, func(m *agentWorkModel) { m.SendErrors = types.BoolValue(true) }), wantLabel: true, wantResearch: true},
 		{name: "send_errors is not known yet", plan: with(*prior, func(m *agentWorkModel) { m.SendErrors = types.BoolUnknown() }), wantLabel: true, wantResearch: true},
+		{name: "a model changes", plan: with(*prior, func(m *agentWorkModel) {
+			m.Models = types.MapValueMust(types.StringType, map[string]attr.Value{"research": types.StringValue("sonnet-5-5")})
+		}), wantLabel: true, wantResearch: true},
+		{name: "a kind gets a model", plan: with(*prior, func(m *agentWorkModel) {
+			m.Models = types.MapValueMust(types.StringType, map[string]attr.Value{"research": types.StringValue("opus-5-5"),
+				"fix-error": types.StringValue("opus-5-5")})
+		}), wantLabel: true, wantResearch: true},
+		{name: "models are cleared", plan: with(*prior, func(m *agentWorkModel) {
+			m.Models = types.MapValueMust(types.StringType, map[string]attr.Value{})
+		}), wantLabel: true, wantResearch: true},
+		{name: "models are not known yet", plan: with(*prior, func(m *agentWorkModel) { m.Models = types.MapUnknown(types.StringType) }), wantLabel: true, wantResearch: true},
 		{name: "the label changes", plan: with(*prior, func(m *agentWorkModel) { m.LabelID = types.Int64Value(8) }), wantResearch: true},
 		{name: "the label is not known yet", plan: with(*prior, func(m *agentWorkModel) { m.LabelID = types.Int64Unknown() }), wantResearch: true},
 		{name: "the research label changes", plan: with(*prior, func(m *agentWorkModel) { m.ResearchLabelID = types.Int64Value(10) }), wantLabel: true},
@@ -1877,7 +1919,8 @@ func TestValidateAgentWorkConfigAndBudgetWarning(t *testing.T) {
 // --- helpers -----------------------------------------------------------------
 
 // agentWorkObj builds a block object from a model, null for nil. A zero Set
-// has no element type, so an unset kinds is made a typed null.
+// or Map has no element type, so an unset kinds or models is made a typed
+// null.
 func agentWorkObj(t *testing.T, m *agentWorkModel) types.Object {
 	t.Helper()
 	if m == nil {
@@ -1886,6 +1929,9 @@ func agentWorkObj(t *testing.T, m *agentWorkModel) types.Object {
 	cp := *m
 	if cp.Kinds.ElementType(context.Background()) == nil {
 		cp.Kinds = types.SetNull(types.StringType)
+	}
+	if cp.Models.ElementType(context.Background()) == nil {
+		cp.Models = types.MapNull(types.StringType)
 	}
 	obj, d := types.ObjectValueFrom(context.Background(), agentWorkAttrTypes, cp)
 	if d.HasError() {

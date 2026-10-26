@@ -480,9 +480,10 @@ func selfHealingToObject(sh *client.SelfHealing, diags *diag.Diagnostics) types.
 	return obj
 }
 
-// selfHealingFields returns the settings to send from the CONFIGURED block, or
-// nil when the configuration has no block (null/unknown). Only known, non-null
-// settings are sent, which is what makes the merge safe; `armed` never is.
+// selfHealingFields returns the settings to send from block, or nil when it is
+// null or unknown. On an apply, block is plannedWhereConfigured's: the plan's
+// value of each setting the configuration sets. Only known, non-null settings
+// are sent, which is what makes the merge safe; `armed` never is.
 // `rollback` goes in the same write as `feature_enabled`, which is what lets a
 // project stored as auto-rollback be turned on at all.
 func selfHealingFields(ctx context.Context, block types.Object, diags *diag.Diagnostics) client.Fields {
@@ -560,8 +561,10 @@ type selfHealingWrite struct {
 // rollback blockers are reported as warnings while the mode is "auto", and
 // its auto-promote blockers while auto-promote is on; identifier names the
 // project in them. selfHealingPlanned and autoPromotePlanned are the planned
-// attributes, whose values the result keeps for whatever the configuration
-// leaves unset (keepUnconfiguredAsPlanned).
+// attributes, whose values the result keeps for whatever the write leaves
+// unsent (keepUnconfiguredAsPlanned). Which settings are sent follows the
+// configuration, and what is sent follows the plan (plannedWhereConfigured),
+// so `ignore_changes` keeps a value changed in Flightdeck.
 //
 // A block the configuration names, even one that sets nothing (`{}`, or every
 // setting null), must come back from Flightdeck. One it cannot read (403, or
@@ -569,11 +572,19 @@ type selfHealingWrite struct {
 // fails the apply with the error a refused write gives, rather than reading
 // as null: the next plan would add it again, on every run. A block the
 // configuration leaves out reads as null with nothing said, as on a refresh.
-func writeSelfHealing(ctx context.Context, c *client.Client, projectID int64, identifier string, configBlock, selfHealingPlanned, autoPromoteConfig, autoPromotePlanned types.Object, lockVersion int64, diags *diag.Diagnostics) selfHealingWrite {
+func writeSelfHealing(ctx context.Context, c *client.Client, projectID int64, identifier string, selfHealingConfig, selfHealingPlanned, autoPromoteConfig, autoPromotePlanned types.Object, lockVersion int64, diags *diag.Diagnostics) selfHealingWrite {
 	failed := selfHealingWrite{
 		selfHealing: types.ObjectNull(selfHealingAttrTypes),
 		autoPromote: types.ObjectNull(autoPromoteAttrTypes),
 		lockVersion: lockVersion,
+	}
+	// What each block's write is built from; it also stands for the
+	// configuration below, so a block ignored while the plan holds it as null
+	// is not one the configuration names.
+	configBlock := plannedWhereConfigured(ctx, selfHealingConfig, selfHealingPlanned, diags)
+	autoPromoteConfig = plannedWhereConfigured(ctx, autoPromoteConfig, autoPromotePlanned, diags)
+	if diags.HasError() {
+		return failed
 	}
 	settings := selfHealingFields(ctx, configBlock, diags)
 	promote := autoPromoteFields(ctx, autoPromoteConfig, diags)

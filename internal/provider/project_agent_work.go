@@ -651,9 +651,10 @@ func agentWorkToObject(ctx context.Context, aw *client.AgentWork, diags *diag.Di
 	return obj
 }
 
-// agentWorkFields returns the settings to send from the CONFIGURED block, or
-// nil when the configuration has no block. Only known, non-null settings are
-// sent. That is what makes the merge safe, and for label_id,
+// agentWorkFields returns the settings to send from block, or nil when it is
+// null or unknown. On an apply, block is plannedWhereConfigured's: the plan's
+// value of each setting the configuration sets. Only known, non-null settings
+// are sent. That is what makes the merge safe, and for label_id,
 // research_label_id and agent_account_id it is what keeps an apply from
 // clearing them: the API reads a null for any of them as "clear the choice",
 // so an unset one is left out, never sent as null.
@@ -859,44 +860,52 @@ const (
 )
 
 // writeAgentWork PATCHes the configured settings (if any) under the settings
-// row's own lock_version, and returns the block. kinds is left out when it
-// is the set in state and the server holds that set too
-// (kindsUnchangedInState, serverHoldsKinds). With nothing to send it just
-// reads. priorBlock is the block in state before this apply (null on
-// create), whose lock_version is the If-Match; without one, the current
-// version is read first. planned is the planned block, which a create-time
-// refusal hands back so the apply stays consistent with its plan, and whose
-// newer settings (models, auto_merge, send_ci_failures, send_errors,
-// wait_for_checks) the block keeps while the configuration leaves them unset
-// (keepUnsetAsPlanned). Either way, blockers are reported as warnings while
-// agent work is on; identifier names the project in them.
+// row's own lock_version, and returns the block. Which settings are sent
+// follows the configuration, and what is sent follows the plan
+// (plannedWhereConfigured), so `ignore_changes` keeps a value changed on the
+// settings page. kinds is left out when it is the set in state and the server
+// holds that set too (kindsUnchangedInState, serverHoldsKinds). With nothing
+// to send it just reads. priorBlock is the block in state before this apply
+// (null on create), whose lock_version is the If-Match; without one, the
+// current version is read first. planned is the planned block, which a
+// create-time refusal hands back so the apply stays consistent with its plan,
+// and whose newer settings (models, auto_merge, send_ci_failures, send_errors,
+// wait_for_checks) the block keeps while they go unsent (keepUnsetAsPlanned).
+// Either way, blockers are reported as warnings while agent work is on;
+// identifier names the project in them.
 func writeAgentWork(ctx context.Context, c *client.Client, projectID int64, identifier string, configBlock, priorBlock, planned types.Object, apply agentWorkApply, diags *diag.Diagnostics) types.Object {
-	block := writeAgentWorkSettings(ctx, c, projectID, identifier, configBlock, priorBlock, planned, apply, diags)
+	toSend := plannedWhereConfigured(ctx, configBlock, planned, diags)
+	if diags.HasError() {
+		return types.ObjectNull(agentWorkAttrTypes)
+	}
+	block := writeAgentWorkSettings(ctx, c, projectID, identifier, toSend, priorBlock, planned, apply, diags)
 	for _, setting := range agentWorkNewerSettings {
-		block = keepUnsetAsPlanned(setting.key, configBlock, planned, block, diags)
+		block = keepUnsetAsPlanned(setting.key, toSend, planned, block, diags)
 	}
 	return block
 }
 
 // keepUnsetAsPlanned puts the planned value of key, one of the newer settings
-// (agentWorkNewerSettings), in the block an apply leaves, when the
-// configuration does not set it and the plan knew its value. An unset newer
-// setting is never sent, so the apply changes nothing about it, but what the
-// server reports can still differ from the plan: a Flightdeck upgraded to the
-// setting between the plan and the apply reports false where the plan, made
-// from a read without the key, holds null, and one rolled back below it
-// reports null where the plan holds a value. A saved plan applied later makes
-// that window real. Terraform refuses a result that differs from a known
-// planned value, so the planned one is kept, and the next refresh adopts the
-// server's, as it does for any unset setting. A configured value is left as
-// the server reports it, so a server that did not honor it still fails the
-// apply.
-func keepUnsetAsPlanned(key string, configBlock, planned, result types.Object, diags *diag.Diagnostics) types.Object {
-	if result.IsNull() || result.IsUnknown() || planned.IsNull() || planned.IsUnknown() || configBlock.IsUnknown() {
+// (agentWorkNewerSettings), in the block an apply leaves, when the write did
+// not send it and the plan knew its value. sent is what the write was built
+// from (plannedWhereConfigured), where an unsent setting is null: one the
+// configuration leaves unset, or one it sets under ignore_changes while the
+// plan, taken from state, holds null. An unsent setting changes nothing in the
+// apply, but what the server reports can still differ from the plan: a
+// Flightdeck upgraded to the setting between the plan and the apply reports
+// false where the plan, made from a read without the key, holds null, and one
+// rolled back below it reports null where the plan holds a value. A saved plan
+// applied later makes that window real. Terraform refuses a result that
+// differs from a known planned value, so the planned one is kept, and the next
+// refresh adopts the server's, as it does for any unset setting. A value that
+// was sent is left as the server reports it, so a server that did not honor it
+// still fails the apply.
+func keepUnsetAsPlanned(key string, sent, planned, result types.Object, diags *diag.Diagnostics) types.Object {
+	if result.IsNull() || result.IsUnknown() || planned.IsNull() || planned.IsUnknown() || sent.IsUnknown() {
 		return result
 	}
-	if !configBlock.IsNull() {
-		if configured, ok := configBlock.Attributes()[key]; !ok || !configured.IsNull() {
+	if !sent.IsNull() {
+		if value, ok := sent.Attributes()[key]; !ok || !value.IsNull() {
 			return result
 		}
 	}
@@ -919,9 +928,10 @@ func keepUnsetAsPlanned(key string, configBlock, planned, result types.Object, d
 }
 
 // writeAgentWorkSettings is writeAgentWork without the newer settings'
-// correction.
-func writeAgentWorkSettings(ctx context.Context, c *client.Client, projectID int64, identifier string, configBlock, priorBlock, planned types.Object, apply agentWorkApply, diags *diag.Diagnostics) types.Object {
-	settings := agentWorkFields(ctx, configBlock, diags)
+// correction. toSend is the block the write is built from
+// (plannedWhereConfigured).
+func writeAgentWorkSettings(ctx context.Context, c *client.Client, projectID int64, identifier string, toSend, priorBlock, planned types.Object, apply agentWorkApply, diags *diag.Diagnostics) types.Object {
+	settings := agentWorkFields(ctx, toSend, diags)
 	if diags.HasError() {
 		return types.ObjectNull(agentWorkAttrTypes)
 	}

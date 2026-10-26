@@ -315,10 +315,11 @@ func slackChannelDataSourceSchema() datasourceschema.Attribute {
 	}
 }
 
-// slackChannelWriteNeeded reports whether the CONFIGURED block asks for
-// anything the project does not already have. An unchanged apply must not
-// PATCH: every write re-enqueues provisioning, which resets provision_status
-// to `queued` on a channel that is merely waiting to be linked.
+// slackChannelWriteNeeded reports whether config, the block a write is built
+// from (plannedWhereConfigured's, on an apply), asks for anything the project
+// does not already have. An unchanged apply must not PATCH: every write
+// re-enqueues provisioning, which resets provision_status to `queued` on a
+// channel that is merely waiting to be linked.
 func slackChannelWriteNeeded(ctx context.Context, config, state types.Object, diags *diag.Diagnostics) bool {
 	if config.IsNull() || config.IsUnknown() {
 		return false // nothing configured: this block is not managed here
@@ -445,10 +446,11 @@ func slackEventFilterOf(ctx context.Context, block types.Object, diags *diag.Dia
 	return m.EventFilter
 }
 
-// slackChannelFields returns the settings to send from the CONFIGURED block,
-// or nil when the configuration has no block. Only configured keys are sent:
-// the API changes nothing it is not given, which is how "unset keeps the
-// project's value" is honoured. A configured "" is sent as it is, and resets
+// slackChannelFields returns the settings to send from block, or nil when it
+// is null or unknown. On an apply, block is plannedWhereConfigured's: the
+// plan's value of each setting the configuration sets. Only configured keys
+// are sent: the API changes nothing it is not given, which is how "unset keeps
+// the project's value" is honoured. A configured "" is sent as it is, and resets
 // the name override. An unset mode is never sent, not even as null: a
 // Flightdeck older than the mode refuses the key whatever its value.
 func slackChannelFields(ctx context.Context, block types.Object, diags *diag.Diagnostics) client.Fields {
@@ -520,8 +522,15 @@ const (
 // It writes only when the configuration asks for something the project does
 // not already have: every write re-enqueues provisioning, which puts
 // provision_status back to `queued` on a channel that is merely waiting to be
-// linked, so an apply that changes nothing here must not make one.
-func writeSlackChannel(ctx context.Context, c *client.Client, projectID int64, config, planned, state types.Object, lockVersion int64, apply slackChannelApply, diags *diag.Diagnostics) (types.Object, int64) {
+// linked, so an apply that changes nothing here must not make one. Which
+// settings it asks for follows the configuration, and their values follow the
+// plan (plannedWhereConfigured): under `ignore_changes` the plan holds the
+// values in state, so a setting changed in Flightdeck asks for nothing.
+func writeSlackChannel(ctx context.Context, c *client.Client, projectID int64, configured, planned, state types.Object, lockVersion int64, apply slackChannelApply, diags *diag.Diagnostics) (types.Object, int64) {
+	config := plannedWhereConfigured(ctx, configured, planned, diags)
+	if diags.HasError() {
+		return types.ObjectNull(slackChannelAttrTypes), lockVersion
+	}
 	if slackChannelWriteNeeded(ctx, config, state, diags) {
 		settings := slackChannelFields(ctx, config, diags)
 		if diags.HasError() {
@@ -543,7 +552,7 @@ func writeSlackChannel(ctx context.Context, c *client.Client, projectID int64, c
 			// of them, and only the unknowns are filled from a fresh read. The
 			// refresh before the next plan reads the real values back, so that
 			// plan shows the Slack change again, as an update.
-			fresh := readSlackChannel(ctx, c, projectID, slackEventFilterOf(ctx, config, diags), slackEventsManaged, diags)
+			fresh := readSlackChannel(ctx, c, projectID, slackResultFilter(ctx, config, planned, diags), slackEventsManaged, diags)
 			return slackChannelKeepPlan(ctx, planned, fresh, diags), lockVersion
 		}
 		if err != nil {
@@ -577,7 +586,7 @@ func writeSlackChannel(ctx context.Context, c *client.Client, projectID int64, c
 			return types.ObjectNull(slackChannelAttrTypes), lockVersion
 		}
 		slackChannelProvisioningWarnings(sc, diags)
-		return slackChannelToObject(ctx, sc, slackEventFilterOf(ctx, config, diags), slackEventsManaged, diags), sc.LockVersion
+		return slackChannelToObject(ctx, sc, slackResultFilter(ctx, config, planned, diags), slackEventsManaged, diags), sc.LockVersion
 	}
 
 	if !slackChannelHasUnknowns(planned) {
@@ -587,8 +596,23 @@ func writeSlackChannel(ctx context.Context, c *client.Client, projectID int64, c
 	// once anything on the project changes, and a create has nothing to go on
 	// at all, so those have to be filled: read, and keep whatever the plan
 	// already promised.
-	fresh := readSlackChannel(ctx, c, projectID, slackEventFilterOf(ctx, config, diags), slackEventsManaged, diags)
+	fresh := readSlackChannel(ctx, c, projectID, slackResultFilter(ctx, config, planned, diags), slackEventsManaged, diags)
 	return slackChannelResolveUnknowns(planned, fresh, state, diags), lockVersion
+}
+
+// slackResultFilter is the event categories the block an apply leaves
+// records: the plan's, when the plan knows them. They are the configuration's,
+// except where the plan holds the ones in state: under ignore_changes, and
+// when event_filter is dropped from the configuration, which leaves the
+// categories it managed tracked at their current values. Terraform refuses a
+// result whose map differs from a known planned one. When the plan does not
+// know them (a create that sets no event_filter), they are the ones config,
+// the block the write was built from, sets.
+func slackResultFilter(ctx context.Context, config, planned types.Object, diags *diag.Diagnostics) types.Map {
+	if fromPlan := slackEventFilterOf(ctx, planned, diags); !planned.IsNull() && !planned.IsUnknown() && !fromPlan.IsUnknown() {
+		return fromPlan
+	}
+	return slackEventFilterOf(ctx, config, diags)
 }
 
 // slackChannelHasUnknowns reports whether the plan left anything for the apply

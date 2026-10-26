@@ -146,7 +146,7 @@ func (s *Server) SetAgentWorkRelease(release AgentWorkRelease) {
 // added auto_merge. false makes it older than that release, so it knows none
 // of the newer settings, as a real Flightdeck older than auto_merge does. true
 // makes it at least that release: one older is upgraded to it (auto_merge,
-// still no send_ci_failures, wait_for_checks or send_errors), and a newer one
+// still no send_ci_failures, wait_for_checks, send_errors or models), and a newer one
 // is left as it is.
 func (s *Server) SetAgentWorkAutoMergeSupported(on bool) {
 	s.mu.Lock()
@@ -163,9 +163,10 @@ func (s *Server) SetAgentWorkAutoMergeSupported(on bool) {
 // SetAgentWorkSendCIFailuresSupported moves the fake across the release that
 // added send_ci_failures. false makes it older than that release: a newer one
 // becomes the release with auto_merge but not send_ci_failures (nor
-// wait_for_checks or send_errors), and one older than auto_merge stays so.
+// wait_for_checks, send_errors or models), and one older than auto_merge stays so.
 // true makes it at least that release: one older is upgraded to it
-// (auto_merge and send_ci_failures, still no wait_for_checks or send_errors),
+// (auto_merge and send_ci_failures, still no wait_for_checks, send_errors or
+// models),
 // and a newer one is left as it is.
 func (s *Server) SetAgentWorkSendCIFailuresSupported(on bool) {
 	s.mu.Lock()
@@ -182,9 +183,10 @@ func (s *Server) SetAgentWorkSendCIFailuresSupported(on bool) {
 // SetAgentWorkWaitForChecksSupported moves the fake across the release that
 // added wait_for_checks. false makes it older than that release: a newer one
 // becomes the release with send_ci_failures but not wait_for_checks (nor
-// send_errors), and an older one stays as it is. true makes it at least that
+// send_errors or models), and an older one stays as it is. true makes it at least that
 // release: one older is upgraded to it (auto_merge, send_ci_failures and
-// wait_for_checks, still no send_errors), and the newest is left as it is.
+// wait_for_checks, still no send_errors or models), and a newer one is left as
+// it is.
 func (s *Server) SetAgentWorkWaitForChecksSupported(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

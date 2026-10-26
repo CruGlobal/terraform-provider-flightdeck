@@ -1084,7 +1084,7 @@ func agentWorkModelsRefused(sent client.Fields, err error) bool {
 const agentWorkModelsRule = "agent_work.models maps kinds of work to AI models that Flightdeck offers, and its " +
 	"message below says what it takes. The provider doesn't check model names itself, because that list can " +
 	"change. A model Flightdeck no longer offers is still accepted for a kind it is already set for, but not for " +
-	"any other kind."
+	"any other kind, nor once that kind has been changed to another model."
 
 // agentWorkResearchLabelRule is what a refused research label must be.
 const agentWorkResearchLabelRule = "research_label_id must be a label in this project, and a different label from " +
@@ -1156,13 +1156,15 @@ func addAgentWorkWriteError(ctx context.Context, c *client.Client, projectID, lo
 const modelsDescription = "Which AI model each kind of work runs on, as a map from kind of work to model name, for " +
 	"example `{ \"implement-work-item\" = \"opus-5-5\" }`. The keys are kinds of work: `" +
 	"implement-work-item`, `fix-error` and `research`, and the plan fails on any other key. Each kind needs a model " +
-	"name; a blank one fails the plan. A kind left out of the map uses AutoPilot's default (Sonnet 5.5 today), and " +
+	"name; a blank one fails the plan. A kind left out of the map uses AutoPilot's default, and " +
 	"`{}` puts every kind back on the default. Setting it replaces the whole map Flightdeck holds, so a kind removed " +
 	"from it goes back to the default.\n\n" +
 	"Flightdeck names the models it offers (`sonnet-5-5` and `opus-5-5` today, and the list may grow), so the " +
 	"provider doesn't check model names: Flightdeck refuses a model it doesn't offer, and the apply fails with its " +
-	"message, which lists the ones it does. A model Flightdeck no longer offers is still accepted for the kind it " +
-	"is already set for, so a configuration that names it keeps applying. A work item's own agent model, set in " +
+	"message, which lists the ones it does (on the apply that creates the project, that is a warning and none of the " +
+	"block's settings are saved). A model Flightdeck no longer offers is still accepted for the kind it " +
+	"is already set for, so a configuration that names it keeps applying until that kind is changed to another " +
+	"model; after that, Flightdeck won't take the old one back. A work item's own agent model, set in " +
 	"Flightdeck, wins over this. Opus costs more than Sonnet, so the daily budget and each task's limit run out " +
 	"sooner. If AutoPilot doesn't run a model named here, it refuses the tasks that ask for it, and Flightdeck holds " +
 	"the project's agent work for a while (the `model_refused` blocker). When unset, the project's current models " +

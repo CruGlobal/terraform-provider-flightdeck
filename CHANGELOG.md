@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.14.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.13.0...v0.14.0) (2026-10-26)
+
+
+### Added
+
+* manage agent_work.models on flightdeck_project ([#61](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/61)) ([e3517c7](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/e3517c7f885a4256a8c5ec28acb8f9f6148acd71))
+* manage agent_work.send_errors on flightdeck_project ([#59](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/59)) ([8231075](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/82310757bf7d072f03f0541279a9defd06b73091))
+
+
+### Fixed
+
+* send the plan's values for flightdeck_project's blocks, so ignore_changes keeps a web edit ([#62](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/62)) ([7e852b7](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/7e852b761dd3f2081d5750d4698a9ac237431342))
+
 ## [0.13.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.12.1...v0.13.0) (2026-10-22)
 
 

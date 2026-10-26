@@ -624,11 +624,12 @@ func knownStrings(ctx context.Context, set types.Set, diags *diag.Diagnostics) (
 }
 
 // autoPromoteFields returns the settings to send, under the API's keys, from
-// the CONFIGURED attribute, or nil when the configuration does not set it.
-// Only known, non-null settings are sent, and only the configured parts of
-// the window. Days go in week order and freeze dates sorted, the order
-// Flightdeck stores them in, so a refusal's freeze_dates[i] names the i-th
-// date sent.
+// block, or nil when it is null or unknown. On an apply, block is
+// plannedWhereConfigured's: the plan's value of each setting the
+// configuration sets. Only known, non-null settings are sent, and only the
+// configured parts of the window. Days go in week order and freeze dates
+// sorted, the order Flightdeck stores them in, so a refusal's freeze_dates[i]
+// names the i-th date sent.
 func autoPromoteFields(ctx context.Context, block types.Object, diags *diag.Diagnostics) client.Fields {
 	if block.IsNull() || block.IsUnknown() {
 		return nil

@@ -6,7 +6,81 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 )
+
+// plannedWhereConfigured returns what a write to one of a project's settings
+// endpoints sends, as the block its fields are built from: for each setting
+// the configuration sets, the PLAN's value, and null for every other.
+//
+// The configuration decides WHETHER a setting is sent: only one it sets,
+// because the endpoints merge, and an unset setting plans the value in state,
+// which sending would put in front of a Flightdeck too old for it, or (for
+// agent_work's label and account ids) clear on a null. The plan decides WHAT
+// is sent: it equals the configuration, except under `lifecycle {
+// ignore_changes = [...] }`, where it is the value in state. Terraform applies
+// ignore_changes to the plan only, never to the configuration it hands the
+// apply, so sending the configuration there would overwrite a value changed in
+// Flightdeck's web app and fail the apply with "Provider produced inconsistent
+// result". This is the rule flightdeck_github_integration's ci_workflows
+// follows (ciWorkflowsToSend), with one difference: for a value the plan does
+// not know, ciWorkflowsToSend sends nothing and this sends the configuration.
+// An apply never reaches that case, because Terraform plans again during the
+// apply, with the configuration fully known.
+//
+// A setting the configuration sets but the plan holds as null is not sent
+// either. That is a setting ignored while state has no value for it, as on a
+// Flightdeck older than the setting, and sending nothing leaves it as the plan
+// says. A whole block the plan holds as null (ignored while it read as null)
+// sends nothing, so the result is null too. A value the plan does not know is
+// sent from the configuration, as before, since Terraform takes any result for
+// it. A nested object is matched part by part.
+//
+// Passed in place of the configuration to the keep-as-planned helpers
+// (keepUnconfiguredAsPlanned, keepUnsetAsPlanned), it also says which
+// settings went unsent, so their planned values are kept.
+func plannedWhereConfigured(ctx context.Context, config, planned types.Object, diags *diag.Diagnostics) types.Object {
+	if config.IsNull() || config.IsUnknown() || planned.IsUnknown() {
+		return config
+	}
+	if planned.IsNull() {
+		return types.ObjectNull(config.AttributeTypes(ctx))
+	}
+	plannedAttrs := planned.Attributes()
+	out := make(map[string]attr.Value, len(config.Attributes()))
+	for name, set := range config.Attributes() {
+		want, inPlan := plannedAttrs[name]
+		switch {
+		case set.IsNull() || set.IsUnknown() || !inPlan || want.IsUnknown():
+			out[name] = set
+		case want.IsNull():
+			out[name] = nullOf(ctx, set.Type(ctx), diags)
+		default:
+			setObj, isObj := set.(types.Object)
+			wantObj, wantIsObj := want.(types.Object)
+			if isObj && wantIsObj {
+				out[name] = plannedWhereConfigured(ctx, setObj, wantObj, diags)
+				continue
+			}
+			out[name] = want
+		}
+	}
+	obj, d := types.ObjectValue(config.AttributeTypes(ctx), out)
+	diags.Append(d...)
+	if diags.HasError() {
+		return types.ObjectNull(config.AttributeTypes(ctx))
+	}
+	return obj
+}
+
+// nullOf is the null value of an attribute type, custom types included.
+func nullOf(ctx context.Context, typ attr.Type, diags *diag.Diagnostics) attr.Value {
+	null, err := typ.ValueFromTerraform(ctx, tftypes.NewValue(typ.TerraformType(ctx), nil))
+	if err != nil {
+		diags.AddError("Error building a null value", err.Error())
+	}
+	return null
+}
 
 // keepUnconfiguredAsPlanned returns the value an apply leaves for an
 // Optional+Computed object attribute whose settings are sent only when

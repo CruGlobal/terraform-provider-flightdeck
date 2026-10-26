@@ -181,6 +181,15 @@ everything.
 
   That only covers a project that already exists. A create always sends
   the flag, `true` unless the configuration says `false`.
+- **To let people change a block's settings in the app**, set
+  `terraform_managed = false` and list the block in `ignore_changes`, or
+  one setting in it with a dotted path such as
+  `agent_work.max_in_progress` or `auto_promote.window.start`. This works
+  for `agent_work`, `self_healing`, `auto_promote` and `slack_channel`. An
+  edit made in Flightdeck is kept, even when an apply changes something
+  else on the project. Use dots, not brackets: Terraform reads
+  `agent_work["max_in_progress"]` as the whole block, and
+  `auto_promote["window"]["start"]` as nothing at all.
 - **To hand a project back to the app**, apply `terraform_managed = false`
   first, then remove it from Terraform. A `removed` block or
   `terraform state rm` on its own leaves the flag on, and the project

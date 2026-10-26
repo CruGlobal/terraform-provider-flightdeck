@@ -334,7 +334,7 @@ func TestProjectAgentWork_sendErrorsOnAnOlderFlightdeckAtCreateWarns(t *testing.
 		t.Fatalf("no create-time warning on agent_work.send_errors; apply warnings: %s", describeWithPaths(warnings))
 	}
 	for _, w := range warnings {
-		for _, key := range []string{"auto_merge", "send_ci_failures", "wait_for_checks"} {
+		for _, key := range []string{"auto_merge", "send_ci_failures", "wait_for_checks", "models"} {
 			if strings.Contains(w.Summary, key) {
 				t.Errorf("only send_errors was sent, so nothing may warn about %s: %s", key, w.Summary)
 			}
@@ -826,10 +826,11 @@ func TestAgentWorkSendErrorsRefused(t *testing.T) {
 	}
 }
 
-// Creating a project that sets all four newer settings on a Flightdeck older
-// than all of them gives four warnings, one on each attribute, and no error,
-// so the new project isn't tainted. Once Flightdeck is upgraded to the newest
-// release, the next apply is an update of the same project.
+// Creating a project that sets the four newer settings up to send_errors on a
+// Flightdeck older than all of them gives four warnings, one on each
+// attribute, and no error, so the new project isn't tainted. Once Flightdeck
+// is upgraded to the release with send_errors, the next apply is an update of
+// the same project. models, which came after, has its own test of all five.
 func TestProjectAgentWork_everyNewerSettingAtCreateOnAFlightdeckOlderThanAll(t *testing.T) {
 	env := newTestEnv(t, "agent_work")
 	env.requireFake(t)
@@ -877,11 +878,12 @@ func TestProjectAgentWork_everyNewerSettingAtCreateOnAFlightdeckOlderThanAll(t *
 	}
 }
 
-// Flightdeck is upgraded from below auto_merge to the newest release, or
-// rolled back from the newest to below auto_merge, between the plan and the
-// apply: all four newer settings change at once. Left unset, each keeps the
-// value the plan promised, and the next refresh adopts the server's for all
-// of them without planning anything.
+// Flightdeck is upgraded from below auto_merge to the release with
+// send_errors, or rolled back from that release to below auto_merge, between
+// the plan and the apply: the four newer settings up to send_errors change at
+// once. Left unset, each keeps the value the plan promised, and the next
+// refresh adopts the server's for all of them without planning anything.
+// models, which came after, has its own test of all five.
 func TestProjectAgentWork_everyNewerSettingUnsetSurvivesAServerChangeDuringApply(t *testing.T) {
 	release := func(all bool) flightdecktest.AgentWorkRelease {
 		if all {

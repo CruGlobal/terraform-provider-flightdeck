@@ -20,6 +20,17 @@ type AgentWork struct {
 	ProjectID int64    `json:"project_id"`
 	Enabled   bool     `json:"enabled"`
 	Kinds     []string `json:"kinds"`
+	// Models maps a kind of work (AgentWorkKinds) to the AI model a task of
+	// that kind asks AutoPilot for, such as {"implement-work-item":
+	// "opus-5-5"}. A kind not in it uses AutoPilot's default. A write
+	// REPLACES the stored map, like kinds: a kind left out, or sent with a null
+	// or blank model, goes back to the default, and {} clears them all. The
+	// server names the models it offers, and that list may grow, so this
+	// client never checks a model name. A Flightdeck that knows the setting
+	// always reports an object, {} when no kind has a model, and one older
+	// than it reads nil (no such key) and refuses any write naming it as an
+	// unknown key.
+	Models map[string]string `json:"models"`
 	// AutoMerge asks AutoPilot to turn on GitHub auto-merge for each pull
 	// request an agent opens for the project. A Flightdeck that knows the
 	// setting always reports true or false. Nil on one older than the
@@ -74,6 +85,11 @@ type AgentWork struct {
 	UpdatedAt   *string            `json:"updated_at"`
 }
 
+// ReportsModels reports whether the Flightdeck that answered knows the models
+// setting: a read from one that does always has the key, as an object, which
+// decodes to a non-nil map even when it is empty.
+func (aw *AgentWork) ReportsModels() bool { return aw.Models != nil }
+
 // ReportsAutoMerge reports whether the Flightdeck that answered knows the
 // auto_merge setting: a read from one that does always has the key.
 func (aw *AgentWork) ReportsAutoMerge() bool { return aw.AutoMerge != nil }
@@ -115,13 +131,16 @@ var AgentWorkRunbooks = []string{"implement-work-item@1"}
 // A key sent as null or a blank string is "no opinion" and leaves the stored
 // value alone, EXCEPT label_id, research_label_id and agent_account_id, where
 // a blank clears the choice. So a client must leave an unmanaged key out of
-// the write rather than send it empty.
+// the write rather than send it empty. Inside models, a kind whose model is
+// null or blank is read as leaving that kind out, which puts it back on the
+// default.
 //
-// auto_merge, send_ci_failures, send_errors and wait_for_checks are newer
-// than the rest: a Flightdeck older than any of them refuses any write naming
-// it as an unknown key, so none of them must ever be sent unless asked for.
+// models, auto_merge, send_ci_failures, send_errors and wait_for_checks are
+// newer than the rest: a Flightdeck older than any of them refuses any write
+// naming it as an unknown key, so none of them must ever be sent unless asked
+// for.
 var AgentWorkSettingKeys = []string{
-	"enabled", "kinds", "auto_merge", "send_ci_failures", "send_errors", "wait_for_checks", "label_id",
+	"enabled", "kinds", "models", "auto_merge", "send_ci_failures", "send_errors", "wait_for_checks", "label_id",
 	"accept_machine_labels", "research_label_id", "agent_account_id", "base_ref", "max_in_progress",
 	"daily_budget_usd", "task_max_usd", "task_max_minutes", "queue_minutes", "runbook",
 }
@@ -142,8 +161,8 @@ func (c *Client) GetAgentWork(ctx context.Context, projectID int64) (*AgentWork,
 // UpdateAgentWork PATCHes the given settings under an If-Match carrying the
 // SETTINGS row's lock_version (0 for a project whose settings were never
 // saved). Only the keys present change. A stale version is a 409
-// stale_object; a value of the wrong JSON type is a 422 invalid_attribute,
-// and one that breaks a rule (a range, more than two decimal places on a
+// stale_object; a value of the wrong JSON type, or an unknown kind or model in
+// models, is a 422 invalid_attribute, and one that breaks a rule (a range, more than two decimal places on a
 // money field, a task costing more than the day, a research label that is the
 // agent label) a 422 validation_failed.
 // Either way nothing is saved.

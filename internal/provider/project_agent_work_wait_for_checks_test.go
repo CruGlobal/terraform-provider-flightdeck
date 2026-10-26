@@ -380,7 +380,7 @@ func TestProjectAgentWork_waitForChecksOnAnOlderFlightdeckAtCreateWarns(t *testi
 	}
 	for _, w := range warnings {
 		if strings.Contains(w.Summary, "auto_merge") || strings.Contains(w.Summary, "send_ci_failures") ||
-			strings.Contains(w.Summary, "send_errors") {
+			strings.Contains(w.Summary, "send_errors") || strings.Contains(w.Summary, "models") {
 			t.Errorf("only wait_for_checks was sent, so nothing else may warn about it: %s", w.Summary)
 		}
 	}

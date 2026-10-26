@@ -193,6 +193,13 @@ resource "flightdeck_project" "billing" {
     # has pushed, and Flightdeck re-runs or follows up on a failed run itself
     # for workflows on the GitHub integration's ci_workflows list.
     wait_for_checks = false
+    # The AI model each kind of work runs on. A kind left out uses
+    # AutoPilot's default. Flightdeck names the models it offers, and
+    # refuses one it doesn't. Opus spends the budget faster than Sonnet.
+    models = {
+      "implement-work-item" = "opus-5-5"
+      "research"            = "sonnet-5-5"
+    }
   }
 }
 ```
@@ -207,7 +214,7 @@ resource "flightdeck_project" "billing" {
 
 ### Optional
 
-- `agent_work` (Attributes) Agent work settings, managed through the project's `agent-work` API resource: whether AutoPilot, the AI agents Flightdeck sends work to, may take this project's work items, which labels mark an item for them, whether items filed for failed CI runs or logged errors go to them without a label, the service account they work as, whether they wait for CI on their pull requests, and how much they may spend and run. An agent works on a copy of the project's GitHub repository and opens a pull request, which a person reviews and merges unless `auto_merge` is on. Reading and writing these settings requires the token's user to be a **workspace owner or admin**; for other tokens, and on a Flightdeck version without the endpoint, the block is null.
+- `agent_work` (Attributes) Agent work settings, managed through the project's `agent-work` API resource: whether AutoPilot, the AI agents Flightdeck sends work to, may take this project's work items, which labels mark an item for them, which AI model each kind of work runs on, whether items filed for failed CI runs or logged errors go to them without a label, the service account they work as, whether they wait for CI on their pull requests, and how much they may spend and run. An agent works on a copy of the project's GitHub repository and opens a pull request, which a person reviews and merges unless `auto_merge` is on. Reading and writing these settings requires the token's user to be a **workspace owner or admin**; for other tokens, and on a Flightdeck version without the endpoint, the block is null.
 
 Agent work is off until `enabled` turns it on. A plan that turns it on carries a warning saying so, and while it is on, each thing that stops Flightdeck sending work right now (the API's `blockers`: no agent label or research label chosen, no linked GitHub repository, the day's budget spent, and so on) is shown as a warning on refresh and after apply rather than stored, because it changes as the project does.
 
@@ -276,6 +283,11 @@ Needs a Flightdeck that supports `auto_merge`. On an older one it reads as null 
 
 A `flightdeck_label` in this project depends on the project, so referring to it here forms a dependency cycle. For a project that already exists, give the label its `project_id` from a `flightdeck_project` **data source** looked up by `identifier`, which breaks the cycle; otherwise create the label first and set the id afterwards.
 - `max_in_progress` (Number) How many items agents may work on at once (default 1). A whole number from 1 to 10. When unset, the project's current value is kept.
+- `models` (Map of String) Which AI model each kind of work runs on, as a map from kind of work to model name, for example `{ "implement-work-item" = "opus-5-5" }`. The keys are kinds of work: `implement-work-item`, `fix-error` and `research`, and the plan fails on any other key. Each kind needs a model name; a blank one fails the plan. A kind left out of the map uses AutoPilot's default, and `{}` puts every kind back on the default. Setting it replaces the whole map Flightdeck holds, so a kind removed from it goes back to the default.
+
+Flightdeck names the models it offers (`sonnet-5-5` and `opus-5-5` today, and the list may grow), so the provider doesn't check model names: Flightdeck refuses a model it doesn't offer, and the apply fails with its message, which lists the ones it does (on the apply that creates the project, that is a warning and none of the block's settings are saved). A model Flightdeck no longer offers is still accepted for the kind it is already set for, so a configuration that names it keeps applying until that kind is changed to another model; after that, Flightdeck won't take the old one back. A work item's own agent model, set in Flightdeck, wins over this. Opus costs more than Sonnet, so the daily budget and each task's limit run out sooner. If AutoPilot doesn't run a model named here, it refuses the tasks that ask for it, and Flightdeck holds the project's agent work for a while (the `model_refused` blocker). When unset, the project's current models are kept; set it explicitly, even to `{}`, for Terraform to own it.
+
+Needs a Flightdeck that supports `models`. On an older one it reads as null and is never sent while it is unset. Setting it there fails an update with an error that asks you to upgrade Flightdeck. On the apply that creates the project it is a warning instead, so the new project isn't marked tainted, and the next plan shows what is still to apply.
 - `queue_minutes` (Number) How many minutes a task may wait to start before it is dropped (default 60). A whole number from 1 to 1440. When unset, the project's current value is kept.
 - `research_label_id` (Number) Id of the label in this project that sends a work item to an agent for **research** first, rather than to be built: the agent looks into it and posts a report on the item as a comment. It must be a different label from `label_id`. The plan fails when the configuration sets both to the same id, and Flightdeck refuses it when one of them matches the other's stored value. Like the agent label, only a label a person adds after it is chosen here counts (see `research_label_chosen_at`), unless `accept_machine_labels` says otherwise. Flightdeck sends an item as research only while `research` is in the project's kinds of work. When unset, the stored label is kept; it is never sent empty, because the API would read that as clearing it.
 

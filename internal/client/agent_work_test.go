@@ -913,12 +913,209 @@ func TestAgentWork_sendErrorsContract(t *testing.T) {
 	}
 }
 
+// The fake's models follows the API's contract: an object from kind of work to
+// model, {} until set. A write REPLACES the stored map: a kind left out, or
+// sent with a null or blank model, goes back to the default, {} clears them
+// all, and a null or blank for the whole key is no opinion. An unknown kind,
+// a model the release doesn't offer, and a value that isn't an object are
+// each a 422 invalid_attribute in the API's words, and nothing is saved. A
+// model taken off the list after it was stored is accepted back for the kind
+// it is stored for, and for no other. A Flightdeck older than the setting
+// reads without the key and refuses any write naming it, whatever its value,
+// as an unknown key. The provider's tests lean on this, so it is checked here
+// directly.
+func TestAgentWork_modelsContract(t *testing.T) {
+	ctx := context.Background()
+	fake := flightdecktest.New(t)
+	c, err := New(fake.URL, fake.Token())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := fake.AddProject("Models", "MOD").ID
+	aw, err := c.GetAgentWork(ctx, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !aw.ReportsModels() || len(aw.Models) != 0 {
+		t.Fatalf("an unsaved project reads models as {}, got %v (reported: %t)", aw.Models, aw.ReportsModels())
+	}
+	version := aw.LockVersion
+	write := func(fields Fields) (*AgentWork, error) {
+		t.Helper()
+		got, err := c.UpdateAgentWork(ctx, project, fields, version)
+		if err == nil {
+			version = got.LockVersion
+		}
+		return got, err
+	}
+	mustWrite := func(fields Fields) *AgentWork {
+		t.Helper()
+		got, err := write(fields)
+		if err != nil {
+			t.Fatalf("writing %v: %v", fields, err)
+		}
+		return got
+	}
+	want := func(got *AgentWork, want map[string]string, what string) {
+		t.Helper()
+		if !got.ReportsModels() || fmt.Sprint(got.Models) != fmt.Sprint(want) {
+			t.Fatalf("%s: models reads %v (reported: %t), want %v", what, got.Models, got.ReportsModels(), want)
+		}
+	}
+	refused := func(fields Fields, msg string) {
+		t.Helper()
+		_, err := write(fields)
+		apiErr, ok := AsError(err)
+		if !ok || apiErr.Status != 422 || apiErr.Code != CodeInvalidAttribute || apiErr.Message != msg {
+			t.Fatalf("writing %v:\n want a 422 invalid_attribute saying %s\n  got %v", fields, msg, err)
+		}
+	}
+	both := map[string]string{"implement-work-item": "opus-5-5", "research": "sonnet-5-5"}
+
+	got := mustWrite(Fields{"models": map[string]string{"implement-work-item": "opus-5-5"}})
+	want(got, map[string]string{"implement-work-item": "opus-5-5"}, "one kind set")
+	if got.LockVersion != 1 {
+		t.Fatalf("the first write that changes something creates the row at 1, got %d", got.LockVersion)
+	}
+	got = mustWrite(Fields{"models": both})
+	want(got, both, "a second kind added")
+
+	// The same map again changes nothing, so no version moves.
+	got = mustWrite(Fields{"models": map[string]string{"research": "sonnet-5-5", "implement-work-item": "opus-5-5"}})
+	if got.LockVersion != 2 {
+		t.Fatalf("writing the map it already holds moved lock_version to %d", got.LockVersion)
+	}
+
+	// Leaving the key out, or a null or blank for the whole key, leaves the map
+	// alone, and so does a write of the other switches.
+	for _, fields := range []Fields{{"max_in_progress": 2}, {"models": nil}, {"models": ""}, {"models": "  "},
+		{"auto_merge": true, "send_errors": true}} {
+		got = mustWrite(fields)
+		want(got, both, fmt.Sprintf("a write of %v", fields))
+	}
+
+	// The map replaces the stored one: a kind left out goes back to the
+	// default.
+	got = mustWrite(Fields{"models": map[string]string{"research": "opus-5-5"}})
+	want(got, map[string]string{"research": "opus-5-5"}, "replaced")
+
+	// A null or blank model for a kind reads as leaving it out.
+	for _, blank := range []any{nil, "", "   "} {
+		mustWrite(Fields{"models": both})
+		got = mustWrite(Fields{"models": map[string]any{"implement-work-item": "opus-5-5", "research": blank}})
+		want(got, map[string]string{"implement-work-item": "opus-5-5"}, fmt.Sprintf("a blank %#v for research", blank))
+	}
+
+	// {} clears them all.
+	got = mustWrite(Fields{"models": map[string]string{}})
+	want(got, map[string]string{}, "cleared")
+
+	// What the API refuses, in its words, saving nothing.
+	mustWrite(Fields{"models": both, "max_in_progress": 1})
+	for name, tc := range map[string]struct {
+		value any
+		msg   string
+	}{
+		"an unknown kind": {map[string]any{"fix-ci": "opus-5-5"},
+			`models has an unknown kind: "fix-ci" (valid: implement-work-item, fix-error, research)`},
+		"two unknown kinds": {map[string]any{"fix-ci": "opus-5-5", "deploy": "opus-5-5", "research": "opus-5-5"},
+			`models has unknown kinds: "deploy", "fix-ci" (valid: implement-work-item, fix-error, research)`},
+		"a model not offered": {map[string]any{"research": "opus-4-1"},
+			`models.research must be one of: sonnet-5-5, opus-5-5, got "opus-4-1"`},
+		"a model's label":   {map[string]any{"research": "Opus 5.5"}, `models.research must be one of: sonnet-5-5, opus-5-5, got "Opus 5.5"`},
+		"a number":          {map[string]any{"research": 5}, "models.research must be one of: sonnet-5-5, opus-5-5, got 5"},
+		"false":             {map[string]any{"research": false}, "models.research must be one of: sonnet-5-5, opus-5-5, got false"},
+		"a list of models":  {map[string]any{"research": []any{"opus-5-5"}}, `models.research must be one of: sonnet-5-5, opus-5-5, got ["opus-5-5"]`},
+		"an empty object":   {map[string]any{"research": map[string]any{}}, "models.research must be one of: sonnet-5-5, opus-5-5, got {}"},
+		"a list":            {[]any{"opus-5-5"}, `models must be an object of kinds of work to model names, got ["opus-5-5"]`},
+		"a string":          {"opus-5-5", `models must be an object of kinds of work to model names, got "opus-5-5"`},
+		"true":              {true, "models must be an object of kinds of work to model names, got true"},
+		"a whole number":    {7, "models must be an object of kinds of work to model names, got 7"},
+		"a padded model":    {map[string]any{"research": " opus-5-5"}, `models.research must be one of: sonnet-5-5, opus-5-5, got " opus-5-5"`},
+		"another kind's ok": {map[string]any{"implement-work-item": "sonnet-5-5", "fix-error": "gpt"}, `models.fix-error must be one of: sonnet-5-5, opus-5-5, got "gpt"`},
+	} {
+		refused(Fields{"models": tc.value, "max_in_progress": 4}, tc.msg)
+		if row := fake.AgentWorkOf(project); row == nil || fmt.Sprint(row.Models) != fmt.Sprint(both) || row.MaxInProgress != 1 {
+			t.Fatalf("%s: a refused write must save nothing, got %+v", name, row)
+		}
+	}
+
+	// The list may grow: a model the release adds is taken.
+	fake.SetAgentWorkModelsOffered("sonnet-5-5", "opus-5-5", "sonnet-6-0")
+	got = mustWrite(Fields{"models": map[string]string{"fix-error": "sonnet-6-0", "implement-work-item": "opus-5-5", "research": "sonnet-5-5"}})
+	want(got, map[string]string{"fix-error": "sonnet-6-0", "implement-work-item": "opus-5-5", "research": "sonnet-5-5"}, "a new model")
+	mustWrite(Fields{"models": both})
+
+	// A model taken off the list stays stored, and the read PATCHes back
+	// unchanged, beside a change to another kind too. A changed one must be on
+	// the list, and the refusal names only what is.
+	fake.SetAgentWorkModelsOffered("sonnet-5-5")
+	if aw, err = c.GetAgentWork(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	want(aw, both, "after opus-5-5 came off the list")
+	version = aw.LockVersion
+	got = mustWrite(Fields{"models": aw.Models})
+	if got.LockVersion != aw.LockVersion {
+		t.Fatalf("the read PATCHed back moved lock_version from %d to %d", aw.LockVersion, got.LockVersion)
+	}
+	got = mustWrite(Fields{"models": map[string]string{"implement-work-item": "opus-5-5", "fix-error": "sonnet-5-5"}})
+	want(got, map[string]string{"implement-work-item": "opus-5-5", "fix-error": "sonnet-5-5"}, "kept beside a change to another kind")
+	refused(Fields{"models": map[string]string{"research": "opus-5-5"}}, `models.research must be one of: sonnet-5-5, got "opus-5-5"`)
+	// Once it is cleared from its kind, it can't come back.
+	mustWrite(Fields{"models": map[string]string{"fix-error": "sonnet-5-5"}})
+	refused(Fields{"models": map[string]string{"implement-work-item": "opus-5-5"}},
+		`models.implement-work-item must be one of: sonnet-5-5, got "opus-5-5"`)
+	fake.SetAgentWorkModelsOffered("sonnet-5-5", "opus-5-5")
+
+	// A Flightdeck that has the other four newer settings but not models: the
+	// key is not read, and is unknown on a write.
+	mustWrite(Fields{"models": both})
+	fake.SetAgentWorkModelsSupported(false)
+	if aw, err = c.GetAgentWork(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if aw.ReportsModels() || !aw.ReportsAutoMerge() || !aw.ReportsSendCIFailures() || !aw.ReportsWaitForChecks() || !aw.ReportsSendErrors() {
+		t.Fatalf("this Flightdeck reads the other four newer settings but not models, got models %v, auto_merge %s, send_ci_failures %s, "+
+			"wait_for_checks %s, send_errors %s", aw.Models, show(aw.AutoMerge), show(aw.SendCIFailures), show(aw.WaitForChecks), show(aw.SendErrors))
+	}
+	version = aw.LockVersion
+	for _, value := range []any{map[string]string{}, both, nil, ""} {
+		_, err := write(Fields{"models": value, "send_errors": false})
+		apiErr, ok := AsError(err)
+		if !ok || apiErr.Status != 422 || apiErr.Code != CodeInvalidAttribute ||
+			!strings.HasPrefix(apiErr.Message, "unknown key: models (settable: enabled, kinds, auto_merge, send_ci_failures, send_errors, wait_for_checks, label_id, ") {
+			t.Fatalf("this Flightdeck must refuse models %#v as an unknown key and list the other switches as settable, got %v", value, err)
+		}
+		if strings.Contains(strings.TrimPrefix(apiErr.Message, "unknown key: models"), "models") {
+			t.Fatalf("this Flightdeck must not list models as settable: %s", apiErr.Message)
+		}
+	}
+	got = mustWrite(Fields{"send_errors": false})
+	if got.ReportsModels() || got.SendErrors == nil || *got.SendErrors {
+		t.Fatalf("this Flightdeck takes a write without models: send_errors %s, models %v", show(got.SendErrors), got.Models)
+	}
+
+	// A Flightdeck older than all five names all five, sorted, as the API
+	// does.
+	fake.SetAgentWorkAutoMergeSupported(false)
+	_, err = write(Fields{"models": both, "send_errors": true, "wait_for_checks": false, "send_ci_failures": false, "auto_merge": false})
+	apiErr, ok := AsError(err)
+	if !ok || apiErr.Status != 422 || apiErr.Code != CodeInvalidAttribute ||
+		!strings.HasPrefix(apiErr.Message, "unknown keys: auto_merge, models, send_ci_failures, send_errors, wait_for_checks (settable: enabled, kinds, label_id, ") {
+		t.Fatalf("a Flightdeck older than all five must refuse them as unknown keys, got %v", err)
+	}
+	if row := fake.AgentWorkOf(project); row == nil || fmt.Sprint(row.Models) != fmt.Sprint(both) || row.SendErrors {
+		t.Fatalf("the older Flightdecks' refusals must save nothing, got %+v", row)
+	}
+}
+
 // The fake acts as one Flightdeck release at a time, and releases are
 // ordered: auto_merge came first, then send_ci_failures, then
-// wait_for_checks, then send_errors. So a fake older than auto_merge knows
-// none of them, and none knows a setting without the ones before it. The
-// older-Flightdeck tests of all four settings lean on this, so the switches
-// are checked here directly.
+// wait_for_checks, then send_errors, then models. So a fake older than
+// auto_merge knows none of them, and none knows a setting without the ones
+// before it. The older-Flightdeck tests of all five settings lean on this, so
+// the switches are checked here directly.
 func TestAgentWork_fakeReleasesAreOrdered(t *testing.T) {
 	ctx := context.Background()
 	fake := flightdecktest.New(t)
@@ -927,23 +1124,26 @@ func TestAgentWork_fakeReleasesAreOrdered(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := fake.AddProject("Releases", "REL").ID
-	knows := func(what string, autoMerge, sendCIFailures, waitForChecks, sendErrors bool) {
+	// Each setting's value is one the release takes when it knows the key.
+	values := map[string]any{"auto_merge": false, "send_ci_failures": false, "wait_for_checks": false, "send_errors": false,
+		"models": map[string]any{}}
+	knows := func(what string, autoMerge, sendCIFailures, waitForChecks, sendErrors, models bool) {
 		t.Helper()
 		aw, err := c.GetAgentWork(ctx, project)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if aw.ReportsAutoMerge() != autoMerge || aw.ReportsSendCIFailures() != sendCIFailures || aw.ReportsWaitForChecks() != waitForChecks ||
-			aw.ReportsSendErrors() != sendErrors {
-			t.Fatalf("%s: reads auto_merge %t, send_ci_failures %t, wait_for_checks %t and send_errors %t, want %t, %t, %t and %t", what,
-				aw.ReportsAutoMerge(), aw.ReportsSendCIFailures(), aw.ReportsWaitForChecks(), aw.ReportsSendErrors(),
-				autoMerge, sendCIFailures, waitForChecks, sendErrors)
+			aw.ReportsSendErrors() != sendErrors || aw.ReportsModels() != models {
+			t.Fatalf("%s: reads auto_merge %t, send_ci_failures %t, wait_for_checks %t, send_errors %t and models %t, want %t, %t, %t, %t and %t",
+				what, aw.ReportsAutoMerge(), aw.ReportsSendCIFailures(), aw.ReportsWaitForChecks(), aw.ReportsSendErrors(), aw.ReportsModels(),
+				autoMerge, sendCIFailures, waitForChecks, sendErrors, models)
 		}
 		// A write naming a setting the release lacks is refused as an unknown
 		// key; one it knows is taken.
 		for key, known := range map[string]bool{"auto_merge": autoMerge, "send_ci_failures": sendCIFailures,
-			"wait_for_checks": waitForChecks, "send_errors": sendErrors} {
-			_, err := c.UpdateAgentWork(ctx, project, Fields{key: false}, aw.LockVersion)
+			"wait_for_checks": waitForChecks, "send_errors": sendErrors, "models": models} {
+			_, err := c.UpdateAgentWork(ctx, project, Fields{key: values[key]}, aw.LockVersion)
 			switch {
 			case known && err != nil:
 				t.Fatalf("%s: a write of %s must be taken, got %v", what, key, err)
@@ -957,56 +1157,74 @@ func TestAgentWork_fakeReleasesAreOrdered(t *testing.T) {
 		}
 	}
 
-	knows("the fake's default", true, true, true, true)
+	knows("the fake's default", true, true, true, true, true)
 	fake.SetAgentWorkAutoMergeSupported(false)
-	knows("auto_merge turned off", false, false, false, false)
+	knows("auto_merge turned off", false, false, false, false, false)
 	fake.SetAgentWorkAutoMergeSupported(true)
-	knows("auto_merge turned back on", true, false, false, false)
+	knows("auto_merge turned back on", true, false, false, false, false)
 	fake.SetAgentWorkSendCIFailuresSupported(true)
-	knows("send_ci_failures turned on", true, true, false, false)
+	knows("send_ci_failures turned on", true, true, false, false, false)
 	fake.SetAgentWorkSendCIFailuresSupported(false)
-	knows("send_ci_failures turned off", true, false, false, false)
+	knows("send_ci_failures turned off", true, false, false, false, false)
 	fake.SetAgentWorkAutoMergeSupported(true)
-	knows("auto_merge turned on, already known", true, false, false, false)
+	knows("auto_merge turned on, already known", true, false, false, false, false)
 	fake.SetAgentWorkRelease(flightdecktest.AgentWorkBeforeAutoMerge)
 	fake.SetAgentWorkSendCIFailuresSupported(false)
-	knows("send_ci_failures turned off below auto_merge", false, false, false, false)
+	knows("send_ci_failures turned off below auto_merge", false, false, false, false, false)
 	fake.SetAgentWorkSendCIFailuresSupported(true)
-	knows("send_ci_failures turned on below auto_merge", true, true, false, false)
+	knows("send_ci_failures turned on below auto_merge", true, true, false, false, false)
 	fake.SetAgentWorkRelease(flightdecktest.AgentWorkWithAutoMerge)
-	knows("the release with auto_merge", true, false, false, false)
+	knows("the release with auto_merge", true, false, false, false, false)
 	fake.SetAgentWorkWaitForChecksSupported(true)
-	knows("wait_for_checks turned on", true, true, true, false)
+	knows("wait_for_checks turned on", true, true, true, false, false)
 	fake.SetAgentWorkSendCIFailuresSupported(true)
-	knows("send_ci_failures turned on, already known", true, true, true, false)
+	knows("send_ci_failures turned on, already known", true, true, true, false, false)
 	fake.SetAgentWorkWaitForChecksSupported(false)
-	knows("wait_for_checks turned off", true, true, false, false)
+	knows("wait_for_checks turned off", true, true, false, false, false)
 	fake.SetAgentWorkRelease(flightdecktest.AgentWorkBeforeAutoMerge)
 	fake.SetAgentWorkWaitForChecksSupported(false)
-	knows("wait_for_checks turned off below auto_merge", false, false, false, false)
+	knows("wait_for_checks turned off below auto_merge", false, false, false, false, false)
 	fake.SetAgentWorkWaitForChecksSupported(true)
-	knows("wait_for_checks turned on below auto_merge", true, true, true, false)
+	knows("wait_for_checks turned on below auto_merge", true, true, true, false, false)
 	fake.SetAgentWorkSendCIFailuresSupported(false)
-	knows("send_ci_failures turned off from wait_for_checks", true, false, false, false)
+	knows("send_ci_failures turned off from wait_for_checks", true, false, false, false, false)
 	fake.SetAgentWorkSendErrorsSupported(true)
-	knows("send_errors turned on", true, true, true, true)
+	knows("send_errors turned on", true, true, true, true, false)
 	fake.SetAgentWorkWaitForChecksSupported(true)
-	knows("wait_for_checks turned on, already known", true, true, true, true)
+	knows("wait_for_checks turned on, already known", true, true, true, true, false)
 	fake.SetAgentWorkSendErrorsSupported(false)
-	knows("send_errors turned off", true, true, true, false)
+	knows("send_errors turned off", true, true, true, false, false)
 	fake.SetAgentWorkSendErrorsSupported(false)
-	knows("send_errors turned off again", true, true, true, false)
+	knows("send_errors turned off again", true, true, true, false, false)
 	fake.SetAgentWorkRelease(flightdecktest.AgentWorkBeforeAutoMerge)
 	fake.SetAgentWorkSendErrorsSupported(false)
-	knows("send_errors turned off below auto_merge", false, false, false, false)
+	knows("send_errors turned off below auto_merge", false, false, false, false, false)
 	fake.SetAgentWorkSendErrorsSupported(true)
-	knows("send_errors turned on below auto_merge", true, true, true, true)
+	knows("send_errors turned on below auto_merge", true, true, true, true, false)
 	fake.SetAgentWorkWaitForChecksSupported(false)
-	knows("wait_for_checks turned off from the newest", true, true, false, false)
+	knows("wait_for_checks turned off from send_errors", true, true, false, false, false)
 	fake.SetAgentWorkSendErrorsSupported(true)
 	fake.SetAgentWorkSendCIFailuresSupported(false)
-	knows("send_ci_failures turned off from the newest", true, false, false, false)
+	knows("send_ci_failures turned off from send_errors", true, false, false, false, false)
 	fake.SetAgentWorkSendErrorsSupported(true)
 	fake.SetAgentWorkAutoMergeSupported(false)
-	knows("auto_merge turned off from the newest", false, false, false, false)
+	knows("auto_merge turned off from send_errors", false, false, false, false, false)
+	fake.SetAgentWorkModelsSupported(true)
+	knows("models turned on", true, true, true, true, true)
+	fake.SetAgentWorkSendErrorsSupported(true)
+	knows("send_errors turned on, already known", true, true, true, true, true)
+	fake.SetAgentWorkModelsSupported(false)
+	knows("models turned off", true, true, true, true, false)
+	fake.SetAgentWorkModelsSupported(false)
+	knows("models turned off again", true, true, true, true, false)
+	fake.SetAgentWorkRelease(flightdecktest.AgentWorkBeforeAutoMerge)
+	fake.SetAgentWorkModelsSupported(false)
+	knows("models turned off below auto_merge", false, false, false, false, false)
+	fake.SetAgentWorkModelsSupported(true)
+	knows("models turned on below auto_merge", true, true, true, true, true)
+	fake.SetAgentWorkSendErrorsSupported(false)
+	knows("send_errors turned off from the newest", true, true, true, false, false)
+	fake.SetAgentWorkModelsSupported(true)
+	fake.SetAgentWorkAutoMergeSupported(false)
+	knows("auto_merge turned off from the newest", false, false, false, false, false)
 }

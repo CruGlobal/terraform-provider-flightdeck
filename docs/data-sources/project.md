@@ -75,6 +75,7 @@ Read-Only:
 - `label_id` (Number) Id of the label that marks an item for an agent, if one is chosen.
 - `lock_version` (Number) Optimistic-locking version of these settings, separate from the project's.
 - `max_in_progress` (Number) How many items agents may work on at once.
+- `models` (Map of String) Which AI model each kind of work runs on, as a map from kind of work to model name. A kind not in the map uses AutoPilot's default. Null on a Flightdeck older than the setting.
 - `queue_minutes` (Number) How many minutes a task may wait to start.
 - `research_label_chosen_at` (String) When `research_label_id` was last set to a label (RFC 3339).
 - `research_label_id` (Number) Id of the label that sends an item for research first, if one is chosen.

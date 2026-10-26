@@ -166,5 +166,12 @@ resource "flightdeck_project" "billing" {
     # has pushed, and Flightdeck re-runs or follows up on a failed run itself
     # for workflows on the GitHub integration's ci_workflows list.
     wait_for_checks = false
+    # The AI model each kind of work runs on. A kind left out uses
+    # AutoPilot's default. Flightdeck names the models it offers, and
+    # refuses one it doesn't. Opus spends the budget faster than Sonnet.
+    models = {
+      "implement-work-item" = "opus-5-5"
+      "research"            = "sonnet-5-5"
+    }
   }
 }

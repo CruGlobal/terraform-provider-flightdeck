@@ -85,7 +85,7 @@ func (r *labelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Required:            true,
 				Validators: []validator.String{
 					stringvalidator.LengthAtLeast(1),
-					charLengthAtMost(client.NameMaxLength),
+					charLengthAtMost(client.LabelNameMaxLength),
 				},
 			},
 			"color": schema.StringAttribute{

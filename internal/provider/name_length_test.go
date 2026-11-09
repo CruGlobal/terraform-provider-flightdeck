@@ -8,40 +8,60 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 )
 
-// Label and state names are at most 255 characters, counted as characters
-// rather than bytes, so a name in a non-Latin script at the limit is
-// accepted and one character more fails the plan.
-func TestNameLength_labelsAndStates(t *testing.T) {
+// A label name is at most 255 characters, counted as characters rather than
+// bytes, so a name in a non-Latin script at the limit is accepted and one
+// character more fails the plan.
+func TestNameLength_labels(t *testing.T) {
 	env := newTestEnv(t, "label")
 	identifier := randIdentifier()
-	atLimit := strings.Repeat("é", 255)
-	overLimit := strings.Repeat("é", 256)
 	config := func(name string) string {
 		return projectFixture(env, identifier) + fmt.Sprintf(`
 resource "flightdeck_label" "test" {
   project_id = flightdeck_project.parent.id
   name       = %q
 }
+`, name)
+	}
+	atLimit := strings.Repeat("é", 255)
+	runTest(t, resource.TestCase{
+		Steps: []resource.TestStep{
+			{
+				Config:      config(atLimit + "é"),
+				ExpectError: regexMust(`(?s)Value too long.*256\s+characters\s+long;\s+Flightdeck\s+accepts\s+at\s+most\s+255`),
+			},
+			{
+				Config: config(atLimit),
+				Check:  resource.TestCheckResourceAttr(labelRes, "name", atLimit),
+			},
+		},
+	})
+}
 
+// A state name is at most 100 characters, counted the same way. Flightdeck
+// caps it lower than a label's because it repeats a state's name in its
+// messages.
+func TestNameLength_states(t *testing.T) {
+	env := newTestEnv(t, "state")
+	identifier := randIdentifier()
+	config := func(name string) string {
+		return projectFixture(env, identifier) + fmt.Sprintf(`
 resource "flightdeck_state" "test" {
   project_id = flightdeck_project.parent.id
   name       = %q
   group      = "started"
 }
-`, name, name)
+`, name)
 	}
+	atLimit := strings.Repeat("é", 100)
 	runTest(t, resource.TestCase{
 		Steps: []resource.TestStep{
 			{
-				Config:      config(overLimit),
-				ExpectError: regexMust(`(?s)Value too long.*256\s+characters\s+long;\s+Flightdeck\s+accepts\s+at\s+most\s+255`),
+				Config:      config(atLimit + "é"),
+				ExpectError: regexMust(`(?s)Value too long.*101\s+characters\s+long;\s+Flightdeck\s+accepts\s+at\s+most\s+100`),
 			},
 			{
 				Config: config(atLimit),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr(labelRes, "name", atLimit),
-					resource.TestCheckResourceAttr(stateRes, "name", atLimit),
-				),
+				Check:  resource.TestCheckResourceAttr(stateRes, "name", atLimit),
 			},
 		},
 	})

@@ -13,7 +13,8 @@ description: |-
     "payload": { "summary": "Disk nearly full", "severity": "warning", "source": "web-1" }
   }
   
-  A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own — each with its own name. Names must be distinct within a project. The API does not check that as such, but for 24 hours after a key's create, a second key declared with the same name is the same create as far as the API is concerned, and fails (see name). Receiving events does not imply paging: a key pages only if an escalation policy is attached to it, which is a console operation and read-only here (see escalation_policy_id).
+  A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own — each with its own name. Names must be distinct within a project. The API does not check that as such, but for 24 hours after a key's create, a second key declared with the same name and settings is the same create as far as the API is concerned, and fails (see name). Receiving events does not imply paging: a key pages only if an escalation policy is attached to it, which is a console operation and read-only here (see escalation_policy_id).
+  A key can also let its incidents trip the project's self-healing loop, as a second signal beside the error rate: set self_healing_trigger = true and environment = "production", and set the project's self_healing.monitor_rollback (see flightdeck_project). Put only server-side monitors on such a key, never browser RUM monitors, whose client token is public.
   The key value is returned by the API once, on create, and stored in Terraform state as a sensitive attribute so it can be handed to the monitor. It is never re-read; an imported key has no routing_key value. The API has no rotate route, so rotation is replacement: terraform apply -replace=flightdeck_routing_key.monitor revokes the old key and then mints a new one, because Terraform destroys before it creates by default, so the monitor is without a working key until it is given the new one. To mint the new key first, set create_before_destroy in the resource's lifecycle block. That has one limit: within 24 hours of the old key's create, the replacement sends the same create again while the old key is still live, and Flightdeck refuses it, so either wait out the 24 hours or let that one replacement destroy first. Deleting the resource revokes the key — irreversibly, and the row stays readable as history, so a revoked key is not a free identifier.
   Import with <project_id>/<key_id>: terraform import flightdeck_routing_key.monitor 42/7.
 ---
@@ -33,7 +34,9 @@ The key is posted to Flightdeck's Events API in a PagerDuty-Events-v2-shaped bod
 }
 ```
 
-A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own — each with its own `name`. Names must be distinct within a project. The API does not check that as such, but for 24 hours after a key's create, a second key declared with the same name is the same create as far as the API is concerned, and fails (see `name`). Receiving events does not imply paging: a key pages only if an escalation policy is attached to it, which is a console operation and read-only here (see `escalation_policy_id`).
+A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own — each with its own `name`. Names must be distinct within a project. The API does not check that as such, but for 24 hours after a key's create, a second key declared with the same name and settings is the same create as far as the API is concerned, and fails (see `name`). Receiving events does not imply paging: a key pages only if an escalation policy is attached to it, which is a console operation and read-only here (see `escalation_policy_id`).
+
+A key can also let its incidents trip the project's self-healing loop, as a second signal beside the error rate: set `self_healing_trigger = true` and `environment = "production"`, and set the project's `self_healing.monitor_rollback` (see `flightdeck_project`). Put only server-side monitors on such a key, never browser RUM monitors, whose client token is public.
 
 The key value is returned by the API **once, on create**, and stored in Terraform state as a sensitive attribute so it can be handed to the monitor. It is never re-read; an imported key has no `routing_key` value. The API has no rotate route, so **rotation is replacement**: `terraform apply -replace=flightdeck_routing_key.monitor` revokes the old key and then mints a new one, because Terraform destroys before it creates by default, so the monitor is without a working key until it is given the new one. To mint the new key first, set `create_before_destroy` in the resource's `lifecycle` block. That has one limit: within 24 hours of the old key's create, the replacement sends the same create again while the old key is still live, and Flightdeck refuses it, so either wait out the 24 hours or let that one replacement destroy first. Deleting the resource revokes the key — irreversibly, and the row stays readable as history, so a revoked key is not a free identifier.
 
@@ -63,6 +66,47 @@ resource "flightdeck_routing_key" "synthetics" {
   name       = "Synthetic checks"
 }
 
+# A key whose incidents can also trip the project's self-healing loop, beside
+# the error rate. It counts only with the environment "production", and only
+# while the project's self_healing.monitor_rollback isn't "off" (see
+# flightdeck_project). Put only server-side monitors on it, never browser RUM.
+resource "flightdeck_routing_key" "checkout_latency" {
+  project_id           = flightdeck_project.app.id
+  name                 = "Checkout latency"
+  environment          = "production"
+  self_healing_trigger = true
+}
+
+# Sending a Datadog monitor's alerts with that key, using the Datadog provider.
+# The key goes in a hidden custom variable, and one webhook posts every alert
+# transition to Flightdeck's Events API, so a recovery resolves the incident.
+# Mention @webhook-flightdeck-checkout in the monitor's message, outside any
+# {{#is_alert}} block, so every transition reaches it.
+resource "datadog_webhook_custom_variable" "checkout_latency_key" {
+  name      = "FLIGHTDECK_CHECKOUT_ROUTING_KEY"
+  value     = flightdeck_routing_key.checkout_latency.routing_key
+  is_secret = true
+}
+
+resource "datadog_webhook" "flightdeck_checkout" {
+  name      = "flightdeck-checkout"
+  url       = "https://flightdeck.example.com/api/1/events"
+  encode_as = "json"
+  payload = jsonencode({
+    routing_key  = "$FLIGHTDECK_CHECKOUT_ROUTING_KEY"
+    event_action = "$ALERT_TRANSITION"
+    # A trip key's alerts use the alert cycle as the dedup key, so each cycle
+    # from Triggered to Recovered opens its own incident.
+    dedup_key = "$ALERT_CYCLE_KEY"
+    summary   = "$EVENT_TITLE"
+    source    = "$LINK"
+    severity  = "$ALERT_TYPE"
+    monitor   = "$ALERT_ID"
+  })
+
+  depends_on = [datadog_webhook_custom_variable.checkout_latency_key]
+}
+
 # The value exists only in state, because the API returns it once. Hand it to
 # whatever needs it rather than printing it.
 output "uptime_routing_key" {
@@ -76,8 +120,13 @@ output "uptime_routing_key" {
 
 ### Required
 
-- `name` (String) Label shown in the project's routing-key list — the monitor's name, usually. Editable in place. **Give every routing key in a project a distinct name:** a create is made idempotent with a key derived from the request body, and `name` is the only thing in that body, so two keys declared in one project with the same name are one create as far as the API is concerned for the 24 hours it remembers a create. While the first key is live, Flightdeck refuses the second create rather than replay it without its secret, and the apply fails naming the key that already exists: give the resource the error is reported on another name. The same error follows an apply that failed after Flightdeck made the key; then revoke the key it names and apply again. Reusing a name a key was *renamed away from* is safe: the renamed key is not the one the create would replay.
+- `name` (String) Label shown in the project's routing-key list — the monitor's name, usually. Editable in place. **Give every routing key in a project a distinct name:** a create is made idempotent with a key derived from the request body, which holds `name` and, when they are set, `environment` and `self_healing_trigger`, so two keys declared in one project with the same name and settings are one create as far as the API is concerned for the 24 hours it remembers a create. While the first key is live, Flightdeck refuses the second create rather than replay it without its secret, and the apply fails naming the key that already exists: give the resource the error is reported on another name. The same error follows an apply that failed after Flightdeck made the key; then revoke the key it names and apply again. Reusing a name a key was *renamed away from* is safe: the renamed key is not the one the create would replay.
 - `project_id` (Number) Id of the project events on this key open incidents in. Changing it replaces the key.
+
+### Optional
+
+- `environment` (String) What the key's monitors watch, such as `production` or `staging`, using the same names as your release events. Every incident the key opens keeps the environment the key had at that moment, so a change applies only to incidents opened afterwards. It is free text and compared exactly: a key can trip self-healing only with `production`, and `Production` or `prod` never match. Changed in place, with no new key. At most 255 characters, with no space, tab or line break at either end. When unset, the key keeps the environment it has (none, for a new key), so one set in the console survives an apply; set it for Terraform to own it. Terraform does not clear an environment once one is set: clear it in the console. Null on a Flightdeck that predates the setting, where a configured value fails the apply.
+- `self_healing_trigger` (Boolean) Whether an incident this key opens may trip the project's self-healing loop, as a second signal beside the error rate. It counts only while `environment` is exactly `production` and the project's `self_healing.monitor_rollback` isn't `"off"`, so a plan that turns it on for a key with any other environment, or none, carries a warning. Only put server-side monitors on such a key (APM, infrastructure, synthetics, server logs), never browser RUM monitors, whose client token is public. Flightdeck records each change of this flag, and of a flagged key's environment, and posts it to the project's Slack channel. The server's default is `false`. When unset, the key keeps its current value; set it explicitly, even to `false`, for Terraform to own it. Null on a Flightdeck that predates the setting, where a configured value fails the apply.
 
 ### Read-Only
 

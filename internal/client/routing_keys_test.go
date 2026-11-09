@@ -262,3 +262,28 @@ func TestCreateRoutingKey_alreadyRevokedRowIsNotReportedAsRetired(t *testing.T) 
 		t.Fatalf("revoked %v: nothing more should have been revoked", s.revoked)
 	}
 }
+
+// A read that carries environment, even as null, comes from a Flightdeck that
+// knows it; one without the key does not. A null value alone can't say which.
+func TestRoutingKey_reportsTheNewerSettings(t *testing.T) {
+	for _, tc := range []struct {
+		body                 string
+		environment, trigger bool
+	}{
+		{`{"id": 1, "environment": null, "self_healing_trigger": false}`, true, true},
+		{`{"id": 1, "environment": "production", "self_healing_trigger": true}`, true, true},
+		{`{"id": 1}`, false, false},
+	} {
+		var k RoutingKey
+		if err := json.Unmarshal([]byte(tc.body), &k); err != nil {
+			t.Fatal(err)
+		}
+		if k.ID != 1 {
+			t.Fatalf("%s: the rest of the shape was not decoded: %+v", tc.body, k)
+		}
+		if k.ReportsEnvironment() != tc.environment || k.ReportsSelfHealingTrigger() != tc.trigger {
+			t.Fatalf("%s: reports environment %t and trigger %t, want %t and %t", tc.body,
+				k.ReportsEnvironment(), k.ReportsSelfHealingTrigger(), tc.environment, tc.trigger)
+		}
+	}
+}

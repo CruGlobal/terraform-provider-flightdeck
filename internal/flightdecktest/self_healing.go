@@ -422,8 +422,9 @@ func (s *Server) rollbackBlockers(p *Project) []RollbackBlocker {
 
 // monitorRollbackBlockers is the fake's monitor_rollback_blockers, in the
 // API's order: the mode's own codes, every rollback blocker, then the
-// monitor's prerequisites. The fake has no trip keys, so no_trip_keys is
-// always listed.
+// monitor's prerequisites. A trip key is an active routing key with
+// self_healing_trigger on and the environment "production"; a flagged active
+// key with any other environment is trip_key_environment.
 func (s *Server) monitorRollbackBlockers(p *Project) []RollbackBlocker {
 	out := []RollbackBlocker{}
 	switch monitorRollbackMode(p) {
@@ -445,8 +446,26 @@ func (s *Server) monitorRollbackBlockers(p *Project) []RollbackBlocker {
 		out = append(out, RollbackBlocker{Code: "incidents_off",
 			Message: "Incident management is off for this project, so the Events API refuses its routing keys."})
 	}
-	return append(out, RollbackBlocker{Code: "no_trip_keys",
-		Message: "No active routing key can trip self-healing with the environment production."})
+	tripKeys, misconfigured := 0, 0
+	for _, k := range s.routingKeys().byID {
+		if k.ProjectID != p.ID || k.RevokedAt != nil || !k.SelfHealingTrigger {
+			continue
+		}
+		if k.Environment != nil && *k.Environment == "production" {
+			tripKeys++
+		} else {
+			misconfigured++
+		}
+	}
+	if tripKeys == 0 {
+		out = append(out, RollbackBlocker{Code: "no_trip_keys",
+			Message: "No active routing key can trip self-healing with the environment production."})
+	}
+	if misconfigured > 0 {
+		out = append(out, RollbackBlocker{Code: "trip_key_environment",
+			Message: "A routing key can trip self-healing, but its environment isn't exactly production."})
+	}
+	return out
 }
 
 // selfHealingWritable is the read's writable_settings: the thresholds, then

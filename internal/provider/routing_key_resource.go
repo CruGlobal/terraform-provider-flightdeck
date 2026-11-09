@@ -8,8 +8,11 @@ import (
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -30,11 +33,19 @@ import (
 // has no rotate route. Terraform's default replacement destroys first, so
 // `terraform apply -replace` revokes the old key and then mints the new one;
 // only a resource with `create_before_destroy` mints first.
+//
+// A key's `environment` and its `self_healing_trigger` flag together decide
+// whether its incidents can trip the project's self-healing loop. Both are
+// changed in place, and both follow the provider's rule for a setting the API
+// leaves alone when it is omitted: Optional and Computed with no framework
+// default, sent only when configured, so a value set in the console survives
+// an apply that does not name it.
 
 var (
 	_ resource.Resource                = &routingKeyResource{}
 	_ resource.ResourceWithConfigure   = &routingKeyResource{}
 	_ resource.ResourceWithImportState = &routingKeyResource{}
+	_ resource.ResourceWithModifyPlan  = &routingKeyResource{}
 )
 
 // NewRoutingKeyResource returns the flightdeck_routing_key resource.
@@ -52,6 +63,8 @@ type routingKeyModel struct {
 	Masked             types.String `tfsdk:"masked"`
 	LastFour           types.String `tfsdk:"last_four"`
 	EscalationPolicyID types.Int64  `tfsdk:"escalation_policy_id"`
+	Environment        types.String `tfsdk:"environment"`
+	SelfHealingTrigger types.Bool   `tfsdk:"self_healing_trigger"`
 	LockVersion        types.Int64  `tfsdk:"lock_version"`
 }
 
@@ -73,8 +86,81 @@ func routingKeyToModel(k *client.RoutingKey, key types.String) routingKeyModel {
 		Masked:             types.StringValue(k.Masked),
 		LastFour:           types.StringValue(k.LastFour),
 		EscalationPolicyID: policy,
+		Environment:        types.StringPointerValue(k.Environment),
+		SelfHealingTrigger: types.BoolPointerValue(k.SelfHealingTrigger),
 		LockVersion:        types.Int64Value(k.LockVersion),
 	}
+}
+
+// routingKeyFields is what a create or an update sends: the name, plus
+// environment and self_healing_trigger where the configuration sets them, at
+// the plan's value.
+func routingKeyFields(config, plan routingKeyModel) client.Fields {
+	fields := client.Fields{"name": plan.Name.ValueString()}
+	if !config.Environment.IsNull() && known(plan.Environment) {
+		fields["environment"] = plan.Environment.ValueString()
+	}
+	if !config.SelfHealingTrigger.IsNull() && known(plan.SelfHealingTrigger) {
+		fields["self_healing_trigger"] = plan.SelfHealingTrigger.ValueBool()
+	}
+	return fields
+}
+
+// routingKeyNewerFields are the settings a Flightdeck older than them refuses
+// as unknown keys, in the order they arrived.
+var routingKeyNewerFields = []string{"environment", "self_healing_trigger"}
+
+// sentNewerRoutingKeyFields returns the newer settings a write named.
+func sentNewerRoutingKeyFields(sent client.Fields) []string {
+	var named []string
+	for _, key := range routingKeyNewerFields {
+		if _, ok := sent[key]; ok {
+			named = append(named, key)
+		}
+	}
+	return named
+}
+
+// routingKeyTooOldNote closes the error for a refused write that named a
+// newer setting when nothing could be read to tell whether this Flightdeck
+// knows it: the API refuses an unknown key in prose, and its own words may
+// still say so.
+func routingKeyTooOldNote(named []string) string {
+	return fmt.Sprintf("If the API calls %s an unknown key, this Flightdeck is older than the release that added it: "+
+		"upgrade Flightdeck first, or leave it out of the configuration.", strings.Join(named, " or "))
+}
+
+// addRoutingKeyTooOldErrors explains an update refused for naming a setting
+// this Flightdeck is too old to know. Rather than match the refusal's
+// wording, a fresh read is asked: a Flightdeck that knows a setting always
+// reports it. It reports whether it added a diagnostic; false leaves the
+// error to the caller.
+func addRoutingKeyTooOldErrors(ctx context.Context, c *client.Client, projectID, id int64, sent client.Fields, err error, diags *diag.Diagnostics) bool {
+	named := sentNewerRoutingKeyFields(sent)
+	if !client.IsValidation(err) || len(named) == 0 {
+		return false
+	}
+	k, rerr := c.GetRoutingKey(ctx, projectID, id)
+	if rerr != nil {
+		addAPIErrorNote(diags, "Error updating Flightdeck routing key", err, routingKeyTooOldNote(named))
+		return true
+	}
+	reported := map[string]bool{
+		"environment":          k.ReportsEnvironment(),
+		"self_healing_trigger": k.ReportsSelfHealingTrigger(),
+	}
+	added := false
+	for _, key := range named {
+		if reported[key] {
+			continue
+		}
+		diags.AddAttributeError(path.Root(key), "This Flightdeck is too old for "+key,
+			fmt.Sprintf("The Flightdeck at this endpoint does not accept %s on a routing key, so it cannot be set from "+
+				"Terraform there. Nothing in this update was saved. Remove %s from the configuration, or upgrade "+
+				"Flightdeck. %s", key, key, apiMessage(err)))
+		added = true
+	}
+	return added
 }
 
 func (r *routingKeyResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -94,10 +180,14 @@ func (r *routingKeyResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			"  \"payload\": { \"summary\": \"Disk nearly full\", \"severity\": \"warning\", \"source\": \"web-1\" }\n}\n```\n\n" +
 			"A project may hold as many keys as it likes, so issue one per monitor and revoke it on its own — each " +
 			"with its own `name`. Names must be distinct within a project. The API does not check that as such, but " +
-			"for 24 hours after a key's create, a second key declared with the same name is the same create as far as " +
-			"the API is concerned, and fails (see `name`). " +
+			"for 24 hours after a key's create, a second key declared with the same name and settings is the same " +
+			"create as far as the API is concerned, and fails (see `name`). " +
 			"Receiving events does not imply paging: a key pages only if an escalation policy is attached to it, " +
 			"which is a console operation and read-only here (see `escalation_policy_id`).\n\n" +
+			"A key can also let its incidents trip the project's self-healing loop, as a second signal beside the " +
+			"error rate: set `self_healing_trigger = true` and `environment = \"production\"`, and set the project's " +
+			"`self_healing.monitor_rollback` (see `flightdeck_project`). Put only server-side monitors on such a key, " +
+			"never browser RUM monitors, whose client token is public.\n\n" +
 			"The key value is returned by the API **once, on create**, and stored in Terraform state as a sensitive " +
 			"attribute so it can be handed to the monitor. It is never re-read; an imported key has no `routing_key` " +
 			"value. The API has no rotate route, so **rotation is replacement**: " +
@@ -124,8 +214,9 @@ func (r *routingKeyResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			"name": schema.StringAttribute{
 				MarkdownDescription: "Label shown in the project's routing-key list — the monitor's name, usually. " +
 					"Editable in place. **Give every routing key in a project a distinct name:** a create is made " +
-					"idempotent with a key derived from the request body, and `name` is the only thing in that body, " +
-					"so two keys declared in one project with the same name are one create as far as the API is " +
+					"idempotent with a key derived from the request body, which holds `name` and, when they are set, " +
+					"`environment` and `self_healing_trigger`, so two keys declared in one project with the same name " +
+					"and settings are one create as far as the API is " +
 					"concerned for the 24 hours it remembers a create. While the first key is live, Flightdeck refuses the second create rather than replay it " +
 					"without its secret, and the apply fails naming the key that already exists: give the resource the " +
 					"error is reported on another name. The same error follows an apply that failed after Flightdeck made the key; then " +
@@ -164,6 +255,39 @@ func (r *routingKeyResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				Validators:    []validator.Int64{readOnlyAttribute("escalation policies are attached from the Flightdeck console and have no API")},
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
+			"environment": schema.StringAttribute{
+				MarkdownDescription: "What the key's monitors watch, such as `production` or `staging`, using the same " +
+					"names as your release events. Every incident the key opens keeps the environment the key had at that " +
+					"moment, so a change applies only to incidents opened afterwards. It is free text and compared " +
+					"exactly: a key can trip self-healing only with `production`, and `Production` or `prod` never " +
+					"match. Changed in place, with no new key. At most 255 characters, with no space, tab or line break " +
+					"at either end. When unset, the key keeps the environment it has (none, for a new key), so one set " +
+					"in the console survives an apply; set it for Terraform to own it. Terraform does not clear an " +
+					"environment once one is set: clear it in the console. Null on a Flightdeck that predates the " +
+					"setting, where a configured value fails the apply.",
+				Optional: true,
+				Computed: true,
+				Validators: []validator.String{
+					notBlank("leave `environment` out for a key with no environment"),
+					noSurroundingBlank{},
+					charLengthAtMost(client.RoutingKeyEnvironmentMaxLength),
+				},
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+			},
+			"self_healing_trigger": schema.BoolAttribute{
+				MarkdownDescription: "Whether an incident this key opens may trip the project's self-healing loop, as a " +
+					"second signal beside the error rate. It counts only while `environment` is exactly `production` and " +
+					"the project's `self_healing.monitor_rollback` isn't `\"off\"`, so a plan that turns it on for a key " +
+					"with any other environment, or none, carries a warning. Only put server-side monitors on such a key " +
+					"(APM, infrastructure, synthetics, server logs), never browser RUM monitors, whose client token is " +
+					"public. Flightdeck records each change of this flag, and of a flagged key's environment, and posts " +
+					"it to the project's Slack channel. The server's default is `false`. When unset, the key keeps its " +
+					"current value; set it explicitly, even to `false`, for Terraform to own it. Null on a Flightdeck " +
+					"that predates the setting, where a configured value fails the apply.",
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
 			"lock_version": schema.Int64Attribute{
 				MarkdownDescription: "Optimistic-locking version the API bumps on every change. Sent as `If-Match` on updates and when revoking.",
 				Computed:            true,
@@ -173,13 +297,14 @@ func (r *routingKeyResource) Schema(_ context.Context, _ resource.SchemaRequest,
 }
 
 func (r *routingKeyResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	var plan routingKeyModel
+	var plan, config routingKeyModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	projectID := plan.ProjectID.ValueInt64()
-	fields := client.Fields{"name": plan.Name.ValueString()}
+	fields := routingKeyFields(config, plan)
 	created, retiredID, err := r.client.CreateRoutingKey(ctx, projectID, fields, client.PayloadKey("routing_key", strconv.FormatInt(projectID, 10), fields))
 	if err != nil {
 		// The client revokes only a key this create made itself and could not
@@ -203,7 +328,13 @@ func (r *routingKeyResource) Create(ctx context.Context, req resource.CreateRequ
 			}, err) {
 			return
 		}
-		addAPIError(&resp.Diagnostics, "Error creating Flightdeck routing key", err)
+		// There is no key yet to read, so a refusal of a newer setting gets a
+		// note rather than a verdict.
+		note := ""
+		if named := sentNewerRoutingKeyFields(fields); client.IsValidation(err) && len(named) > 0 {
+			note = routingKeyTooOldNote(named)
+		}
+		addAPIErrorNote(&resp.Diagnostics, "Error creating Flightdeck routing key", err, note)
 		return
 	}
 	// The client guarantees the key carries its secret or fails.
@@ -237,17 +368,19 @@ func (r *routingKeyResource) Read(ctx context.Context, req resource.ReadRequest,
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
 }
 
-// Update writes the only editable attribute, the name. The key itself cannot
-// be rotated in place — replacing the resource is the rotation.
+// Update writes the name, and environment and self_healing_trigger where the
+// configuration sets them. The key itself cannot be rotated in place —
+// replacing the resource is the rotation.
 func (r *routingKeyResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan, state routingKeyModel
+	var plan, state, config routingKeyModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	projectID, id := state.ProjectID.ValueInt64(), state.ID.ValueInt64()
-	fields := client.Fields{"name": plan.Name.ValueString()}
+	fields := routingKeyFields(config, plan)
 	updated, err := r.client.UpdateRoutingKey(ctx, projectID, id, fields, state.LockVersion.ValueInt64())
 	if err != nil {
 		if client.IsStale(err) {
@@ -258,12 +391,58 @@ func (r *routingKeyResource) Update(ctx context.Context, req resource.UpdateRequ
 			addStaleError(&resp.Diagnostics, fmt.Sprintf("Routing key %q", state.Name.ValueString()), state.LockVersion.ValueInt64(), current, err)
 			return
 		}
+		if addRoutingKeyTooOldErrors(ctx, r.client, projectID, id, fields, err, &resp.Diagnostics) {
+			return
+		}
 		addAPIError(&resp.Diagnostics, "Error updating Flightdeck routing key", err)
 		return
 	}
 	newState := routingKeyToModel(updated, state.Key)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &newState)...)
 }
+
+// ModifyPlan warns when the configuration turns self_healing_trigger on for a
+// key whose environment will not be exactly "production": Flightdeck takes
+// it, but the key's incidents never trip anything. On create, an environment
+// the configuration leaves out means none.
+func (r *routingKeyResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	var plan, config routingKeyModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !known(config.SelfHealingTrigger) || !config.SelfHealingTrigger.ValueBool() {
+		return
+	}
+	environment := plan.Environment
+	if config.Environment.IsNull() && req.State.Raw.IsNull() {
+		environment = types.StringNull()
+	}
+	if environment.IsUnknown() || (known(environment) && environment.ValueString() == tripEnvironment) {
+		return
+	}
+	has := "has no environment"
+	if known(environment) {
+		has = fmt.Sprintf("has the environment %q", environment.ValueString())
+	}
+	name := "this routing key"
+	if known(plan.Name) {
+		name = fmt.Sprintf("routing key %q", plan.Name.ValueString())
+	}
+	resp.Diagnostics.AddAttributeWarning(path.Root("self_healing_trigger"), capitalize(name)+" can't trip self-healing",
+		fmt.Sprintf("self_healing_trigger is on, but %s %s. Flightdeck counts a key's incidents toward self-healing only "+
+			"while its environment is exactly %q, so this key's incidents never trip anything, and the project's "+
+			"self-healing settings report it as a blocker. Set environment = %q if this key's monitors watch production.",
+			name, has, tripEnvironment, tripEnvironment))
+}
+
+// tripEnvironment is the only environment a key that trips self-healing may
+// have: the one the loop watches.
+const tripEnvironment = "production"
 
 func (r *routingKeyResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state routingKeyModel

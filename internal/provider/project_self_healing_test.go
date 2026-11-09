@@ -350,6 +350,7 @@ data "flightdeck_project" "x" {
 					resource.TestCheckResourceAttr("data.flightdeck_project.x", "self_healing.rollback", "report"),
 					resource.TestCheckResourceAttr("data.flightdeck_project.x", "self_healing.armed", "false"),
 					resource.TestCheckResourceAttr("data.flightdeck_project.x", "self_healing.count_browser_errors", "false"),
+					resource.TestCheckResourceAttr("data.flightdeck_project.x", "self_healing.monitor_rollback", "off"),
 					resource.TestCheckResourceAttr("data.flightdeck_project.x", "self_healing.burn_rate", "14.4"),
 				),
 			},
@@ -779,6 +780,7 @@ func TestProjectSelfHealing_writePathMatchesThresholdKeys(t *testing.T) {
 	block, d := types.ObjectValueFrom(ctx, selfHealingAttrTypes, selfHealingModel{
 		FeatureEnabled:        types.BoolValue(true),
 		Rollback:              types.StringValue("report"),
+		MonitorRollback:       types.StringValue("off"),
 		CountBrowserErrors:    types.BoolValue(false),
 		Armed:                 types.BoolValue(false),
 		BakeMinutes:           types.Int64Value(20),

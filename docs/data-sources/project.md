@@ -126,6 +126,7 @@ Read-Only:
 - `feature_enabled` (Boolean) Whether the control loop runs at all, in report only or auto-rollback.
 - `long_window_minutes` (Number) Long burn-rate window in minutes.
 - `max_rollbacks_per_hour` (Number) Per-app blast-radius cap.
+- `monitor_rollback` (String) Whether an incident from a monitor can trip the loop: `"off"`, `"report"` or `"auto"`. Null on a Flightdeck that predates the setting.
 - `recovery_window_minutes` (Number) Post-rollback grace period, in minutes.
 - `rollback` (String) The loop's mode: `"report"` (report only) or `"auto"` (auto-rollback). Derived from `armed` on a Flightdeck that predates the setting.
 - `short_window_minutes` (Number) Short burn-rate window in minutes.

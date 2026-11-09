@@ -215,6 +215,7 @@ func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("self_healing"), planned)...)
 	}
 	warnAutoRollback(ctx, plan.Identifier, config.SelfHealing, prior, plan.SelfHealing, &resp.Diagnostics)
+	warnMonitorRollback(ctx, plan.Identifier, config.SelfHealing, prior, plan.SelfHealing, &resp.Diagnostics)
 	warnAutoPromote(ctx, plan.Identifier, config.AutoPromote, priorAutoPromote, plan.AutoPromote, &resp.Diagnostics)
 	warnAutoPromoteModeUnset(ctx, plan.Identifier, config.AutoPromote, priorAutoPromote, &resp.Diagnostics)
 	if planned := planAgentWorkComputed(ctx, priorAgentWork, plan.AgentWork, &resp.Diagnostics); !planned.Equal(plan.AgentWork) {
@@ -318,6 +319,7 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 	newState.SelfHealing = block
 	newState.AutoPromote = autoPromoteToObject(sh, &resp.Diagnostics)
 	warnRollbackBlockers(sh, p.Identifier, &resp.Diagnostics)
+	warnMonitorRollbackBlockers(sh, p.Identifier, &resp.Diagnostics)
 	warnAutoPromoteBlockers(sh, p.Identifier, &resp.Diagnostics)
 	newState.SlackChannel = readSlackChannel(ctx, r.client, p.ID,
 		slackEventFilterOf(ctx, state.SlackChannel, &resp.Diagnostics), slackEventsManaged, &resp.Diagnostics)

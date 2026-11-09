@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.15.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.14.0...v0.15.0) (2026-11-09)
+
+
+### Added
+
+* manage self_healing.monitor_rollback on flightdeck_project ([#65](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/65)) ([8653c67](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/8653c67a089fa07b2b309942099144a745ffa1c2))
+* set a routing key's environment and whether it can trip self-healing ([#66](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/66)) ([3b41189](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/3b411892ba669f80c9927aecf9ebc3045ae966fd))
+
+
+### Fixed
+
+* cap flightdeck_state names at 100 characters, as Flightdeck now does ([#63](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/63)) ([0b3ded3](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/0b3ded38ef605c2226e614b0f7fe23846e35b28f))
+
 ## [0.14.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.13.0...v0.14.0) (2026-10-26)
 
 

@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 )
 
@@ -20,11 +21,20 @@ import (
 // the key: a project can receive events without Flightdeck owning the paging.
 // Escalation policies have no API of their own, so this is reported but never
 // written here.
+//
+// Environment names what the key's monitors watch, such as "production"; each
+// incident the key opens keeps it. It is nil when the key has none, which is
+// also what a Flightdeck older than the setting reads as: ReportsEnvironment
+// tells the two apart. SelfHealingTrigger is whether the key's incidents may
+// trip the self-healing loop, which they do only while Environment is exactly
+// "production". It is nil on a Flightdeck older than the setting.
 type RoutingKey struct {
 	ID                 int64   `json:"id"`
 	ProjectID          int64   `json:"project_id"`
 	Name               string  `json:"name"`
 	EscalationPolicyID *int64  `json:"escalation_policy_id"`
+	Environment        *string `json:"environment"`
+	SelfHealingTrigger *bool   `json:"self_healing_trigger"`
 	Masked             string  `json:"masked"`
 	LastFour           string  `json:"last_four"`
 	Revoked            bool    `json:"revoked"`
@@ -34,7 +44,41 @@ type RoutingKey struct {
 	CreatedAt          string  `json:"created_at"`
 	Key                string  `json:"routing_key"`
 	SecretAvailable    *bool   `json:"secret_available"`
+
+	// environmentReported is whether the read carried environment at all,
+	// null included.
+	environmentReported bool
 }
+
+// RoutingKeyEnvironmentMaxLength is the longest environment Flightdeck
+// accepts, in characters, after it strips blank space from either end.
+const RoutingKeyEnvironmentMaxLength = 255
+
+// UnmarshalJSON decodes the shape as usual and also notes whether the
+// environment key was there, which a null value alone cannot say.
+func (k *RoutingKey) UnmarshalJSON(data []byte) error {
+	type plain RoutingKey
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return err
+	}
+	*k = RoutingKey(decoded)
+	_, k.environmentReported = keys["environment"]
+	return nil
+}
+
+// ReportsEnvironment reports whether the Flightdeck that answered knows a
+// key's environment: a read from one that does always has the key, null
+// included.
+func (k *RoutingKey) ReportsEnvironment() bool { return k.environmentReported }
+
+// ReportsSelfHealingTrigger reports whether the Flightdeck that answered knows
+// the self_healing_trigger flag.
+func (k *RoutingKey) ReportsSelfHealingTrigger() bool { return k.SelfHealingTrigger != nil }
 
 // ResourceID implements Identified.
 func (k *RoutingKey) ResourceID() int64 { return k.ID }
@@ -136,8 +180,9 @@ func (c *Client) CreateRoutingKey(ctx context.Context, projectID int64, fields F
 	return created, retiredID, err
 }
 
-// UpdateRoutingKey PATCHes a key with an If-Match precondition. Only `name` is
-// written here; an absent key keeps its stored value. The secret itself cannot
+// UpdateRoutingKey PATCHes a key with an If-Match precondition. The provider
+// writes `name`, and `environment` and `self_healing_trigger` when they are
+// configured; an absent key keeps its stored value. The secret itself cannot
 // be changed — the API has no rotate route, so rotating means creating another
 // key and revoking this one.
 func (c *Client) UpdateRoutingKey(ctx context.Context, projectID, id int64, fields Fields, lockVersion int64) (*RoutingKey, error) {

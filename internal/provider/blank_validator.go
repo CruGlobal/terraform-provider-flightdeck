@@ -62,3 +62,29 @@ func (v trimmedLengthAtMost) ValidateString(_ context.Context, req validator.Str
 			fmt.Sprintf("This value is %d characters long; Flightdeck accepts at most %d here, not counting blank space at either end.", n, int(v)))
 	}
 }
+
+// noSurroundingBlank refuses a value with blank space the API strips from
+// either end (apiBlank): Flightdeck would store it without that space, and the
+// next plan would show a change. A value that is nothing but blank space is
+// left to notBlank.
+type noSurroundingBlank struct{}
+
+func (noSurroundingBlank) Description(context.Context) string {
+	return "must not start or end with a space, tab or line break"
+}
+
+func (v noSurroundingBlank) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (noSurroundingBlank) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	value := req.ConfigValue.ValueString()
+	if trimmed := strings.Trim(value, apiBlank); trimmed != value && !isBlank(value) {
+		resp.Diagnostics.AddAttributeError(req.Path, "Blank space at either end",
+			fmt.Sprintf("%q starts or ends with a space, tab or line break. Flightdeck trims it, so it would store %q "+
+				"and the next plan would show a change. Write %q instead.", value, trimmed, trimmed))
+	}
+}

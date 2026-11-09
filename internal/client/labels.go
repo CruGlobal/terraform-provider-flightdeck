@@ -19,9 +19,9 @@ func (l *Label) ResourceID() int64 { return l.ID }
 
 const labelRoot = "label"
 
-// NameMaxLength is the longest name a label or a state can have, in
-// characters. Flightdeck refuses a longer one with 422 invalid_attribute.
-const NameMaxLength = 255
+// LabelNameMaxLength is the longest name a label can have, in characters.
+// Flightdeck refuses a longer one with 422 invalid_attribute.
+const LabelNameMaxLength = 255
 
 func labelPath(id int64) string { return "/labels/" + strconv.FormatInt(id, 10) }
 

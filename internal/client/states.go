@@ -25,6 +25,13 @@ func (s *State) ResourceID() int64 { return s.ID }
 
 const stateRoot = "state"
 
+// StateNameMaxLength is the longest name a state can have, in characters.
+// Flightdeck refuses a longer one with 422 invalid_attribute. It is shorter
+// than a label's because Flightdeck repeats a state's name in messages that
+// must stay small. Only a name being written is measured, so a longer name
+// stored before the cap still takes other changes.
+const StateNameMaxLength = 100
+
 func statePath(id int64) string { return "/states/" + strconv.FormatInt(id, 10) }
 
 // ListStates returns every state of a project, in the API's order (group,

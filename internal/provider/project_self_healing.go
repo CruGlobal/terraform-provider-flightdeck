@@ -60,6 +60,7 @@ import (
 type selfHealingModel struct {
 	FeatureEnabled        types.Bool    `tfsdk:"feature_enabled"`
 	Rollback              types.String  `tfsdk:"rollback"`
+	MonitorRollback       types.String  `tfsdk:"monitor_rollback"`
 	CountBrowserErrors    types.Bool    `tfsdk:"count_browser_errors"`
 	Armed                 types.Bool    `tfsdk:"armed"`
 	BakeMinutes           types.Int64   `tfsdk:"bake_minutes"`
@@ -78,6 +79,7 @@ type selfHealingModel struct {
 var selfHealingAttrTypes = map[string]attr.Type{
 	"feature_enabled":         types.BoolType,
 	"rollback":                types.StringType,
+	"monitor_rollback":        types.StringType,
 	"count_browser_errors":    types.BoolType,
 	"armed":                   types.BoolType,
 	"bake_minutes":            types.Int64Type,
@@ -139,7 +141,8 @@ func selfHealingSchema() schema.Attribute {
 			"`rollback` is `\"auto\"`, and Flightdeck's global kill switch is off. A plan that turns auto-rollback on " +
 			"carries a warning saying so, and while `rollback` is `\"auto\"` each thing that would stop it right now " +
 			"is shown as a warning on refresh and after apply. `armed` is the old name for the mode, kept read-only " +
-			"and deprecated.\n\n" +
+			"and deprecated. `monitor_rollback` lets an incident from a trusted monitor trip the loop too, beside the " +
+			"error rate.\n\n" +
 			"The endpoint merges, so this block only ever sends what you configure: a threshold you leave unset keeps " +
 			"whatever the project has (the server's documented default, until someone overrides it), and a setting you " +
 			"never name is never disturbed — including one changed in the console. `short_window_minutes` must not " +
@@ -181,6 +184,24 @@ func selfHealingSchema() schema.Attribute {
 				Optional:      true,
 				Computed:      true,
 				Validators:    []validator.String{stringvalidator.OneOf(client.RollbackModes...)},
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+			},
+			"monitor_rollback": schema.StringAttribute{
+				MarkdownDescription: "Whether an incident from a monitor can trip the loop, as a second signal beside the " +
+					"error rate: `\"off\"` (the server's default) reads no monitors, `\"report\"` records what a monitor's " +
+					"incident would do and never touches production, and `\"auto\"` rolls production back on one. " +
+					"`\"auto\"` acts only while `rollback` is `\"auto\"` too and `feature_enabled` is on, so a project can " +
+					"keep auto-rollback for errors while its monitors run in report only. Only an incident opened through " +
+					"the Events API with a routing key that has `self_healing_trigger` on and an `environment` of exactly " +
+					"`production` counts (see `flightdeck_routing_key`). A plan that moves this to `\"auto\"` carries a " +
+					"warning saying so. While it is `\"auto\"`, each thing that would stop a monitor's rollback right now " +
+					"(the API's `monitor_rollback_blockers`, such as no routing key that can trip the loop) is shown as a " +
+					"warning on refresh and after apply rather than stored. When unset, the project's current value is " +
+					"kept, so a change made in the console survives an apply; set it explicitly for Terraform to own it. " +
+					"Null on a Flightdeck that predates the setting, where a configured value fails the apply.",
+				Optional:      true,
+				Computed:      true,
+				Validators:    []validator.String{stringvalidator.OneOf(client.MonitorRollbackModes...)},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"count_browser_errors": schema.BoolAttribute{
@@ -451,6 +472,96 @@ func warnRollbackBlockers(sh *client.SelfHealing, identifier string, diags *diag
 	}
 }
 
+// monitorRollbackActs is what the plan-time warning says Flightdeck will do
+// once monitor_rollback is "auto".
+const monitorRollbackActs = "An incident opened through the Events API with a routing key that has self_healing_trigger on " +
+	"and an environment of exactly production can then roll production back by itself, the way an error spike can, " +
+	"while rollback is \"auto\" and feature_enabled is on. Anything that stands in the way is shown as a warning after " +
+	"the apply."
+
+// warnMonitorRollback is the plan-time warning for an apply that moves
+// monitor_rollback to "auto", or possibly so (a value not known until apply).
+// priorBlock is null on create. The summary names the project, because
+// Terraform folds warnings that share a summary into one.
+func warnMonitorRollback(ctx context.Context, identifier types.String, configBlock, priorBlock, planBlock types.Object, diags *diag.Diagnostics) {
+	if planBlock.IsNull() {
+		return
+	}
+	var cfg, planned, prior selfHealingModel
+	if !planBlock.IsUnknown() {
+		diags.Append(planBlock.As(ctx, &planned, objectAsOptions)...)
+	}
+	if !priorBlock.IsNull() && !priorBlock.IsUnknown() {
+		diags.Append(priorBlock.As(ctx, &prior, objectAsOptions)...)
+	}
+	configured := !configBlock.IsNull() && !configBlock.IsUnknown()
+	if configured {
+		diags.Append(configBlock.As(ctx, &cfg, objectAsOptions)...)
+	}
+	if diags.HasError() {
+		return
+	}
+	isAuto := func(v types.String) bool { return known(v) && v.ValueString() == client.MonitorRollbackAuto }
+	if isAuto(prior.MonitorRollback) {
+		return
+	}
+	project := "this project"
+	if known(identifier) {
+		project = "project " + identifier.ValueString()
+	}
+	at := path.Root("self_healing").AtName("monitor_rollback")
+	switch {
+	case configBlock.IsUnknown() || (configured && cfg.MonitorRollback.IsUnknown()):
+		diags.AddAttributeWarning(at, "This apply may let monitors roll back "+project,
+			fmt.Sprintf("self_healing.monitor_rollback for %s is not known until apply. If it is \"auto\", %s",
+				project, monitorRollbackActs))
+	case configured && known(cfg.MonitorRollback) && isAuto(planned.MonitorRollback):
+		reportOnly := ""
+		if known(planned.Rollback) && planned.Rollback.ValueString() != client.RollbackAuto {
+			reportOnly = fmt.Sprintf(" Its rollback is %q, so until that is \"auto\" too, a monitor's incident is only "+
+				"reported.", planned.Rollback.ValueString())
+		}
+		diags.AddAttributeWarning(at, "This apply lets monitors roll back "+project,
+			fmt.Sprintf("This apply sets self_healing.monitor_rollback for %s to \"auto\". %s%s", project, monitorRollbackActs, reportOnly))
+	}
+}
+
+// warnMonitorRollbackBlockers reports, one warning each, what would stop a
+// monitor's incident rolling back a project whose monitor_rollback is "auto"
+// right now. Like the rollback blockers, they are warnings rather than state
+// because they change with every deploy, and each summary names the project
+// and the code.
+//
+// The monitor's list passes every rollback blocker through. While rollback
+// is "auto", warnRollbackBlockers has already warned of each of those, so
+// they are not repeated here.
+func warnMonitorRollbackBlockers(sh *client.SelfHealing, identifier string, diags *diag.Diagnostics) {
+	if sh == nil || sh.MonitorRollback == nil || *sh.MonitorRollback != client.MonitorRollbackAuto {
+		return
+	}
+	warnedAsRollback := map[string]bool{}
+	if sh.RollbackMode() == client.RollbackAuto {
+		for _, b := range sh.RollbackBlockers {
+			warnedAsRollback[b.Code] = true
+		}
+	}
+	seen := map[string]int{}
+	for _, b := range sh.MonitorRollbackBlockers {
+		if warnedAsRollback[b.Code] {
+			continue
+		}
+		seen[b.Code]++
+		summary := fmt.Sprintf("A monitor cannot roll back project %s right now: %s", identifier, b.Code)
+		if n := seen[b.Code]; n > 1 {
+			summary += fmt.Sprintf(" (%d)", n)
+		}
+		diags.AddAttributeWarning(path.Root("self_healing").AtName("monitor_rollback"), summary,
+			b.Message+"\n\nThis project's monitor_rollback is \"auto\", and this is one of the things that would stop a "+
+				"monitor's incident rolling it back now. Flightdeck checks again with every deploy, so this is reported "+
+				"on each refresh and apply rather than stored in state.")
+	}
+}
+
 // selfHealingToObject maps the API's resolved config into the block.
 func selfHealingToObject(sh *client.SelfHealing, diags *diag.Diagnostics) types.Object {
 	if sh == nil {
@@ -462,6 +573,7 @@ func selfHealingToObject(sh *client.SelfHealing, diags *diag.Diagnostics) types.
 		// not inside it; rollback falls back to config.armed on an older server.
 		"feature_enabled":         types.BoolValue(sh.FeatureEnabled),
 		"rollback":                types.StringValue(sh.RollbackMode()),
+		"monitor_rollback":        types.StringPointerValue(sh.MonitorRollback),
 		"count_browser_errors":    types.BoolPointerValue(cfg.CountBrowserErrors),
 		"armed":                   types.BoolValue(cfg.Armed),
 		"bake_minutes":            types.Int64Value(cfg.BakeMinutes),
@@ -508,10 +620,14 @@ func selfHealingFields(ctx context.Context, block types.Object, diags *diag.Diag
 			fields[key] = v.ValueBool()
 		}
 	}
-	putBool("feature_enabled", m.FeatureEnabled)
-	if !m.Rollback.IsNull() && !m.Rollback.IsUnknown() {
-		fields["rollback"] = m.Rollback.ValueString()
+	putString := func(key string, v types.String) {
+		if !v.IsNull() && !v.IsUnknown() {
+			fields[key] = v.ValueString()
+		}
 	}
+	putBool("feature_enabled", m.FeatureEnabled)
+	putString("rollback", m.Rollback)
+	putString("monitor_rollback", m.MonitorRollback)
 	putBool("count_browser_errors", m.CountBrowserErrors)
 	putInt("bake_minutes", m.BakeMinutes)
 	putFloat("baseline_multiplier", m.BaselineMultiplier)
@@ -602,6 +718,7 @@ func writeSelfHealing(ctx context.Context, c *client.Client, projectID int64, id
 	// attributes.
 	finish := func(sh *client.SelfHealing, lockVersion int64) selfHealingWrite {
 		warnRollbackBlockers(sh, identifier, diags)
+		warnMonitorRollbackBlockers(sh, identifier, diags)
 		warnAutoPromoteBlockers(sh, identifier, diags)
 		autoPromote := autoPromoteToObject(sh, diags)
 		if sh != nil && named.autoPromote && !sh.ReportsAutoPromote() {
@@ -790,7 +907,7 @@ func isAutoPromoteKey(key string) bool {
 
 // selfHealingNewerSettings are the settings an older Flightdeck refuses as
 // unknown. Each is configured as the attribute of the same name.
-var selfHealingNewerSettings = []string{"rollback", "count_browser_errors"}
+var selfHealingNewerSettings = []string{"rollback", "monitor_rollback", "count_browser_errors"}
 
 // addUnsupportedSettingError explains a refused write that named a setting
 // this Flightdeck is too old to know. The API's refusal of an unknown key is
@@ -823,6 +940,7 @@ func addUnsupportedSettingError(ctx context.Context, c *client.Client, projectID
 	// does not leave it out.
 	reported := map[string]bool{
 		"rollback":             sh.Rollback != nil,
+		"monitor_rollback":     sh.MonitorRollback != nil,
 		"count_browser_errors": sh.Config.CountBrowserErrors != nil,
 	}
 	added := false

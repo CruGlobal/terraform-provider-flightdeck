@@ -112,6 +112,10 @@ func (d *projectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 						MarkdownDescription: "The loop's mode: `\"report\"` (report only) or `\"auto\"` (auto-rollback). Derived from `armed` on a Flightdeck that predates the setting.",
 						Computed:            true,
 					},
+					"monitor_rollback": schema.StringAttribute{
+						MarkdownDescription: "Whether an incident from a monitor can trip the loop: `\"off\"`, `\"report\"` or `\"auto\"`. Null on a Flightdeck that predates the setting.",
+						Computed:            true,
+					},
 					"count_browser_errors": schema.BoolAttribute{
 						MarkdownDescription: "Whether errors sent with a browser token count toward the error rate the loop acts on. Null on a Flightdeck that predates the setting.",
 						Computed:            true,

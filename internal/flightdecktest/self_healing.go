@@ -1,6 +1,7 @@
 package flightdecktest
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -32,6 +33,10 @@ type selfHealingStore struct {
 	autoPromoteUnsupported bool
 	// promoting clears the not_yet_available auto-promote blocker.
 	promoting bool
+	// monitorRollbackUnsupported simulates a Flightdeck that has auto-promote
+	// but predates `monitor_rollback` (see SetMonitorRollbackSupported). One
+	// without auto-promote predates it too.
+	monitorRollbackUnsupported bool
 	// defaults and autoPromoteDefaults change a default the way a Flightdeck
 	// release can: every project that never set the key follows it, and no
 	// lock_version moves (SetSelfHealingDefault, SetAutoPromoteDefault).
@@ -55,6 +60,45 @@ func (s *Server) SetSelfHealingDefault(key string, value any) {
 // knowsAutoPromote reports whether the Flightdeck the fake acts as has the
 // auto-promote settings.
 func (st *selfHealingStore) knowsAutoPromote() bool { return !st.legacy && !st.autoPromoteUnsupported }
+
+// knowsMonitorRollback reports whether the Flightdeck the fake acts as has
+// the monitor_rollback setting, which came after auto-promote.
+func (st *selfHealingStore) knowsMonitorRollback() bool {
+	return st.knowsAutoPromote() && !st.monitorRollbackUnsupported
+}
+
+// SetMonitorRollbackSupported switches the monitor_rollback setting on or off,
+// to simulate a Flightdeck from before it: the read has no monitor_rollback or
+// monitor_rollback_blockers, and a write naming it is an unknown key.
+func (s *Server) SetMonitorRollbackSupported(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.selfHealingStore().monitorRollbackUnsupported = !on
+}
+
+// SetMonitorRollback sets a project's monitor mode directly (no HTTP), the
+// way a console change does.
+func (s *Server) SetMonitorRollback(projectID int64, mode string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.projects().byID[projectID]; p != nil {
+		if p.SelfHealing == nil {
+			p.SelfHealing = map[string]any{}
+		}
+		p.SelfHealing["monitor_rollback"] = mode
+	}
+}
+
+// monitorRollbackModes are the values the API takes for monitor_rollback.
+var monitorRollbackModes = []string{"off", "report", "auto"}
+
+// monitorRollbackMode is the project's stored monitor mode, "off" unless set.
+func monitorRollbackMode(p *Project) string {
+	if mode, ok := p.SelfHealing["monitor_rollback"].(string); ok && mode != "" {
+		return mode
+	}
+	return "off"
+}
 
 // RollbackBlocker is one entry of the read's rollback_blockers.
 type RollbackBlocker struct {
@@ -178,6 +222,9 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 		switches["rollback"] = true
 		switches["count_browser_errors"] = true
 	}
+	if s.selfHealingStore().knowsMonitorRollback() {
+		switches["monitor_rollback"] = true
+	}
 	autoPromote := map[string]bool{}
 	if s.selfHealingStore().knowsAutoPromote() {
 		for _, k := range AutoPromoteWritable {
@@ -266,6 +313,17 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 	if msg != "" {
 		return http.StatusUnprocessableEntity, "invalid_attribute", msg
 	}
+	// monitor_rollback: "off", "report" or "auto", trimmed and in any case;
+	// null or blank is no opinion.
+	var monitorMode string
+	if v, has := submitted["monitor_rollback"]; has && !blank(v) {
+		str, isStr := v.(string)
+		monitorMode = strings.ToLower(strings.TrimSpace(str))
+		if !isStr || !contains(monitorRollbackModes, monitorMode) {
+			return http.StatusUnprocessableEntity, "invalid_attribute",
+				"monitor_rollback must be one of off, report, auto, got " + fmt.Sprintf("%#v", v)
+		}
+	}
 	// The auto-promote settings are validated with the rest, before anything
 	// is assigned, against the settings in effect.
 	var promoteChanges map[string]any
@@ -314,6 +372,9 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 	if countNamed {
 		next["count_browser_errors"] = countBrowser
 	}
+	if monitorMode != "" {
+		next["monitor_rollback"] = monitorMode
+	}
 	after := s.resolveSelfHealing(next)
 	shortW, _ := asFloat64(after["short_window_minutes"])
 	longW, _ := asFloat64(after["long_window_minutes"])
@@ -359,6 +420,35 @@ func (s *Server) rollbackBlockers(p *Project) []RollbackBlocker {
 	return append(out, release...)
 }
 
+// monitorRollbackBlockers is the fake's monitor_rollback_blockers, in the
+// API's order: the mode's own codes, every rollback blocker, then the
+// monitor's prerequisites. The fake has no trip keys, so no_trip_keys is
+// always listed.
+func (s *Server) monitorRollbackBlockers(p *Project) []RollbackBlocker {
+	out := []RollbackBlocker{}
+	switch monitorRollbackMode(p) {
+	case "off":
+		out = append(out, RollbackBlocker{Code: "monitor_rollback_off",
+			Message: "monitor_rollback is off, so no monitor can trip the loop."})
+	case "auto":
+		if !truthy(s.resolveSelfHealing(p.SelfHealing)["armed"]) {
+			out = append(out, RollbackBlocker{Code: "monitor_auto_needs_rollback_auto",
+				Message: "monitor_rollback is auto but rollback isn't, so a monitor trip only reports."})
+		}
+	}
+	out = append(out, s.rollbackBlockers(p)...)
+	incidents, stored := p.Features["incidents"]
+	if !stored {
+		incidents = DefaultFeatures["incidents"]
+	}
+	if !incidents {
+		out = append(out, RollbackBlocker{Code: "incidents_off",
+			Message: "Incident management is off for this project, so the Events API refuses its routing keys."})
+	}
+	return append(out, RollbackBlocker{Code: "no_trip_keys",
+		Message: "No active routing key can trip self-healing with the environment production."})
+}
+
 // selfHealingWritable is the read's writable_settings: the thresholds, then
 // the switches this Flightdeck has, then the auto-promote settings if it has
 // them, as the API lists them.
@@ -367,7 +457,11 @@ func (s *Server) selfHealingWritable() []string {
 	writable = append(writable, selfHealingThresholdOrder...)
 	writable = append(writable, "feature_enabled")
 	if !s.selfHealingStore().legacy {
-		writable = append(writable, "rollback", "count_browser_errors")
+		writable = append(writable, "rollback")
+		if s.selfHealingStore().knowsMonitorRollback() {
+			writable = append(writable, "monitor_rollback")
+		}
+		writable = append(writable, "count_browser_errors")
 	}
 	if s.selfHealingStore().knowsAutoPromote() {
 		writable = append(writable, AutoPromoteWritable...)
@@ -388,6 +482,11 @@ func (s *Server) serializeSelfHealing(p *Project) map[string]any {
 		overrides[k] = v
 	}
 	config := s.resolveSelfHealing(p.SelfHealing)
+	// The monitor mode is stored beside armed but read at the top level.
+	delete(config, "monitor_rollback")
+	if !s.selfHealingStore().knowsMonitorRollback() {
+		delete(overrides, "monitor_rollback")
+	}
 	out := map[string]any{
 		"project_id": p.ID, "feature_enabled": s.selfHealingFeatureOn(p), "globally_disarmed": false,
 		"config": config, "overrides": overrides,
@@ -402,6 +501,10 @@ func (s *Server) serializeSelfHealing(p *Project) map[string]any {
 			out["rollback"] = "auto"
 		}
 		out["rollback_blockers"] = s.rollbackBlockers(p)
+	}
+	if s.selfHealingStore().knowsMonitorRollback() {
+		out["monitor_rollback"] = monitorRollbackMode(p)
+		out["monitor_rollback_blockers"] = s.monitorRollbackBlockers(p)
 	}
 	if s.selfHealingStore().knowsAutoPromote() {
 		for k, v := range s.autoPromoteWire(p.AutoPromote) {

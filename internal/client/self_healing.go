@@ -20,9 +20,17 @@ type SelfHealing struct {
 	// right now, empty when nothing Flightdeck can check would. It is filled in
 	// either mode, and changes with every deploy. Read-only.
 	RollbackBlockers []RollbackBlocker `json:"rollback_blockers"`
-	GloballyDisarmed bool              `json:"globally_disarmed"`
-	Config           SelfHealingConfig `json:"config"`
-	LockVersion      int64             `json:"lock_version"`
+	// MonitorRollback is whether an incident from a monitor can trip the
+	// loop: MonitorRollbackOff, MonitorRollbackReport or MonitorRollbackAuto.
+	// It is nil on a Flightdeck that predates the setting.
+	MonitorRollback *string `json:"monitor_rollback"`
+	// MonitorRollbackBlockers lists what would stop a monitor's incident
+	// rolling this project back right now. It passes every rollback blocker
+	// through and adds the monitor's own. Read-only.
+	MonitorRollbackBlockers []RollbackBlocker `json:"monitor_rollback_blockers"`
+	GloballyDisarmed        bool              `json:"globally_disarmed"`
+	Config                  SelfHealingConfig `json:"config"`
+	LockVersion             int64             `json:"lock_version"`
 	// AutoPromote is the auto-promote mode (AutoPromoteOff, AutoPromoteDepsOnly
 	// or AutoPromoteAll). It and the four settings after it ride beside
 	// `rollback`, outside `config`, resolved against their defaults. All five
@@ -99,6 +107,18 @@ const (
 // RollbackModes are the values the API accepts for `rollback`.
 var RollbackModes = []string{RollbackReport, RollbackAuto}
 
+// The monitor modes. Off reads no monitors; report records what a monitor's
+// incident would do and never touches production; auto rolls production back
+// on one, but only while `rollback` is auto too.
+const (
+	MonitorRollbackOff    = "off"
+	MonitorRollbackReport = "report"
+	MonitorRollbackAuto   = "auto"
+)
+
+// MonitorRollbackModes are the values the API accepts for `monitor_rollback`.
+var MonitorRollbackModes = []string{MonitorRollbackOff, MonitorRollbackReport, MonitorRollbackAuto}
+
 // RollbackMode returns the loop's mode. A Flightdeck that predates the
 // `rollback` setting has no top-level value, so it is derived from
 // config.armed, which the API documents as true exactly when the mode is auto.
@@ -161,7 +181,7 @@ var SelfHealingThresholdKeys = []string{
 // for each, null or blank is "no opinion" rather than a reset. The endpoint's
 // full writable set is these plus SelfHealingThresholdKeys. "armed" is
 // deliberately absent: the mode is set through "rollback".
-var SelfHealingSwitchKeys = []string{"feature_enabled", "rollback", "count_browser_errors"}
+var SelfHealingSwitchKeys = []string{"feature_enabled", "rollback", "monitor_rollback", "count_browser_errors"}
 
 // SelfHealingAutoPromoteKeys are the auto-promote settings, which the
 // endpoint takes beside the switches, in the order the API lists them. As

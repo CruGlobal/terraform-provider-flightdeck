@@ -33,6 +33,9 @@ resource "flightdeck_project" "sandbox" {
 # Self-healing (workspace admins only). `rollback` is the loop's mode:
 # "report" notes what it would do and never touches production, and "auto"
 # lets Flightdeck roll production back by itself when every check passes.
+# `monitor_rollback` lets an incident from a monitor trip the loop too, through
+# a flightdeck_routing_key with self_healing_trigger on; "report" records what
+# it would do first.
 resource "flightdeck_project" "payments" {
   name       = "Payments"
   identifier = "PAY"
@@ -40,6 +43,7 @@ resource "flightdeck_project" "payments" {
   self_healing = {
     feature_enabled        = true
     rollback               = "report"
+    monitor_rollback       = "report"
     bake_minutes           = 30
     burn_rate              = 10.0
     max_rollbacks_per_hour = 2

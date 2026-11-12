@@ -37,6 +37,11 @@ type selfHealingStore struct {
 	// but predates `monitor_rollback` (see SetMonitorRollbackSupported). One
 	// without auto-promote predates it too.
 	monitorRollbackUnsupported bool
+	// requireRecentErrorsUnsupported simulates a Flightdeck that has
+	// auto-promote but predates `require_recent_errors` (see
+	// SetRequireRecentErrorsSupported). One without auto-promote predates it
+	// too.
+	requireRecentErrorsUnsupported bool
 	// defaults and autoPromoteDefaults change a default the way a Flightdeck
 	// release can: every project that never set the key follows it, and no
 	// lock_version moves (SetSelfHealingDefault, SetAutoPromoteDefault).
@@ -65,6 +70,13 @@ func (st *selfHealingStore) knowsAutoPromote() bool { return !st.legacy && !st.a
 // the monitor_rollback setting, which came after auto-promote.
 func (st *selfHealingStore) knowsMonitorRollback() bool {
 	return st.knowsAutoPromote() && !st.monitorRollbackUnsupported
+}
+
+// knowsRequireRecentErrors reports whether the Flightdeck the fake acts as has
+// the require_recent_errors setting, which came after the rest of
+// auto-promote.
+func (st *selfHealingStore) knowsRequireRecentErrors() bool {
+	return st.knowsAutoPromote() && !st.requireRecentErrorsUnsupported
 }
 
 // SetMonitorRollbackSupported switches the monitor_rollback setting on or off,
@@ -226,10 +238,8 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 		switches["monitor_rollback"] = true
 	}
 	autoPromote := map[string]bool{}
-	if s.selfHealingStore().knowsAutoPromote() {
-		for _, k := range AutoPromoteWritable {
-			switches[k], autoPromote[k] = true, true
-		}
+	for _, k := range s.autoPromoteWritable() {
+		switches[k], autoPromote[k] = true, true
 	}
 	var unknown []string
 	for k := range submitted {
@@ -482,10 +492,7 @@ func (s *Server) selfHealingWritable() []string {
 		}
 		writable = append(writable, "count_browser_errors")
 	}
-	if s.selfHealingStore().knowsAutoPromote() {
-		writable = append(writable, AutoPromoteWritable...)
-	}
-	return writable
+	return append(writable, s.autoPromoteWritable()...)
 }
 
 // selfHealingThresholdOrder is the API's order of the thresholds.

@@ -31,6 +31,10 @@ import (
 //     an exact IANA name;
 //   - freeze_dates is at most 100 ISO dates, none twice, stored sorted; past
 //     dates are kept, and [] clears the list;
+//   - require_recent_errors is true or false, read the way the API reads a
+//     feature flag (true, "true", "1", "t", "on" and false, "false", "0",
+//     "f", "off", trimmed and in any case); false is a value, never a blank,
+//     and anything else (a number, a list, an object) is refused;
 //   - a refusal is a 422 invalid_attribute whose message starts with the
 //     field it is about (freeze_dates[1], promote_window.days);
 //   - a value equal to the one in effect is not stored, so a setting left on
@@ -38,21 +42,29 @@ import (
 
 // The stored keys and their wire names.
 var (
-	autoPromoteStoredKeys = []string{"mode", "soak_hours", "promote_window", "freeze_dates", "heads_up_hours"}
+	autoPromoteStoredKeys = []string{"mode", "soak_hours", "promote_window", "freeze_dates", "heads_up_hours", "require_recent_errors"}
 	autoPromoteWireKeys   = map[string]string{
 		"mode": "auto_promote", "soak_hours": "soak_hours", "promote_window": "promote_window",
-		"freeze_dates": "freeze_dates", "heads_up_hours": "heads_up_hours",
+		"freeze_dates": "freeze_dates", "heads_up_hours": "heads_up_hours", "require_recent_errors": "require_recent_errors",
 	}
 	// AutoPromoteWritable are the wire keys, in the API's order.
-	AutoPromoteWritable = []string{"auto_promote", "soak_hours", "promote_window", "freeze_dates", "heads_up_hours"}
+	AutoPromoteWritable = []string{"auto_promote", "soak_hours", "promote_window", "freeze_dates", "heads_up_hours", "require_recent_errors"}
 	autoPromoteModes    = []string{"off", "deps_only", "all"}
 	autoPromoteDays     = []string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 	promoteWindowParts  = []string{"days", "start", "end", "time_zone"}
 	autoPromoteLimits   = map[string][2]int64{"soak_hours": {4, 720}, "heads_up_hours": {1, 72}}
+	// The API's feature-flag words, after trimming and lowercasing a string.
+	flagTrue  = []string{"true", "1", "t", "on"}
+	flagFalse = []string{"false", "0", "f", "off"}
 )
 
 // autoPromoteMaxFreezeDates is the most freeze dates a project may list.
 const autoPromoteMaxFreezeDates = 100
+
+// requireRecentErrorsKey came after the other auto-promote settings, so a
+// Flightdeck can have them without it (SetRequireRecentErrorsSupported). It
+// is the same stored and on the wire.
+const requireRecentErrorsKey = "require_recent_errors"
 
 // AutoPromoteDefaults are the API's defaults, under the stored keys.
 func AutoPromoteDefaults() map[string]any {
@@ -63,8 +75,9 @@ func AutoPromoteDefaults() map[string]any {
 			"days": []string{"mon", "tue", "wed", "thu", "fri"}, "start": "09:00", "end": "16:00",
 			"time_zone": "America/New_York",
 		},
-		"freeze_dates":   []string{},
-		"heads_up_hours": int64(4),
+		"freeze_dates":          []string{},
+		"heads_up_hours":        int64(4),
+		"require_recent_errors": true,
 	}
 }
 
@@ -150,6 +163,8 @@ func parseAutoPromote(current map[string]any, submitted map[string]any) (map[str
 			parsed, refusal = autoPromoteWindow(value, currentWindow)
 		case "freeze_dates":
 			parsed, refusal = autoPromoteFreezeDates(value)
+		case requireRecentErrorsKey:
+			parsed, refusal = autoPromoteFlag(wire, value)
 		}
 		if refusal != "" {
 			return nil, refusal
@@ -175,6 +190,25 @@ func autoPromoteMode(v any) (string, autoPromoteRefusal) {
 		}
 	}
 	return "", autoPromoteRefusal(`auto_promote must be "off", "deps_only" or "all", got ` + autoPromoteEcho(v))
+}
+
+// autoPromoteFlag is the API's flag!: a JSON boolean, or one of the feature
+// flag words in a string, trimmed and in any case. A number is refused, 1
+// included: the API's words are strings.
+func autoPromoteFlag(key string, v any) (bool, autoPromoteRefusal) {
+	switch t := v.(type) {
+	case bool:
+		return t, ""
+	case string:
+		token := strings.ToLower(strings.Trim(t, rubyStripped))
+		if contains(flagTrue, token) {
+			return true, ""
+		}
+		if contains(flagFalse, token) {
+			return false, ""
+		}
+	}
+	return false, autoPromoteRefusal(key + " must be true or false, got " + autoPromoteEcho(v))
 }
 
 // wholeNumber is the API's WHOLE_NUMBER: digits, optionally followed by ".0".
@@ -477,12 +511,33 @@ func autoPromoteEqual(a, b any) bool {
 }
 
 // autoPromoteWire is the read's auto-promote keys, resolved, under the wire
-// keys.
+// keys: the ones this Flightdeck has.
 func (s *Server) autoPromoteWire(stored map[string]any) map[string]any {
 	resolved := s.resolveAutoPromote(stored)
 	out := map[string]any{}
 	for _, k := range autoPromoteStoredKeys {
+		if k == requireRecentErrorsKey && !s.selfHealingStore().knowsRequireRecentErrors() {
+			continue
+		}
 		out[autoPromoteWireKeys[k]] = resolved[k]
+	}
+	return out
+}
+
+// autoPromoteWritable is the auto-promote wire keys this Flightdeck takes, in
+// the API's order: none before auto-promote, and all but
+// require_recent_errors before that setting.
+func (s *Server) autoPromoteWritable() []string {
+	st := s.selfHealingStore()
+	if !st.knowsAutoPromote() {
+		return nil
+	}
+	out := make([]string, 0, len(AutoPromoteWritable))
+	for _, k := range AutoPromoteWritable {
+		if k == requireRecentErrorsKey && !st.knowsRequireRecentErrors() {
+			continue
+		}
+		out = append(out, k)
 	}
 	return out
 }
@@ -527,10 +582,22 @@ func (s *Server) SetAutoPromoteSupported(on bool) {
 	s.selfHealingStore().autoPromoteUnsupported = !on
 }
 
+// SetRequireRecentErrorsSupported makes the self-healing endpoint act as a
+// Flightdeck that has auto-promote but predates require_recent_errors
+// (false): the read has no require_recent_errors, writable_settings leaves
+// it out, and a write naming it is refused as an unknown setting. One from
+// before auto-promote predates it too.
+func (s *Server) SetRequireRecentErrorsSupported(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.selfHealingStore().requireRecentErrorsUnsupported = !on
+}
+
 // SetAutoPromoteDefault changes an auto-promote setting's default (a stored
-// key: "mode", "soak_hours", "promote_window", "freeze_dates" or
-// "heads_up_hours"), as a Flightdeck release that changes it does: projects
-// that never set it read the new value, and no lock_version moves.
+// key: "mode", "soak_hours", "promote_window", "freeze_dates",
+// "heads_up_hours" or "require_recent_errors"), as a Flightdeck release that
+// changes it does: projects that never set it read the new value, and no
+// lock_version moves.
 func (s *Server) SetAutoPromoteDefault(key string, value any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

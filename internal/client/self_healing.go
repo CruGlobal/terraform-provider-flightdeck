@@ -32,16 +32,21 @@ type SelfHealing struct {
 	Config                  SelfHealingConfig `json:"config"`
 	LockVersion             int64             `json:"lock_version"`
 	// AutoPromote is the auto-promote mode (AutoPromoteOff, AutoPromoteDepsOnly
-	// or AutoPromoteAll). It and the four settings after it ride beside
-	// `rollback`, outside `config`, resolved against their defaults. All five
-	// are nil on a Flightdeck that predates auto-promote, which refuses a
-	// write naming any of them as an unknown setting.
+	// or AutoPromoteAll). It and the settings after it ride beside `rollback`,
+	// outside `config`, resolved against their defaults. All of them are nil
+	// on a Flightdeck that predates auto-promote, which refuses a write naming
+	// any of them as an unknown setting.
 	AutoPromote   *string        `json:"auto_promote"`
 	SoakHours     *int64         `json:"soak_hours"`
 	PromoteWindow *PromoteWindow `json:"promote_window"`
 	// FreezeDates are ISO dates (YYYY-MM-DD), sorted.
 	FreezeDates  []string `json:"freeze_dates"`
 	HeadsUpHours *int64   `json:"heads_up_hours"`
+	// RequireRecentErrors is whether auto-promote waits until a production
+	// error has reached Flightdeck in the last 7 days. It came after the other
+	// auto-promote settings, so it is nil on a Flightdeck that has them but
+	// predates it, which refuses a write naming it as an unknown setting.
+	RequireRecentErrors *bool `json:"require_recent_errors"`
 	// AutoPromoteBlockers lists what would stop auto-promote on this project
 	// right now, in every mode. It passes every rollback blocker through,
 	// because auto-rollback is auto-promote's safety net. Read-only.
@@ -186,9 +191,12 @@ var SelfHealingSwitchKeys = []string{"feature_enabled", "rollback", "monitor_rol
 // SelfHealingAutoPromoteKeys are the auto-promote settings, which the
 // endpoint takes beside the switches, in the order the API lists them. As
 // for a switch, null or blank is "no opinion" for each of them, and for each
-// part of promote_window. The endpoint's full writable set is these plus
-// SelfHealingSwitchKeys plus SelfHealingThresholdKeys.
-var SelfHealingAutoPromoteKeys = []string{"auto_promote", "soak_hours", "promote_window", "freeze_dates", "heads_up_hours"}
+// part of promote_window; false for require_recent_errors is a value. The
+// endpoint's full writable set is these plus SelfHealingSwitchKeys plus
+// SelfHealingThresholdKeys.
+var SelfHealingAutoPromoteKeys = []string{
+	"auto_promote", "soak_hours", "promote_window", "freeze_dates", "heads_up_hours", "require_recent_errors",
+}
 
 const selfHealingRoot = "self_healing"
 

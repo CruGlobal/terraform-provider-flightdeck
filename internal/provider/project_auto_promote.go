@@ -18,6 +18,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -52,6 +53,9 @@ import (
 //   - A Flightdeck older than auto-promote has none of the keys on a read, so
 //     the attribute reads as null there, and it refuses a write naming any of
 //     them as an unknown setting (addUnsupportedSettingError says to upgrade).
+//     `require_recent_errors` came later: a Flightdeck that has the rest but
+//     not it reads it as null, and a write naming it is refused the same way,
+//     which is reported on that one setting.
 //
 // Every attribute is Optional+Computed with UseStateForUnknown and no
 // framework default: a default would manufacture a value for an unset
@@ -60,11 +64,12 @@ import (
 
 // autoPromoteModel is the Terraform shape of the attribute.
 type autoPromoteModel struct {
-	Mode         types.String `tfsdk:"mode"`
-	SoakHours    types.Int64  `tfsdk:"soak_hours"`
-	Window       types.Object `tfsdk:"window"`
-	FreezeDates  types.Set    `tfsdk:"freeze_dates"`
-	HeadsUpHours types.Int64  `tfsdk:"heads_up_hours"`
+	Mode                types.String `tfsdk:"mode"`
+	SoakHours           types.Int64  `tfsdk:"soak_hours"`
+	Window              types.Object `tfsdk:"window"`
+	FreezeDates         types.Set    `tfsdk:"freeze_dates"`
+	HeadsUpHours        types.Int64  `tfsdk:"heads_up_hours"`
+	RequireRecentErrors types.Bool   `tfsdk:"require_recent_errors"`
 }
 
 // promoteWindowModel is the Terraform shape of auto_promote.window.
@@ -83,11 +88,12 @@ var promoteWindowAttrTypes = map[string]attr.Type{
 }
 
 var autoPromoteAttrTypes = map[string]attr.Type{
-	"mode":           types.StringType,
-	"soak_hours":     types.Int64Type,
-	"window":         types.ObjectType{AttrTypes: promoteWindowAttrTypes},
-	"freeze_dates":   types.SetType{ElemType: types.StringType},
-	"heads_up_hours": types.Int64Type,
+	"mode":                  types.StringType,
+	"soak_hours":            types.Int64Type,
+	"window":                types.ObjectType{AttrTypes: promoteWindowAttrTypes},
+	"freeze_dates":          types.SetType{ElemType: types.StringType},
+	"heads_up_hours":        types.Int64Type,
+	"require_recent_errors": types.BoolType,
 }
 
 // The API's bounds.
@@ -229,9 +235,24 @@ func autoPromoteSchema() schema.Attribute {
 			},
 			"heads_up_hours": hours("How long before a promote Flightdeck posts a heads-up in the project's Slack "+
 				"channel, so someone can hold it, in hours (default 4).", autoPromoteMinHeadsUpHours, autoPromoteMaxHeadsUpHours),
+			"require_recent_errors": schema.BoolAttribute{
+				MarkdownDescription: requireRecentErrorsDescription,
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
 		},
 	}
 }
+
+// requireRecentErrorsDescription is auto_promote.require_recent_errors'
+// documentation.
+const requireRecentErrorsDescription = "Whether auto-promote waits until a production error has reached Flightdeck in " +
+	"the last 7 days, so it can tell a quiet app from one whose error reporting is broken. Set to false for an app " +
+	"that rarely has errors. Auto-promote still needs an error ingestion token and at least one production error " +
+	"received at some point. Flightdeck's default is true. When unset, the project's current value is kept. A plan " +
+	"that turns it off says so in a warning. Null on a Flightdeck that predates the setting, where a configured " +
+	"value fails the apply."
 
 // autoPromoteDataSourceSchema is the data source's read-only copy.
 func autoPromoteDataSourceSchema() datasourceschema.Attribute {
@@ -255,6 +276,11 @@ func autoPromoteDataSourceSchema() datasourceschema.Attribute {
 			},
 			"freeze_dates":   datasourceschema.SetAttribute{MarkdownDescription: "Days Flightdeck never promotes on (ISO dates).", ElementType: types.StringType, Computed: true},
 			"heads_up_hours": datasourceschema.Int64Attribute{MarkdownDescription: "How long before a promote Flightdeck posts a heads-up, in hours.", Computed: true},
+			"require_recent_errors": datasourceschema.BoolAttribute{
+				MarkdownDescription: "Whether auto-promote waits until a production error has reached Flightdeck in the last 7 days. " +
+					"Null on a Flightdeck that predates the setting.",
+				Computed: true,
+			},
 		},
 	}
 }
@@ -527,6 +553,57 @@ func warnAutoPromote(ctx context.Context, identifier types.String, configBlock, 
 	}
 }
 
+// recentErrorsWaitOff is what the plan-time warning says turning
+// require_recent_errors off does.
+const recentErrorsWaitOff = "Auto-promote will no longer wait for a recent production error, so it can't tell a " +
+	"quiet app from one whose error reporting is broken. It still needs an error ingestion token and at least one " +
+	"production error received at some point."
+
+// warnRecentErrorsWaitOff is the plan-time warning for an apply that sets
+// auto_promote.require_recent_errors to false, or possibly so (a value not
+// known until apply), on a project that does not already have it off.
+// priorBlock is null on create, and on a Flightdeck that did not report
+// auto-promote. The configuration must set it, and the plan must hold false,
+// so a value ignore_changes keeps at true warns of nothing. The summary names
+// the project, because Terraform folds warnings that share a summary into one.
+func warnRecentErrorsWaitOff(ctx context.Context, identifier types.String, configBlock, priorBlock, planBlock types.Object, diags *diag.Diagnostics) {
+	if planBlock.IsNull() {
+		return
+	}
+	var cfg, planned, prior autoPromoteModel
+	if !planBlock.IsUnknown() {
+		diags.Append(planBlock.As(ctx, &planned, objectAsOptions)...)
+	}
+	if !priorBlock.IsNull() && !priorBlock.IsUnknown() {
+		diags.Append(priorBlock.As(ctx, &prior, objectAsOptions)...)
+	}
+	configured := !configBlock.IsNull() && !configBlock.IsUnknown()
+	if configured {
+		diags.Append(configBlock.As(ctx, &cfg, objectAsOptions)...)
+	}
+	if diags.HasError() {
+		return
+	}
+	isOff := func(v types.Bool) bool { return known(v) && !v.ValueBool() }
+	if isOff(prior.RequireRecentErrors) {
+		return
+	}
+	project := "this project"
+	if known(identifier) {
+		project = "project " + identifier.ValueString()
+	}
+	at := path.Root("auto_promote").AtName("require_recent_errors")
+	switch {
+	case configBlock.IsUnknown() || (configured && cfg.RequireRecentErrors.IsUnknown()):
+		diags.AddAttributeWarning(at, "Auto-promote may stop waiting for a recent production error on "+project,
+			fmt.Sprintf("auto_promote.require_recent_errors for %s is not known until apply. If it is false, this apply "+
+				"turns the wait off. %s", project, recentErrorsWaitOff))
+	case configured && known(cfg.RequireRecentErrors) && isOff(planned.RequireRecentErrors):
+		diags.AddAttributeWarning(at, "Auto-promote stops waiting for a recent production error on "+project,
+			fmt.Sprintf("This apply sets auto_promote.require_recent_errors for %s to false. %s", project, recentErrorsWaitOff))
+	}
+}
+
 // warnAutoPromoteBlockers reports, one warning each, what would stop
 // auto-promote on a project whose mode is not "off" right now. They are
 // warnings rather than state because they change as the project does. Each
@@ -593,6 +670,8 @@ func autoPromoteToObject(sh *client.SelfHealing, diags *diag.Diagnostics) types.
 		"window":         window,
 		"freeze_dates":   stringSet(sh.FreezeDates),
 		"heads_up_hours": types.Int64PointerValue(sh.HeadsUpHours),
+		// Null on a Flightdeck that has auto-promote but predates this.
+		"require_recent_errors": types.BoolPointerValue(sh.RequireRecentErrors),
 	})
 	diags.Append(d...)
 	return obj
@@ -649,6 +728,10 @@ func autoPromoteFields(ctx context.Context, block types.Object, diags *diag.Diag
 	if known(m.HeadsUpHours) {
 		fields["heads_up_hours"] = m.HeadsUpHours.ValueInt64()
 	}
+	// false is a value, so it is sent like true.
+	if known(m.RequireRecentErrors) {
+		fields["require_recent_errors"] = m.RequireRecentErrors.ValueBool()
+	}
 	if dates, ok := knownStrings(ctx, m.FreezeDates, diags); ok {
 		sort.Strings(dates)
 		fields["freeze_dates"] = dates
@@ -697,11 +780,12 @@ func daysInWeekOrder(days []string) []string {
 
 // autoPromoteRefusal finds the field a 422 names at the start of its message,
 // in the API's spelling: auto_promote, soak_hours, heads_up_hours,
-// freeze_dates or freeze_dates[i], promote_window or promote_window.<part>.
+// require_recent_errors, freeze_dates or freeze_dates[i], promote_window or
+// promote_window.<part>.
 // The name must end there, so auto_promote_blockers is not auto_promote; the
 // character after it is matched rather than a word boundary, which there is
 // none of after freeze_dates[i].
-var autoPromoteRefusal = regexp.MustCompile(`^(auto_promote|soak_hours|heads_up_hours|freeze_dates(?:\[(\d+)\])?|promote_window(?:\.(days|start|end|time_zone))?)(?:[^A-Za-z0-9_.\[]|$)`)
+var autoPromoteRefusal = regexp.MustCompile(`^(auto_promote|soak_hours|heads_up_hours|require_recent_errors|freeze_dates(?:\[(\d+)\])?|promote_window(?:\.(days|start|end|time_zone))?)(?:[^A-Za-z0-9_.\[]|$)`)
 
 // autoPromoteRefusedAt maps a refused write to the attribute it is about,
 // when the refusal names an auto-promote setting the write sent. The API's
@@ -724,7 +808,7 @@ func autoPromoteRefusedAt(sent client.Fields, err error) (at path.Path, name str
 	switch {
 	case field == "auto_promote":
 		at, name = root.AtName("mode"), "mode"
-	case field == "soak_hours" || field == "heads_up_hours":
+	case field == "soak_hours" || field == "heads_up_hours" || field == "require_recent_errors":
 		at, name = root.AtName(field), field
 	case m[2] != "" || field == "freeze_dates":
 		at, name = root.AtName("freeze_dates"), "freeze_dates"

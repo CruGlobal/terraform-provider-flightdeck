@@ -692,7 +692,7 @@ func fullAutoPromoteBlock(t *testing.T) types.Object {
 	t.Helper()
 	return autoPromoteObj(t, autoPromoteModel{
 		Mode: types.StringValue("all"), SoakHours: types.Int64Value(24), HeadsUpHours: types.Int64Value(4),
-		FreezeDates: stringSet([]string{"2030-12-24"}),
+		FreezeDates: stringSet([]string{"2030-12-24"}), RequireRecentErrors: types.BoolValue(false),
 		Window: windowObj(t, promoteWindowModel{Days: stringSet([]string{"mon"}), Start: types.StringValue("09:00"),
 			End: types.StringValue("16:00"), TimeZone: types.StringValue("UTC")}),
 	})
@@ -742,8 +742,12 @@ func TestAutoPromoteFields(t *testing.T) {
 		{"no block", types.ObjectNull(autoPromoteAttrTypes), "null"},
 		{"nothing configured", autoPromoteObj(t, autoPromoteModel{}), "{}"},
 		{"every setting", fullAutoPromoteBlock(t),
-			`{"auto_promote":"all","freeze_dates":["2030-12-24"],"heads_up_hours":4,"promote_window":{"days":["mon"],"end":"16:00","start":"09:00","time_zone":"UTC"},"soak_hours":24}`},
+			`{"auto_promote":"all","freeze_dates":["2030-12-24"],"heads_up_hours":4,"promote_window":{"days":["mon"],"end":"16:00","start":"09:00","time_zone":"UTC"},"require_recent_errors":false,"soak_hours":24}`},
 		{"[] is sent, to clear", autoPromoteObj(t, autoPromoteModel{FreezeDates: stringSet(nil)}), `{"freeze_dates":[]}`},
+		{"require_recent_errors false is sent", autoPromoteObj(t, autoPromoteModel{RequireRecentErrors: types.BoolValue(false)}),
+			`{"require_recent_errors":false}`},
+		{"require_recent_errors true is sent", autoPromoteObj(t, autoPromoteModel{RequireRecentErrors: types.BoolValue(true)}),
+			`{"require_recent_errors":true}`},
 		{"dates sorted, days in week order", autoPromoteObj(t, autoPromoteModel{
 			FreezeDates: stringSet([]string{"2031-01-02", "2030-12-31", "2031-01-01"}),
 			Window:      windowObj(t, promoteWindowModel{Days: stringSet([]string{"sun", "fri", "mon"})}),
@@ -752,7 +756,7 @@ func TestAutoPromoteFields(t *testing.T) {
 			`{"promote_window":{"end":"24:00"}}`},
 		{"an empty window names nothing", autoPromoteObj(t, autoPromoteModel{Window: windowObj(t, promoteWindowModel{})}), "{}"},
 		{"values not known yet are left out", autoPromoteObj(t, autoPromoteModel{
-			Mode: types.StringUnknown(), SoakHours: types.Int64Unknown(), FreezeDates: unknownSet,
+			Mode: types.StringUnknown(), SoakHours: types.Int64Unknown(), FreezeDates: unknownSet, RequireRecentErrors: types.BoolUnknown(),
 			Window: windowObj(t, promoteWindowModel{Days: unknownSet, Start: types.StringUnknown()}),
 		}), "{}"},
 		{"a set with an element not known yet is left out", autoPromoteObj(t, autoPromoteModel{
@@ -1002,8 +1006,9 @@ func TestAutoPromoteRefusedAt(t *testing.T) {
 	window := root.AtName("window")
 	sent := client.Fields{
 		"auto_promote": "all", "soak_hours": int64(3), "heads_up_hours": int64(80),
-		"freeze_dates":   []string{"2030-12-24", "2030-12-25"},
-		"promote_window": map[string]any{"start": "08:00", "time_zone": "x"},
+		"freeze_dates":          []string{"2030-12-24", "2030-12-25"},
+		"promote_window":        map[string]any{"start": "08:00", "time_zone": "x"},
+		"require_recent_errors": false,
 	}
 	cases := []struct {
 		name string
@@ -1015,6 +1020,9 @@ func TestAutoPromoteRefusedAt(t *testing.T) {
 		{"the mode", sent, refusal(client.CodeInvalidAttribute, `auto_promote must be "off", "deps_only" or "all", got true`), root.AtName("mode"), true},
 		{"soak hours", sent, refusal(client.CodeInvalidAttribute, "soak_hours must be a whole number of hours from 4 to 720, got 3"), root.AtName("soak_hours"), true},
 		{"heads-up hours", sent, refusal(client.CodeInvalidAttribute, "heads_up_hours must be a whole number of hours from 1 to 72, got 80"), root.AtName("heads_up_hours"), true},
+		{"the recent-errors wait", sent, refusal(client.CodeInvalidAttribute, `require_recent_errors must be true or false, got "yes"`), root.AtName("require_recent_errors"), true},
+		{"the recent-errors wait, not sent", client.Fields{"soak_hours": int64(30)},
+			refusal(client.CodeInvalidAttribute, `require_recent_errors must be true or false, got "yes"`), path.Empty(), false},
 		{"one freeze date", sent, refusal(client.CodeInvalidAttribute, `freeze_dates[1] must be an ISO 8601 date (YYYY-MM-DD), got "2030-12-25"`),
 			root.AtName("freeze_dates").AtSetValue(types.StringValue("2030-12-25")), true},
 		{"a freeze date past the list", sent, refusal(client.CodeInvalidAttribute, `freeze_dates[9] must be an ISO 8601 date`), root.AtName("freeze_dates"), true},

@@ -348,3 +348,77 @@ func TestAutoPromote_changedDefault(t *testing.T) {
 		t.Fatalf("a set value must not follow the default, got %s", show(sh.HeadsUpHours))
 	}
 }
+
+// require_recent_errors defaults to true, takes a JSON boolean or one of the
+// feature-flag words, reads false as a value and null or blank as no
+// opinion, and refuses anything else by name.
+func TestAutoPromote_requireRecentErrors(t *testing.T) {
+	f := newAutoPromoteFake(t)
+	sh := f.read()
+	if sh.RequireRecentErrors == nil || !*sh.RequireRecentErrors {
+		t.Fatalf("an unset project reads require_recent_errors true, got %s", show(sh.RequireRecentErrors))
+	}
+	// Re-stating the default stores nothing.
+	f.mustWrite(Fields{"require_recent_errors": true})
+	if stored := f.fake.AutoPromoteOf(f.project); stored != nil {
+		t.Fatalf("re-stating the default must store nothing, got %v", stored)
+	}
+	// false is a value, not a blank.
+	if sh := f.mustWrite(Fields{"require_recent_errors": false}); *sh.RequireRecentErrors {
+		t.Fatal("require_recent_errors false was not saved")
+	}
+	if stored := f.fake.AutoPromoteOf(f.project); stored["require_recent_errors"] != false {
+		t.Fatalf("want false stored, got %v", stored)
+	}
+	for _, blank := range []any{nil, "", "   "} {
+		if sh := f.mustWrite(Fields{"require_recent_errors": blank}); *sh.RequireRecentErrors {
+			t.Fatalf("a blank %#v changed require_recent_errors", blank)
+		}
+	}
+	for _, tc := range []struct {
+		word any
+		want bool
+	}{{"TRUE", true}, {" off ", false}, {"1", true}, {"0", false}, {"t", true}, {"F", false}, {"On", true}, {"false", false}} {
+		if sh := f.mustWrite(Fields{"require_recent_errors": tc.word}); *sh.RequireRecentErrors != tc.want {
+			t.Fatalf("%#v read as %t, want %t", tc.word, *sh.RequireRecentErrors, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		bad  any
+		echo string
+	}{{"yes", `"yes"`}, {1, "1"}, {0, "0"}, {[]any{}, "[]"}, {map[string]any{}, "{}"}} {
+		msg := f.refused(Fields{"require_recent_errors": tc.bad}, "require_recent_errors must be")
+		if want := "require_recent_errors must be true or false, got " + tc.echo; msg != want {
+			t.Errorf("refusal = %q, want %q", msg, want)
+		}
+	}
+}
+
+// A Flightdeck that has auto-promote but predates require_recent_errors has
+// no such key on a read and leaves it out of writable_settings, and refuses
+// a write naming it as an unknown setting. One from before auto-promote
+// predates it too.
+func TestAutoPromote_requireRecentErrorsOnAnOlderFlightdeck(t *testing.T) {
+	f := newAutoPromoteFake(t)
+	f.fake.SetRequireRecentErrorsSupported(false)
+	sh := f.read()
+	if !sh.ReportsAutoPromote() || sh.RequireRecentErrors != nil || sh.Accepts("require_recent_errors") || !sh.Accepts("heads_up_hours") {
+		t.Fatalf("want auto-promote without require_recent_errors, got %s and writable %v", show(sh.RequireRecentErrors), sh.WritableSettings)
+	}
+	msg := f.refused(Fields{"require_recent_errors": false, "soak_hours": 30},
+		"unknown self-healing setting: require_recent_errors (settable: bake_minutes, ")
+	if strings.Contains(strings.SplitN(msg, "(settable:", 2)[1], "require_recent_errors") {
+		t.Fatalf("the settable list must not name require_recent_errors: %s", msg)
+	}
+	if sh := f.mustWrite(Fields{"soak_hours": 30}); *sh.SoakHours != 30 {
+		t.Fatalf("the other settings still save, got soak_hours %s", show(sh.SoakHours))
+	}
+	f.fake.SetRequireRecentErrorsSupported(true)
+	if sh := f.read(); sh.RequireRecentErrors == nil || !*sh.RequireRecentErrors || !sh.Accepts("require_recent_errors") {
+		t.Fatalf("upgraded, the read reports require_recent_errors true, got %s", show(sh.RequireRecentErrors))
+	}
+	f.fake.SetAutoPromoteSupported(false)
+	if sh := f.read(); sh.RequireRecentErrors != nil || sh.Accepts("require_recent_errors") {
+		t.Fatalf("a Flightdeck from before auto-promote has no require_recent_errors, got %s", show(sh.RequireRecentErrors))
+	}
+}

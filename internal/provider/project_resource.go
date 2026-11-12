@@ -175,7 +175,8 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 // keeps the deprecated self_healing.armed in step with the planned mode and
 // agent_work's computed attributes in step with its settings, and
 // warns about what ValidateConfig cannot see: an apply that turns
-// auto-rollback, auto-promote or agent work on, which needs the prior value,
+// auto-rollback, auto-promote or agent work on, or auto-promote's wait for a
+// recent production error off, which needs the prior value,
 // and the self-healing burn-rate windows, the promote window and agent work
 // limits as the API will MERGE them, which needs the prior values the plan
 // carries for settings the configuration does not mention. On a create, a
@@ -217,6 +218,7 @@ func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 	warnAutoRollback(ctx, plan.Identifier, config.SelfHealing, prior, plan.SelfHealing, &resp.Diagnostics)
 	warnMonitorRollback(ctx, plan.Identifier, config.SelfHealing, prior, plan.SelfHealing, &resp.Diagnostics)
 	warnAutoPromote(ctx, plan.Identifier, config.AutoPromote, priorAutoPromote, plan.AutoPromote, &resp.Diagnostics)
+	warnRecentErrorsWaitOff(ctx, plan.Identifier, config.AutoPromote, priorAutoPromote, plan.AutoPromote, &resp.Diagnostics)
 	warnAutoPromoteModeUnset(ctx, plan.Identifier, config.AutoPromote, priorAutoPromote, &resp.Diagnostics)
 	if planned := planAgentWorkComputed(ctx, priorAgentWork, plan.AgentWork, &resp.Diagnostics); !planned.Equal(plan.AgentWork) {
 		plan.AgentWork = planned

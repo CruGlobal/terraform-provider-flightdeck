@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/CruGlobal/terraform-provider-flightdeck/internal/client"
@@ -915,8 +916,10 @@ var selfHealingNewerSettings = []string{"rollback", "monitor_rollback", "count_b
 // endpoint accepts. It reports whether it added a diagnostic; false leaves the
 // error to the caller's generic handling.
 //
-// The auto-promote settings arrived together, so a Flightdeck too old for one
-// is too old for all of them, and that is reported once, on auto_promote.
+// The first auto-promote settings arrived together, so a Flightdeck too old
+// for one is too old for all of them, and that is reported once, on
+// auto_promote. require_recent_errors came later: a Flightdeck that has the
+// rest but not it is reported on auto_promote.require_recent_errors.
 func addUnsupportedSettingError(ctx context.Context, c *client.Client, projectID int64, sent client.Fields, err error, diags *diag.Diagnostics) bool {
 	var missing, promote []string
 	for _, key := range selfHealingNewerSettings {
@@ -954,7 +957,8 @@ func addUnsupportedSettingError(ctx context.Context, c *client.Client, projectID
 				key, key, writePartsOf(sent).notSaved(), apiMessage(err)))
 		added = true
 	}
-	if len(promote) > 0 && (!sh.ReportsAutoPromote() || !sh.Accepts("auto_promote")) {
+	switch {
+	case len(promote) > 0 && (!sh.ReportsAutoPromote() || !sh.Accepts("auto_promote")):
 		what := "an unknown setting"
 		if len(promote) > 1 {
 			what = "unknown settings"
@@ -964,6 +968,14 @@ func addUnsupportedSettingError(ctx context.Context, c *client.Client, projectID
 				"%s\n\nUpgrade Flightdeck first, then apply again. Until then, leave auto_promote out of the "+
 				"configuration: on this Flightdeck it reads as null, and the provider never sends it while it is "+
 				"unset.\n\nThe API said: %s", strings.Join(promote, ", "), what, writePartsOf(sent).notSaved(), apiMessage(err)))
+		added = true
+	case slices.Contains(promote, "require_recent_errors") &&
+		(sh.RequireRecentErrors == nil || !sh.Accepts("require_recent_errors")):
+		const key = "require_recent_errors"
+		diags.AddAttributeError(path.Root("auto_promote").AtName(key), "This Flightdeck is too old for auto_promote."+key,
+			fmt.Sprintf("The Flightdeck at this endpoint does not accept %s on its self-healing API, so it cannot be set "+
+				"from Terraform there. Remove %s from the configuration, or upgrade Flightdeck. %s %s",
+				key, key, writePartsOf(sent).notSaved(), apiMessage(err)))
 		added = true
 	}
 	return added

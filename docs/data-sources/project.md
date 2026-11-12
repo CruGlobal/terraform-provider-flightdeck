@@ -95,6 +95,7 @@ Read-Only:
 - `freeze_dates` (Set of String) Days Flightdeck never promotes on (ISO dates).
 - `heads_up_hours` (Number) How long before a promote Flightdeck posts a heads-up, in hours.
 - `mode` (String) `"off"`, `"deps_only"` or `"all"`.
+- `require_recent_errors` (Boolean) Whether auto-promote waits until a production error has reached Flightdeck in the last 7 days. Null on a Flightdeck that predates the setting.
 - `soak_hours` (Number) How long a release candidate must run on stage first, in hours.
 - `window` (Attributes) When a promote may start. (see [below for nested schema](#nestedatt--auto_promote--window))
 

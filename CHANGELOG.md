@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.16.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.15.0...v0.16.0) (2026-11-12)
+
+
+### Added
+
+* manage auto_promote.require_recent_errors on flightdeck_project ([#67](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/67)) ([08916b4](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/08916b438416eaa964b02f8f85696eb53237131d))
+
+
+### Fixed
+
+* build with Go 1.26.11 for the net/http fix in GO-2026-6859 ([#68](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/68)) ([8f2a92e](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/8f2a92e4d0d9183ca091772deae492cd86c3abaa))
+
 ## [0.15.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.14.0...v0.15.0) (2026-11-09)
 
 

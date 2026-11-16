@@ -42,6 +42,11 @@ type selfHealingStore struct {
 	// SetRequireRecentErrorsSupported). One without auto-promote predates it
 	// too.
 	requireRecentErrorsUnsupported bool
+	// hotfixIncidentFixesUnsupported simulates a Flightdeck that has
+	// monitor_rollback but predates `hotfix_incident_fixes` (see
+	// SetHotfixIncidentFixesSupported). One without monitor_rollback predates
+	// it too.
+	hotfixIncidentFixesUnsupported bool
 	// defaults and autoPromoteDefaults change a default the way a Flightdeck
 	// release can: every project that never set the key follows it, and no
 	// lock_version moves (SetSelfHealingDefault, SetAutoPromoteDefault).
@@ -72,6 +77,12 @@ func (st *selfHealingStore) knowsMonitorRollback() bool {
 	return st.knowsAutoPromote() && !st.monitorRollbackUnsupported
 }
 
+// knowsHotfixIncidentFixes reports whether the Flightdeck the fake acts as
+// has the hotfix_incident_fixes setting, which came after monitor_rollback.
+func (st *selfHealingStore) knowsHotfixIncidentFixes() bool {
+	return st.knowsMonitorRollback() && !st.hotfixIncidentFixesUnsupported
+}
+
 // knowsRequireRecentErrors reports whether the Flightdeck the fake acts as has
 // the require_recent_errors setting, which came after the rest of
 // auto-promote.
@@ -99,6 +110,39 @@ func (s *Server) SetMonitorRollback(projectID int64, mode string) {
 		}
 		p.SelfHealing["monitor_rollback"] = mode
 	}
+}
+
+// SetHotfixIncidentFixesSupported switches the hotfix_incident_fixes setting
+// on or off, to simulate a Flightdeck from before it: the read has no
+// hotfix_incident_fixes, and a write naming it is an unknown key.
+func (s *Server) SetHotfixIncidentFixesSupported(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.selfHealingStore().hotfixIncidentFixesUnsupported = !on
+}
+
+// SetHotfixIncidentFixes sets a project's hotfix_incident_fixes directly (no
+// HTTP), the way a console change does.
+func (s *Server) SetHotfixIncidentFixes(projectID int64, on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.projects().byID[projectID]; p != nil {
+		if p.SelfHealing == nil {
+			p.SelfHealing = map[string]any{}
+		}
+		p.SelfHealing[hotfixIncidentFixesKey] = on
+	}
+}
+
+// hotfixIncidentFixesKey is the same stored (in the self_healing jsonb) and
+// on the wire, where it is read at the top level, beside rollback.
+const hotfixIncidentFixesKey = "hotfix_incident_fixes"
+
+// hotfixIncidentFixes is the project's stored hotfix_incident_fixes, read the
+// way the API reads it: on only when it is exactly true or "true".
+func hotfixIncidentFixes(p *Project) bool {
+	v := p.SelfHealing[hotfixIncidentFixesKey]
+	return v == true || v == "true"
 }
 
 // monitorRollbackModes are the values the API takes for monitor_rollback.
@@ -237,6 +281,9 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 	if s.selfHealingStore().knowsMonitorRollback() {
 		switches["monitor_rollback"] = true
 	}
+	if s.selfHealingStore().knowsHotfixIncidentFixes() {
+		switches[hotfixIncidentFixesKey] = true
+	}
 	autoPromote := map[string]bool{}
 	for _, k := range s.autoPromoteWritable() {
 		switches[k], autoPromote[k] = true, true
@@ -334,6 +381,16 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 				"monitor_rollback must be one of off, report, auto, got " + fmt.Sprintf("%#v", v)
 		}
 	}
+	// hotfix_incident_fixes: true or false, in the API's feature-flag words
+	// (autoPromoteFlag); null or blank is no opinion, and false is a value.
+	var hotfixOn, hotfixNamed bool
+	if v, has := submitted[hotfixIncidentFixesKey]; has && !blankValue(v) {
+		var refusal autoPromoteRefusal
+		if hotfixOn, refusal = autoPromoteFlag(hotfixIncidentFixesKey, v); refusal != "" {
+			return http.StatusUnprocessableEntity, "invalid_attribute", string(refusal)
+		}
+		hotfixNamed = true
+	}
 	// The auto-promote settings are validated with the rest, before anything
 	// is assigned, against the settings in effect.
 	var promoteChanges map[string]any
@@ -384,6 +441,9 @@ func (s *Server) applySelfHealing(p *Project, submitted map[string]any) (int, st
 	}
 	if monitorMode != "" {
 		next["monitor_rollback"] = monitorMode
+	}
+	if hotfixNamed {
+		next[hotfixIncidentFixesKey] = hotfixOn
 	}
 	after := s.resolveSelfHealing(next)
 	shortW, _ := asFloat64(after["short_window_minutes"])
@@ -491,6 +551,9 @@ func (s *Server) selfHealingWritable() []string {
 			writable = append(writable, "monitor_rollback")
 		}
 		writable = append(writable, "count_browser_errors")
+		if s.selfHealingStore().knowsHotfixIncidentFixes() {
+			writable = append(writable, hotfixIncidentFixesKey)
+		}
 	}
 	return append(writable, s.autoPromoteWritable()...)
 }
@@ -508,10 +571,15 @@ func (s *Server) serializeSelfHealing(p *Project) map[string]any {
 		overrides[k] = v
 	}
 	config := s.resolveSelfHealing(p.SelfHealing)
-	// The monitor mode is stored beside armed but read at the top level.
+	// The monitor mode and hotfix_incident_fixes are stored beside armed but
+	// read at the top level.
 	delete(config, "monitor_rollback")
 	if !s.selfHealingStore().knowsMonitorRollback() {
 		delete(overrides, "monitor_rollback")
+	}
+	delete(config, hotfixIncidentFixesKey)
+	if !s.selfHealingStore().knowsHotfixIncidentFixes() {
+		delete(overrides, hotfixIncidentFixesKey)
 	}
 	out := map[string]any{
 		"project_id": p.ID, "feature_enabled": s.selfHealingFeatureOn(p), "globally_disarmed": false,
@@ -531,6 +599,9 @@ func (s *Server) serializeSelfHealing(p *Project) map[string]any {
 	if s.selfHealingStore().knowsMonitorRollback() {
 		out["monitor_rollback"] = monitorRollbackMode(p)
 		out["monitor_rollback_blockers"] = s.monitorRollbackBlockers(p)
+	}
+	if s.selfHealingStore().knowsHotfixIncidentFixes() {
+		out[hotfixIncidentFixesKey] = hotfixIncidentFixes(p)
 	}
 	if s.selfHealingStore().knowsAutoPromote() {
 		for k, v := range s.autoPromoteWire(p.AutoPromote) {

@@ -120,6 +120,10 @@ func (d *projectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 						MarkdownDescription: "Whether errors sent with a browser token count toward the error rate the loop acts on. Null on a Flightdeck that predates the setting.",
 						Computed:            true,
 					},
+					"hotfix_incident_fixes": schema.BoolAttribute{
+						MarkdownDescription: "Whether a fix that merges while a self-healing incident is open is built as a hotfix of the live release onto the release candidate environment. Flightdeck never promotes it by itself. Null on a Flightdeck that predates the setting.",
+						Computed:            true,
+					},
 					"armed": schema.BoolAttribute{
 						MarkdownDescription: "Whether auto-rollback is on (the API's `armed` flag), true exactly when `rollback` is `\"auto\"`. Deprecated: read `rollback` instead.",
 						DeprecationMessage:  "Use `rollback` instead. `armed` is true exactly when `rollback` is \"auto\".",

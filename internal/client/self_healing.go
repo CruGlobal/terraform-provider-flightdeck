@@ -28,9 +28,14 @@ type SelfHealing struct {
 	// rolling this project back right now. It passes every rollback blocker
 	// through and adds the monitor's own. Read-only.
 	MonitorRollbackBlockers []RollbackBlocker `json:"monitor_rollback_blockers"`
-	GloballyDisarmed        bool              `json:"globally_disarmed"`
-	Config                  SelfHealingConfig `json:"config"`
-	LockVersion             int64             `json:"lock_version"`
+	// HotfixIncidentFixes is whether a fix that merges while a self-healing
+	// incident is open is built as a hotfix of the live release. Flightdeck
+	// never promotes that build by itself. It is nil on a Flightdeck that
+	// predates the setting.
+	HotfixIncidentFixes *bool             `json:"hotfix_incident_fixes"`
+	GloballyDisarmed    bool              `json:"globally_disarmed"`
+	Config              SelfHealingConfig `json:"config"`
+	LockVersion         int64             `json:"lock_version"`
 	// AutoPromote is the auto-promote mode (AutoPromoteOff, AutoPromoteDepsOnly
 	// or AutoPromoteAll). It and the settings after it ride beside `rollback`,
 	// outside `config`, resolved against their defaults. All of them are nil
@@ -186,7 +191,9 @@ var SelfHealingThresholdKeys = []string{
 // for each, null or blank is "no opinion" rather than a reset. The endpoint's
 // full writable set is these plus SelfHealingThresholdKeys. "armed" is
 // deliberately absent: the mode is set through "rollback".
-var SelfHealingSwitchKeys = []string{"feature_enabled", "rollback", "monitor_rollback", "count_browser_errors"}
+var SelfHealingSwitchKeys = []string{
+	"feature_enabled", "rollback", "monitor_rollback", "count_browser_errors", "hotfix_incident_fixes",
+}
 
 // SelfHealingAutoPromoteKeys are the auto-promote settings, which the
 // endpoint takes beside the switches, in the order the API lists them. As

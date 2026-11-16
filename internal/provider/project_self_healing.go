@@ -63,6 +63,7 @@ type selfHealingModel struct {
 	Rollback              types.String  `tfsdk:"rollback"`
 	MonitorRollback       types.String  `tfsdk:"monitor_rollback"`
 	CountBrowserErrors    types.Bool    `tfsdk:"count_browser_errors"`
+	HotfixIncidentFixes   types.Bool    `tfsdk:"hotfix_incident_fixes"`
 	Armed                 types.Bool    `tfsdk:"armed"`
 	BakeMinutes           types.Int64   `tfsdk:"bake_minutes"`
 	BaselineMultiplier    types.Float64 `tfsdk:"baseline_multiplier"`
@@ -82,6 +83,7 @@ var selfHealingAttrTypes = map[string]attr.Type{
 	"rollback":                types.StringType,
 	"monitor_rollback":        types.StringType,
 	"count_browser_errors":    types.BoolType,
+	"hotfix_incident_fixes":   types.BoolType,
 	"armed":                   types.BoolType,
 	"bake_minutes":            types.Int64Type,
 	"baseline_multiplier":     types.Float64Type,
@@ -143,7 +145,7 @@ func selfHealingSchema() schema.Attribute {
 			"carries a warning saying so, and while `rollback` is `\"auto\"` each thing that would stop it right now " +
 			"is shown as a warning on refresh and after apply. `armed` is the old name for the mode, kept read-only " +
 			"and deprecated. `monitor_rollback` lets an incident from a trusted monitor trip the loop too, beside the " +
-			"error rate.\n\n" +
+			"error rate, and `hotfix_incident_fixes` builds an incident's fix as a hotfix of the live release.\n\n" +
 			"The endpoint merges, so this block only ever sends what you configure: a threshold you leave unset keeps " +
 			"whatever the project has (the server's documented default, until someone overrides it), and a setting you " +
 			"never name is never disturbed — including one changed in the console. `short_window_minutes` must not " +
@@ -213,6 +215,22 @@ func selfHealingSchema() schema.Attribute {
 					"Errors pages and fire any error alert rule that counts them (see `flightdeck_error_alert_rule`'s " +
 					"`condition.count_browser_errors`). When unset, the project's current value is kept. Null on a Flightdeck that predates the " +
 					"setting, where a configured value fails the apply.",
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"hotfix_incident_fixes": schema.BoolAttribute{
+				MarkdownDescription: "Whether a fix that merges while a self-healing incident is open goes out as a " +
+					"hotfix: Flightdeck has the deploy pipeline build the live release plus just that fix onto the release " +
+					"candidate environment, instead of waiting for the next build of the default branch, which ships " +
+					"everything else waiting there too. A fix counts when its pull request merges into the default branch " +
+					"of the project's linked GitHub repository (see `flightdeck_github_integration`) and its title or " +
+					"branch names the incident's work item. Flightdeck then posts on that work item and the incident's " +
+					"Slack thread when the build is ready and how to promote it. **It never promotes production by " +
+					"itself**: a person still does that. The server's default is `false`. When unset, the project's " +
+					"current value is kept, so a change made in the console survives an apply; set it explicitly, even to " +
+					"`false`, for Terraform to own it. Null on a Flightdeck that predates the setting, where a configured " +
+					"value fails the apply.",
 				Optional:      true,
 				Computed:      true,
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
@@ -570,12 +588,14 @@ func selfHealingToObject(sh *client.SelfHealing, diags *diag.Diagnostics) types.
 	}
 	cfg := sh.Config
 	obj, d := types.ObjectValue(selfHealingAttrTypes, map[string]attr.Value{
-		// feature_enabled and rollback ride alongside `config` in the response,
-		// not inside it; rollback falls back to config.armed on an older server.
+		// feature_enabled, rollback, monitor_rollback and hotfix_incident_fixes
+		// ride alongside `config` in the response, not inside it; rollback falls
+		// back to config.armed on an older server.
 		"feature_enabled":         types.BoolValue(sh.FeatureEnabled),
 		"rollback":                types.StringValue(sh.RollbackMode()),
 		"monitor_rollback":        types.StringPointerValue(sh.MonitorRollback),
 		"count_browser_errors":    types.BoolPointerValue(cfg.CountBrowserErrors),
+		"hotfix_incident_fixes":   types.BoolPointerValue(sh.HotfixIncidentFixes),
 		"armed":                   types.BoolValue(cfg.Armed),
 		"bake_minutes":            types.Int64Value(cfg.BakeMinutes),
 		"baseline_multiplier":     types.Float64Value(cfg.BaselineMultiplier),
@@ -630,6 +650,7 @@ func selfHealingFields(ctx context.Context, block types.Object, diags *diag.Diag
 	putString("rollback", m.Rollback)
 	putString("monitor_rollback", m.MonitorRollback)
 	putBool("count_browser_errors", m.CountBrowserErrors)
+	putBool("hotfix_incident_fixes", m.HotfixIncidentFixes)
 	putInt("bake_minutes", m.BakeMinutes)
 	putFloat("baseline_multiplier", m.BaselineMultiplier)
 	putFloat("absolute_floor", m.AbsoluteFloor)
@@ -908,7 +929,7 @@ func isAutoPromoteKey(key string) bool {
 
 // selfHealingNewerSettings are the settings an older Flightdeck refuses as
 // unknown. Each is configured as the attribute of the same name.
-var selfHealingNewerSettings = []string{"rollback", "monitor_rollback", "count_browser_errors"}
+var selfHealingNewerSettings = []string{"rollback", "monitor_rollback", "count_browser_errors", "hotfix_incident_fixes"}
 
 // addUnsupportedSettingError explains a refused write that named a setting
 // this Flightdeck is too old to know. The API's refusal of an unknown key is
@@ -942,9 +963,10 @@ func addUnsupportedSettingError(ctx context.Context, c *client.Client, projectID
 	// A setting is supported when the read reports it and writable_settings
 	// does not leave it out.
 	reported := map[string]bool{
-		"rollback":             sh.Rollback != nil,
-		"monitor_rollback":     sh.MonitorRollback != nil,
-		"count_browser_errors": sh.Config.CountBrowserErrors != nil,
+		"rollback":              sh.Rollback != nil,
+		"monitor_rollback":      sh.MonitorRollback != nil,
+		"count_browser_errors":  sh.Config.CountBrowserErrors != nil,
+		"hotfix_incident_fixes": sh.HotfixIncidentFixes != nil,
 	}
 	added := false
 	for _, key := range missing {

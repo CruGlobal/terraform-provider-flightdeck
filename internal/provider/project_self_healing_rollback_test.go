@@ -398,8 +398,9 @@ func TestProjectSelfHealing_olderFlightdeckHasNoGoLiveGuard(t *testing.T) {
 	}
 }
 
-// A write refused for some other reason while naming rollback or
-// monitor_rollback is not blamed on the server's age.
+// A write refused for some other reason while naming rollback,
+// monitor_rollback or hotfix_incident_fixes is not blamed on the server's
+// age.
 func TestProjectSelfHealing_otherRefusalIsNotCalledTooOld(t *testing.T) {
 	env := newTestEnv(t, "self_healing")
 	identifier := randIdentifier()
@@ -414,14 +415,15 @@ func TestProjectSelfHealing_otherRefusalIsNotCalledTooOld(t *testing.T) {
   }`),
 			},
 			{
-				// The merged windows are refused; rollback and monitor_rollback
-				// ride along.
+				// The merged windows are refused; rollback, monitor_rollback and
+				// hotfix_incident_fixes ride along.
 				Config: projectConfig(env, identifier, `
   name = "Windows"
   self_healing = {
-    rollback             = "report"
-    monitor_rollback     = "off"
-    short_window_minutes = 60
+    rollback              = "report"
+    monitor_rollback      = "off"
+    hotfix_incident_fixes = false
+    short_window_minutes  = 60
   }`),
 				ExpectError: regexMust(`(?s)Error\s+updating\s+Flightdeck\s+self-healing\s+configuration.*short_window_minutes\s+\(60\)`),
 			},

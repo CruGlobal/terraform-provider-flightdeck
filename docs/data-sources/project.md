@@ -125,6 +125,7 @@ Read-Only:
 - `cooldown_minutes` (Number) Cooldown between actions, in minutes.
 - `count_browser_errors` (Boolean) Whether errors sent with a browser token count toward the error rate the loop acts on. Null on a Flightdeck that predates the setting.
 - `feature_enabled` (Boolean) Whether the control loop runs at all, in report only or auto-rollback.
+- `hotfix_incident_fixes` (Boolean) Whether a fix that merges while a self-healing incident is open is built as a hotfix of the live release onto the release candidate environment. Flightdeck never promotes it by itself. Null on a Flightdeck that predates the setting.
 - `long_window_minutes` (Number) Long burn-rate window in minutes.
 - `max_rollbacks_per_hour` (Number) Per-app blast-radius cap.
 - `monitor_rollback` (String) Whether an incident from a monitor can trip the loop: `"off"`, `"report"` or `"auto"`. Null on a Flightdeck that predates the setting.

@@ -35,7 +35,8 @@ resource "flightdeck_project" "sandbox" {
 # lets Flightdeck roll production back by itself when every check passes.
 # `monitor_rollback` lets an incident from a monitor trip the loop too, through
 # a flightdeck_routing_key with self_healing_trigger on; "report" records what
-# it would do first.
+# it would do first. `hotfix_incident_fixes` builds a fix that merges while an
+# incident is open as a hotfix of the live release; a person still promotes it.
 resource "flightdeck_project" "payments" {
   name       = "Payments"
   identifier = "PAY"
@@ -44,6 +45,7 @@ resource "flightdeck_project" "payments" {
     feature_enabled        = true
     rollback               = "report"
     monitor_rollback       = "report"
+    hotfix_incident_fixes  = true
     bake_minutes           = 30
     burn_rate              = 10.0
     max_rollbacks_per_hour = 2

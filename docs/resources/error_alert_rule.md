@@ -112,7 +112,7 @@ Optional:
 - `create_work_item` (Boolean) Create a work item for the error group.
 - `escalation_policy_id` (Number) Escalation policy (in this project) that `open_incident` routes to. Omit to open an unrouted incident.
 - `file_intake` (Boolean) File an intake request for triage.
-- `notify_email` (Boolean) Email the project's members.
+- `notify_email` (Boolean) Email the error's followers and assignee. When it has none, email the people who can read the project and have opted in to alerts for errors nobody follows, which is nobody until someone opts in. Each person's own notification settings decide whether they get it. For delivery that doesn't depend on personal settings, use `notify_slack` or `notify_webhook`.
 - `notify_slack` (Boolean) Post to the project's Slack channel.
 - `notify_webhook` (Boolean) POST the alert to `webhook_url`.
 - `open_incident` (Boolean) Open an incident (requires the project's `incidents` feature).

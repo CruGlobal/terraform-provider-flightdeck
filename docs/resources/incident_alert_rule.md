@@ -104,7 +104,7 @@ Optional:
 
 - `create_work_item` (Boolean) Create a work item for the incident.
 - `file_intake` (Boolean) File an intake request for triage.
-- `notify_email` (Boolean) Email the project's members.
+- `notify_email` (Boolean) Email the incident's assignee, the project lead and the project's admins, if they can read the project. Each person's own notification settings decide whether they get it.
 - `notify_slack` (Boolean) Post to the project's Slack channel.
 - `notify_webhook` (Boolean) POST the alert to `webhook_url`.
 - `priority_map` (Map of String) Priority to give whatever this rule files, per incident severity. Keys are `critical`, `error`, `warning`, `info`; values are `none`, `low`, `medium`, `high`, `urgent`. The default table is `critical` → `urgent`, `error` → `high`, `warning` → `medium`, `info` → `low`.

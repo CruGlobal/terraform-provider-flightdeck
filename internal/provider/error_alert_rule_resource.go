@@ -95,6 +95,12 @@ func (r *errorAlertRuleResource) Configure(_ context.Context, req resource.Confi
 	r.client = clientFromProviderData(req.ProviderData, &resp.Diagnostics)
 }
 
+// errorAlertNotifyEmailDescription says who action.notify_email reaches.
+const errorAlertNotifyEmailDescription = "Email the error's followers and assignee. When it has none, email the " +
+	"people who can read the project and have opted in to alerts for errors nobody follows, which is nobody until " +
+	"someone opts in. Each person's own notification settings decide whether they get it. For delivery that doesn't " +
+	"depend on personal settings, use `notify_slack` or `notify_webhook`."
+
 func (r *errorAlertRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	emptyCondition := types.ObjectValueMust(alertConditionAttrTypes, map[string]attr.Value{
 		"min_level": types.StringNull(), "environment": types.StringNull(),
@@ -198,7 +204,7 @@ func (r *errorAlertRuleResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Required:            true,
 				Attributes: map[string]schema.Attribute{
 					"notify_slack":     boolFlag("Post to the project's Slack channel."),
-					"notify_email":     boolFlag("Email the project's members."),
+					"notify_email":     boolFlag(errorAlertNotifyEmailDescription),
 					"create_work_item": boolFlag("Create a work item for the error group."),
 					"file_intake":      boolFlag("File an intake request for triage."),
 					"notify_webhook":   boolFlag("POST the alert to `webhook_url`."),

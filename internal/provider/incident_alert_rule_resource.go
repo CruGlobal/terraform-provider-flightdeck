@@ -123,6 +123,10 @@ func (r *incidentAlertRuleResource) Configure(_ context.Context, req resource.Co
 	r.client = clientFromProviderData(req.ProviderData, &resp.Diagnostics)
 }
 
+// incidentAlertNotifyEmailDescription says who action.notify_email reaches.
+const incidentAlertNotifyEmailDescription = "Email the incident's assignee, the project lead and the project's " +
+	"admins, if they can read the project. Each person's own notification settings decide whether they get it."
+
 func (r *incidentAlertRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	emptyCondition := types.ObjectValueMust(incidentConditionAttrTypes, map[string]attr.Value{
 		"min_severity": types.StringNull(), "count": types.Int64Null(), "window_minutes": types.Int64Null(),
@@ -217,7 +221,7 @@ func (r *incidentAlertRuleResource) Schema(_ context.Context, _ resource.SchemaR
 				Required: true,
 				Attributes: map[string]schema.Attribute{
 					"notify_slack":     boolFlag("Post to the project's Slack channel."),
-					"notify_email":     boolFlag("Email the project's members."),
+					"notify_email":     boolFlag(incidentAlertNotifyEmailDescription),
 					"create_work_item": boolFlag("Create a work item for the incident."),
 					"file_intake":      boolFlag("File an intake request for triage."),
 					"notify_webhook":   boolFlag("POST the alert to `webhook_url`."),

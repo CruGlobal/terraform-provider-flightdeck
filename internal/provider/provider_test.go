@@ -34,9 +34,10 @@ const (
 )
 
 // liveReady records which resources' acceptance tests may run against a live
-// Flightdeck. Every API these depend on has shipped; set an entry to false to
-// gate a resource again while its API is being changed. The unit-test run (no
-// TF_ACC) is unaffected by this table.
+// Flightdeck. An entry is true once the API it depends on has shipped to the
+// live endpoint the acceptance run uses; set one to false to gate a resource
+// while its API is new or being changed. The unit-test run (no TF_ACC) is
+// unaffected by this table.
 var liveReady = map[string]bool{
 	"project":               true,
 	"state":                 true,
@@ -55,6 +56,9 @@ var liveReady = map[string]bool{
 	"workspace_member":      true,
 	"agent_work":            true,
 	"teamspace":             true,
+	// The service-account API has not shipped to the live endpoint yet. Set
+	// this to true once it has.
+	"service_account": false,
 }
 
 // testEnv is what a test needs to point the provider at a backend.

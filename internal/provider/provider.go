@@ -54,7 +54,8 @@ func (p *flightdeckProvider) Schema(_ context.Context, _ provider.SchemaRequest,
 			"PagerDuty links and outbound webhooks — through its REST API, so that configuration can live in " +
 			"Terraform alongside the rest of an application's infrastructure. Flightdeck is a project-management " +
 			"application (workspaces, projects, work items) with built-in error tracking and incident management. " +
-			"The provider also manages teamspaces, the teams that own projects, with their members and projects.\n\n" +
+			"The provider also manages teamspaces, the teams that own projects, with their members and projects, " +
+			"and service accounts, the logins applications call Flightdeck with, with their API tokens.\n\n" +
 			"## Authentication\n\n" +
 			"The provider authenticates with a Flightdeck **personal access token** (`fd_pat_…`), created under " +
 			"your account's API tokens page in the Flightdeck UI. A token is bound to one workspace, so a provider " +
@@ -166,6 +167,8 @@ func (p *flightdeckProvider) Resources(_ context.Context) []func() resource.Reso
 		NewTeamspaceResource,
 		NewTeamspaceMemberResource,
 		NewTeamspaceProjectResource,
+		NewServiceAccountResource,
+		NewServiceAccountAPITokenResource,
 	}
 }
 

@@ -18,7 +18,9 @@ error and incident alert rules, the Events API routing keys external
 monitors use to open incidents, where incidents page, and outbound
 webhooks — can live in Terraform next to the rest of that application's
 infrastructure. It also manages teamspaces, the teams that say who owns
-a project, with their members and the projects they own.
+a project, with their members and the projects they own, and service
+accounts, the logins applications call Flightdeck with, with their API
+tokens.
 
 It deliberately does **not** manage runtime planning data (work items,
 sprints, epics, comments). Those belong to the people using the
@@ -42,6 +44,8 @@ project, not to infrastructure code.
 | `flightdeck_teamspace` | A teamspace: a team in the workspace (name, description, lead). Names are not unique. |
 | `flightdeck_teamspace_member` | A workspace member's place on a teamspace. |
 | `flightdeck_teamspace_project` | A teamspace's ownership of a project. A project can belong to several teams. |
+| `flightdeck_service_account` | A service account: a login for an application, not a person. Its `id` is the user id `flightdeck_project_member` takes. Needs a workspace owner or admin token. |
+| `flightdeck_service_account_api_token` | A service account's REST API token (the secret is returned once, on create). Needs a workspace owner or admin token. |
 
 | Data source | Resolves |
 | --- | --- |
@@ -120,8 +124,8 @@ Full reference docs (generated from the provider schema) live in
 - Every create carries an `Idempotency-Key` derived from the resource's
   identity, so a retried create replays the original instead of making a
   duplicate.
-- Routing keys, ingestion tokens and webhooks return their secret only to
-  the create that made them, so a replay cannot hand it back. When a create's
+- Routing keys, ingestion tokens, service account API tokens and webhooks
+  return their secret only to the create that made them, so a replay cannot hand it back. When a create's
   response is lost and the retry meets the record it made, the provider
   revokes that record (nobody holds its secret) and creates another. When the
   record was made by something else, such as a second resource declared with
@@ -130,7 +134,9 @@ Full reference docs (generated from the provider schema) live in
 - Every update carries the resource's `lock_version` as an `If-Match`
   precondition. If something else changed the resource in between, the
   API answers 409 and the provider reports it instead of overwriting;
-  re-run `terraform plan` to pick up the change.
+  re-run `terraform plan` to pick up the change. A service account has
+  no `lock_version`, so renaming one carries no precondition: the last
+  write wins.
 - Rate limiting (HTTP 429) is handled with client-side backoff that
   honours `Retry-After`.
 - Each attempt at a request has 60 seconds to be answered. One that times
@@ -144,7 +150,9 @@ Full reference docs (generated from the provider schema) live in
   version there is answered by re-reading once and deleting with the
   current version. A project delete carries no precondition; if it loses
   a race to a write that added something to the project while it was
-  being deleted (a 409), it is sent once more.
+  being deleted (a 409), it is sent once more. Service accounts and
+  their API tokens have no `lock_version`, so their deletes carry none
+  either.
 - A 404 always means "gone from this token's point of view" (including
   ids in another workspace, anything in a project the token cannot see,
   and projects mid-teardown) and removes the resource from state. On
@@ -253,9 +261,10 @@ identifier) or make copies. Instead:
 ### Importing existing resources
 
 Projects import by numeric id or by identifier; states, labels, webhooks,
-GitHub integrations and teamspaces by their own numeric id; a
-teamspace's members and projects by `<teamspace_id>/<user_id>` and
-`<teamspace_id>/<project_id>`; project members,
+GitHub integrations, teamspaces and service accounts by their own numeric
+id; a teamspace's members and projects by `<teamspace_id>/<user_id>` and
+`<teamspace_id>/<project_id>`; a service account's API tokens by
+`<service_account_id>/<token_id>`; project members,
 ingestion tokens, error alert rules, incident alert rules and routing
 keys by `<project_id>/<id>` (members also by
 `<project_id>/user:<user_id>`); the PagerDuty link by the project id
@@ -271,6 +280,8 @@ terraform import flightdeck_incident_alert_rule.opened 42/13
 terraform import flightdeck_pagerduty_integration.app 42
 terraform import flightdeck_teamspace.platform 12
 terraform import flightdeck_teamspace_project.app 12/42
+terraform import flightdeck_service_account.deploy 980190966
+terraform import flightdeck_service_account_api_token.deploy 980190966/2129
 ```
 
 Each resource's documentation page shows its import command.

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.17.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.16.0...v0.17.0) (2026-11-18)
+
+
+### Added
+
+* add flightdeck_service_account and flightdeck_service_account_api_token ([#74](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/74)) ([be45655](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/be456552bf5e5fc47f5e231f09ad6de1a31200e5))
+* manage self_healing.hotfix_incident_fixes on flightdeck_project ([#70](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/70)) ([13e517d](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/13e517dab0354c3d517350f0f2c506bb262f12a0))
+
+
+### Fixed
+
+* say who an alert rule's notify_email reaches ([#71](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/71)) ([f109927](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/f10992737317145815dea0cc8e6f02a28fae2991))
+
+
+### Changed
+
+* **deps:** Bump golang.org/x/text from 0.43.0 to 0.44.0 in the go-dependencies group ([#73](https://github.com/CruGlobal/terraform-provider-flightdeck/issues/73)) ([8c129d8](https://github.com/CruGlobal/terraform-provider-flightdeck/commit/8c129d8125767d95b8974259672a710de3e8bdae))
+
 ## [0.16.0](https://github.com/CruGlobal/terraform-provider-flightdeck/compare/v0.15.0...v0.16.0) (2026-11-12)
 
 

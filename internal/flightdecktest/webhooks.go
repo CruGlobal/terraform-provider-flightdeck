@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 // WebhookEvents are the events a webhook may subscribe to.
@@ -29,6 +30,8 @@ type Webhook struct {
 	Secret      string
 	Active      bool
 	LockVersion int64
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 type webhookStore struct{ byID map[int64]*Webhook }
@@ -68,6 +71,7 @@ func (s *Server) TouchWebhook(id int64, active bool) {
 	if w := s.webhooks().byID[id]; w != nil {
 		w.Active = active
 		w.LockVersion++
+		w.UpdatedAt = time.Now()
 	}
 }
 
@@ -86,6 +90,7 @@ func serializeWebhook(h *Webhook, withSecret bool) map[string]any {
 	out := map[string]any{
 		"id": h.ID, "workspace_id": 1, "project_id": h.ProjectID, "url": h.URL, "events": events,
 		"active": h.Active, "lock_version": h.LockVersion,
+		"created_at": iso(h.CreatedAt), "updated_at": iso(h.UpdatedAt),
 	}
 	if withSecret {
 		out["secret"] = h.Secret
@@ -222,7 +227,8 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 	s.withIdempotencyRedacted(w, r, "webhook", s.webhookWithheld(), func() (int, any, any) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		h := &Webhook{ID: s.id(), Active: true}
+		now := time.Now()
+		h := &Webhook{ID: s.id(), Active: true, CreatedAt: now, UpdatedAt: now}
 		if status, code, msg := s.applyWebhookAttrs(h, attrs); status != 0 {
 			return status, errorBody(msg, code), nil
 		}
@@ -269,6 +275,7 @@ func (s *Server) updateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	candidate.LockVersion++
+	candidate.UpdatedAt = time.Now()
 	*h = candidate
 	writeJSON(w, http.StatusOK, serializeWebhook(h, false))
 }

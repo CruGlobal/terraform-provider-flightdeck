@@ -139,7 +139,7 @@ func (s *Server) serializeGithubIntegration(g *GithubIntegration) map[string]any
 		"id": g.ID, "project_id": g.ProjectID, "repo_full_name": g.RepoFullName,
 		"enabled": g.Enabled, "ci_failure_action": g.CIFailureAction,
 		"webhook_registered": g.WebhookRegistered,
-		"lock_version":       g.LockVersion, "created_at": iso(g.CreatedAt), "updated_at": iso(g.CreatedAt),
+		"lock_version":       g.LockVersion, "created_at": iso(g.CreatedAt),
 	}
 	if s.githubIntegrations().readsCIWorkflows() {
 		out["ci_workflows"] = append([]string{}, g.CIWorkflows...)

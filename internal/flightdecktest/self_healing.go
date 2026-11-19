@@ -608,6 +608,9 @@ func (s *Server) serializeSelfHealing(p *Project) map[string]any {
 			out[k] = v
 		}
 		out["auto_promote_blockers"] = s.autoPromoteBlockers(p)
+		// The eligibility check's newest answer, null while auto-promote is
+		// off or before the first check. The fake never runs the check.
+		out["auto_promote_status"] = nil
 	}
 	out["writable_settings"] = s.selfHealingWritable()
 	return out

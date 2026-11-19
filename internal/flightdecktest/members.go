@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"time"
 )
 
 var builtinProjectRoles = []string{"guest", "member", "admin", "commenter"}
@@ -17,6 +18,8 @@ type ProjectMember struct {
 	Role        string
 	BuiltinRole string
 	LockVersion int64
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 type memberStore struct {
@@ -29,7 +32,8 @@ func init() {
 		s.stores["members"] = &memberStore{byID: map[int64]*ProjectMember{}}
 		// The creator is written in as project admin on every create.
 		s.projectHooks = append(s.projectHooks, func(s *Server, p *Project) {
-			m := &ProjectMember{ID: s.id(), ProjectID: p.ID, UserID: 1, Role: "admin", BuiltinRole: "admin"}
+			m := &ProjectMember{ID: s.id(), ProjectID: p.ID, UserID: 1, Role: "admin", BuiltinRole: "admin",
+				CreatedAt: p.CreatedAt, UpdatedAt: p.CreatedAt}
 			s.projectMembers().byID[m.ID] = m
 		})
 		mux.HandleFunc("GET /api/v1/projects/{project_id}/members", s.listMembers)
@@ -74,6 +78,7 @@ func (s *Server) TouchMember(membershipID int64, role string) {
 		m.Role = role
 		m.BuiltinRole = role
 		m.LockVersion++
+		m.UpdatedAt = time.Now()
 	}
 }
 
@@ -134,6 +139,7 @@ func (s *Server) serializeMember(m *ProjectMember) map[string]any {
 	out := map[string]any{
 		"id": m.ID, "project_id": m.ProjectID, "user_id": m.UserID, "role": m.Role,
 		"builtin_role": m.BuiltinRole, "lock_version": m.LockVersion,
+		"created_at": iso(m.CreatedAt), "updated_at": iso(m.UpdatedAt),
 		"name": nil, "email": nil,
 	}
 	if u := s.workspaceUser(m.UserID); u != nil {
@@ -222,7 +228,9 @@ func (s *Server) createMember(w http.ResponseWriter, r *http.Request) {
 			}
 			userID = id
 		}
-		m := &ProjectMember{ID: s.id(), ProjectID: pid, UserID: userID, Role: "member", BuiltinRole: "member"}
+		now := time.Now()
+		m := &ProjectMember{ID: s.id(), ProjectID: pid, UserID: userID, Role: "member", BuiltinRole: "member",
+			CreatedAt: now, UpdatedAt: now}
 		if v, has := attrs["role"]; has {
 			if !s.applyRole(m, asString(v)) {
 				return http.StatusUnprocessableEntity, errorBody("unknown role: "+asString(v), "invalid_attribute")
@@ -286,6 +294,7 @@ func (s *Server) updateMember(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	m.LockVersion++
+	m.UpdatedAt = time.Now()
 	writeJSON(w, http.StatusOK, s.serializeMember(m))
 }
 

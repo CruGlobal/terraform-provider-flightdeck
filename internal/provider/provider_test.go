@@ -56,9 +56,7 @@ var liveReady = map[string]bool{
 	"workspace_member":      true,
 	"agent_work":            true,
 	"teamspace":             true,
-	// The service-account API has not shipped to the live endpoint yet. Set
-	// this to true once it has.
-	"service_account": false,
+	"service_account":       true,
 }
 
 // testEnv is what a test needs to point the provider at a backend.

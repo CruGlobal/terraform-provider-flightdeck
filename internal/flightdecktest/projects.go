@@ -288,6 +288,9 @@ func (s *Server) serializeProject(p *Project, detail bool) map[string]any {
 		"description": p.Description, "emoji": p.Emoji, "archived": p.Archived,
 		"features": features, "github_repo_full_name": p.GithubRepoFullName,
 		"lead_id": lead, "network": p.Network, "app": nullableString(p.App),
+		// url is the project's page in the app. The fake doesn't model nested
+		// projects, so parent_id is always null.
+		"url": fmt.Sprintf("%s/acme/projects/%d", s.URL, p.ID), "parent_id": nil,
 		"lock_version": p.LockVersion,
 		"created_at":   iso(p.CreatedAt), "updated_at": iso(p.UpdatedAt),
 	}
@@ -296,6 +299,7 @@ func (s *Server) serializeProject(p *Project, detail bool) map[string]any {
 	}
 	if detail {
 		out["urls"] = []any{}
+		out["google_files"] = []any{}
 	}
 	return out
 }

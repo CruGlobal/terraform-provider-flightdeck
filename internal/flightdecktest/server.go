@@ -4,7 +4,9 @@
 // Idempotency-Key replay, If-Match / lock_version preconditions, 202 on project
 // delete, 429 throttling — so the provider can be exercised end to end through
 // Terraform without a live deployment. Anything the fake accepts that the real
-// API would reject is a bug in the fake, not a feature.
+// API would reject is a bug in the fake, not a feature. Every answer it gives
+// is checked against Flightdeck's OpenAPI document (openapi.go), and one the
+// document doesn't describe fails the test that got it.
 package flightdecktest
 
 import (
@@ -57,6 +59,15 @@ type Server struct {
 	mu     sync.Mutex
 	token  string
 	nextID int64
+
+	// t is the test the fake serves, failed when the fake gives an answer
+	// Flightdeck's OpenAPI document doesn't describe (see openapi.go).
+	t testing.TB
+	// mismatches are the problems already reported, so each is reported once.
+	mismatches map[string]bool
+	// serving counts the requests still being handled, so the test can't end
+	// while one of them might still report a mismatch.
+	serving sync.WaitGroup
 
 	// Workspace-level fixtures.
 	members []User
@@ -137,9 +148,18 @@ var resourceHooks []resourceHook
 
 // New starts a fake bound to a random local port and stops it when the test
 // ends. It seeds one workspace member (id 1) who owns the token.
+//
+// Every answer the fake gives to an /api/v1 request is checked against
+// Flightdeck's OpenAPI document, and one the document doesn't describe fails
+// t, naming the operation, the status and each mismatch.
 func New(t testing.TB) *Server {
 	t.Helper()
+	if _, err := loadContract(); err != nil {
+		t.Fatalf("flightdecktest: can't check the fake's answers: %v", err)
+	}
 	s := &Server{
+		t:              t,
+		mismatches:     map[string]bool{},
 		token:          DefaultToken,
 		nextID:         1000,
 		stores:         map[string]any{},
@@ -159,6 +179,7 @@ func New(t testing.TB) *Server {
 	currentServer = s
 	t.Cleanup(func() {
 		s.Close()
+		s.serving.Wait()
 		if currentServer == s {
 			currentServer = nil
 		}
@@ -224,6 +245,11 @@ func (s *Server) DropNextResponse(method, pathSuffix string) {
 // RefuseNext makes the next request with the given method whose path ends in
 // pathSuffix answer the given error without being served, so nothing it asks
 // for happens. It runs after authentication and any OnNextRequest hook.
+//
+// A refusal below 500 stands for Flightdeck's own answer, and is checked
+// against its OpenAPI document like any other. One of 500 or more stands for
+// a gateway in front of Flightdeck (a load balancer's 502, say), which the
+// document doesn't describe, so it isn't checked.
 func (s *Server) RefuseNext(method, pathSuffix string, status int, code, message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -285,6 +311,20 @@ type statusRecorder struct {
 	http.ResponseWriter
 	status int
 	body   bytes.Buffer
+	// served is the header of an answer served into another recorder, for a
+	// response the client never got (or got late); nil means Header().
+	served http.Header
+	// gateway marks an answer that stands for a gateway in front of
+	// Flightdeck, not the API, so it isn't checked (see RefuseNext).
+	gateway bool
+}
+
+// answerHeader is the header the fake answered with.
+func (r *statusRecorder) answerHeader() http.Header {
+	if r.served != nil {
+		return r.served
+	}
+	return r.Header()
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
@@ -302,13 +342,16 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		body, _ := io.ReadAll(r.Body)
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		s.serving.Add(1)
 		defer func() {
+			defer s.serving.Done()
 			s.mu.Lock()
 			s.requests = append(s.requests, RecordedRequest{
 				Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery,
 				Header: r.Header.Clone(), Body: body, Status: rec.status, Response: rec.body.Bytes(),
 			})
 			s.mu.Unlock()
+			s.checkAnswer(r, rec)
 		}()
 
 		if !strings.HasPrefix(r.URL.Path, "/api/v1") {
@@ -345,10 +388,8 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			writeError(rec, http.StatusUnauthorized, "unauthorized", "Invalid or missing API token")
 			return
 		}
-		if r.Header.Get("Accept") != "" && !strings.Contains(r.Header.Get("Accept"), "json") && !strings.Contains(r.Header.Get("Accept"), "*/*") {
-			writeError(rec, http.StatusNotAcceptable, "not_acceptable", "JSON only")
-			return
-		}
+		// No Accept check: the API answers JSON whatever Accept says, and
+		// never 406 (the document lists no 406, and no not_acceptable code).
 		s.mu.Lock()
 		for i, h := range s.beforeRequest {
 			if h.method == r.Method && h.path == r.URL.Path {
@@ -369,6 +410,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		}
 		if refused != nil {
 			s.mu.Unlock()
+			rec.gateway = refused.status >= http.StatusInternalServerError
 			writeError(rec, refused.status, refused.code, refused.message)
 			return
 		}
@@ -400,6 +442,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				// The client gave up; record what the server did and stop.
 				rec.status = held.status
 				rec.body.Write(held.body.Bytes())
+				rec.served = held.Header()
 				return
 			}
 			for k, v := range held.Header() {
@@ -415,6 +458,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			next.ServeHTTP(lost, r)
 			rec.status = lost.status
 			rec.body.Write(lost.body.Bytes())
+			rec.served = lost.Header()
 			if hj, ok := w.(http.Hijacker); ok {
 				if conn, _, err := hj.Hijack(); err == nil {
 					_ = conn.Close()
@@ -431,7 +475,11 @@ func (s *Server) routes(mux *http.ServeMux) {
 		s.mu.Lock()
 		me := s.members[0]
 		s.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{"id": me.ID, "name": me.Name, "email": me.Email, "workspace_id": 1})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"user":      map[string]any{"id": me.ID, "name": me.Name, "email": me.Email},
+			"workspace": map[string]any{"id": 1, "slug": "acme", "name": "Acme"},
+			"token":     map[string]any{"id": 1, "name": "Terraform", "last_used_at": nil},
+		})
 	})
 	for _, hook := range resourceHooks {
 		hook(s, mux)

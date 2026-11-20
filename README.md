@@ -318,6 +318,12 @@ pagination, the error envelope, `Idempotency-Key` replay, `If-Match`
 preconditions, 429 throttling — so the whole provider is testable
 without a deployment. The terraform CLI must be on `PATH`.
 
+Every answer the fake gives is checked against Flightdeck's own OpenAPI
+document, vendored in `internal/flightdecktest/openapi/` (its README says
+where it came from and how to refresh it). A fake answer with a status or
+shape the real API would never give fails the test that got it, so the fake
+can't quietly be kinder than Flightdeck.
+
 The same tests run against a live Flightdeck when `TF_ACC=1` and
 `FLIGHTDECK_ENDPOINT` / `FLIGHTDECK_TOKEN` point at a **dedicated test
 workspace** (they create and delete projects). The token's user must be a

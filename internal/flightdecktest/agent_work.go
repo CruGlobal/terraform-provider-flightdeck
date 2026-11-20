@@ -1115,6 +1115,11 @@ func (s *Server) serializeAgentWork(p *Project, row AgentWorkSetting) map[string
 	if s.agentWorkStore().knowsModels() {
 		// An object, {} when no kind has a model.
 		out["models"] = copyModels(row.Models)
+		// The newest release also has send_incidents and its read-only
+		// send_incidents_since. The provider doesn't manage them and the fake
+		// doesn't model them, so they always read as off.
+		out["send_incidents"] = false
+		out["send_incidents_since"] = nil
 	}
 	if s.agentWorkStore().knowsSendErrors() {
 		out["send_errors"] = row.SendErrors

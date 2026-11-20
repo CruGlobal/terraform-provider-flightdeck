@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 var (
@@ -27,6 +28,8 @@ type ErrorAlertRule struct {
 	Condition   map[string]any
 	Action      map[string]any
 	LockVersion int64
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 type errorAlertRuleStore struct {
@@ -78,6 +81,7 @@ func (s *Server) TouchErrorAlertRule(id int64, name string) {
 	if r := s.errorAlertRules().byID[id]; r != nil {
 		r.Name = name
 		r.LockVersion++
+		r.UpdatedAt = time.Now()
 	}
 }
 
@@ -110,9 +114,17 @@ func serializeRule(r *ErrorAlertRule) map[string]any {
 	for k, v := range r.Action {
 		action[k] = v
 	}
+	// `actions` is the ordered list of enabled flags, computed on read.
+	actions := []any{}
+	for _, k := range alertActionKeys {
+		if truthy(r.Action[k]) {
+			actions = append(actions, k)
+		}
+	}
 	return map[string]any{
 		"id": r.ID, "project_id": r.ProjectID, "name": r.Name, "enabled": r.Enabled,
-		"trigger": r.Trigger, "condition": condition, "action": action, "lock_version": r.LockVersion,
+		"trigger": r.Trigger, "condition": condition, "action": action, "actions": actions,
+		"lock_version": r.LockVersion, "created_at": iso(r.CreatedAt), "updated_at": iso(r.UpdatedAt),
 	}
 }
 
@@ -354,7 +366,9 @@ func (s *Server) createErrorAlertRule(w http.ResponseWriter, r *http.Request) {
 		if project == nil {
 			return http.StatusNotFound, errorBody("Not found", "not_found")
 		}
-		rule := &ErrorAlertRule{ID: s.id(), ProjectID: pid, Enabled: true, Trigger: "new_group", Condition: map[string]any{}, Action: map[string]any{}}
+		now := time.Now()
+		rule := &ErrorAlertRule{ID: s.id(), ProjectID: pid, Enabled: true, Trigger: "new_group", Condition: map[string]any{}, Action: map[string]any{},
+			CreatedAt: now, UpdatedAt: now}
 		if status, code, msg := s.applyRuleAttrs(rule, attrs, project, true); status != 0 {
 			return status, errorBody(msg, code)
 		}
@@ -392,6 +406,7 @@ func (s *Server) updateErrorAlertRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	candidate.LockVersion++
+	candidate.UpdatedAt = time.Now()
 	*rule = candidate
 	writeJSON(w, http.StatusOK, serializeRule(rule))
 }

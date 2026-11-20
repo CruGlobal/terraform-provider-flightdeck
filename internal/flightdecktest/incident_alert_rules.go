@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 var (
@@ -39,6 +40,8 @@ type IncidentAlertRule struct {
 	Condition   map[string]any
 	Action      map[string]any
 	LockVersion int64
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 type incidentAlertRuleStore struct {
@@ -68,6 +71,7 @@ func (s *Server) TouchIncidentAlertRule(id int64, name string) {
 	if r := s.incidentAlertRules().byID[id]; r != nil {
 		r.Name = name
 		r.LockVersion++
+		r.UpdatedAt = time.Now()
 	}
 }
 
@@ -79,6 +83,7 @@ func (s *Server) SetIncidentAlertRuleEnabled(id int64, enabled bool) {
 	if r := s.incidentAlertRules().byID[id]; r != nil {
 		r.Enabled = enabled
 		r.LockVersion++
+		r.UpdatedAt = time.Now()
 	}
 }
 
@@ -126,6 +131,7 @@ func serializeIncidentRule(r *IncidentAlertRule) map[string]any {
 		"id": r.ID, "project_id": r.ProjectID, "name": r.Name, "enabled": r.Enabled,
 		"trigger": r.Trigger, "condition": condition, "action": action, "actions": actions,
 		"priority_map": effectivePriorities(r.Action), "lock_version": r.LockVersion,
+		"created_at": iso(r.CreatedAt), "updated_at": iso(r.UpdatedAt),
 	}
 }
 
@@ -346,9 +352,10 @@ func (s *Server) createIncidentAlertRule(w http.ResponseWriter, r *http.Request)
 				"Incident management must be enabled for this project before an incident alert rule can be created (Project Settings → Features)",
 				"validation_failed")
 		}
+		now := time.Now()
 		rule := &IncidentAlertRule{
 			ID: s.id(), ProjectID: pid, Enabled: true, Trigger: "incident_opened",
-			Condition: map[string]any{}, Action: map[string]any{},
+			Condition: map[string]any{}, Action: map[string]any{}, CreatedAt: now, UpdatedAt: now,
 		}
 		if status, code, msg := s.applyIncidentRuleAttrs(rule, attrs); status != 0 {
 			return status, errorBody(msg, code)
@@ -387,6 +394,7 @@ func (s *Server) updateIncidentAlertRule(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	candidate.LockVersion++
+	candidate.UpdatedAt = time.Now()
 	*rule = candidate
 	writeJSON(w, http.StatusOK, serializeIncidentRule(rule))
 }
